@@ -153,9 +153,17 @@ import {
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import {
   isInlineAttachmentContentType,
-  normalizeIssueAttachmentMaxBytes,
   normalizeContentType,
 } from "../attachment-types.js";
+import { parseByteRangeHeader } from "../http/byte-range.js";
+import {
+  assertLargeUploadIsVideo,
+  discardUpload,
+  receiveCompanyFileUpload,
+  uploadLimitBytes,
+  type ReceivedUpload,
+} from "../http/file-uploads.js";
+import { companyFileLimits } from "../services/media-video-limits.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
@@ -2025,37 +2033,6 @@ export function issueRoutes(
     };
   }
 
-  type ParsedAttachmentRange =
-    | { kind: "none" }
-    | { kind: "invalid" }
-    | { kind: "range"; start: number; end: number };
-
-  function parseAttachmentRangeHeader(raw: string | undefined, contentLength: number): ParsedAttachmentRange {
-    if (!raw) return { kind: "none" };
-    if (!Number.isSafeInteger(contentLength) || contentLength <= 0) return { kind: "invalid" };
-
-    const prefix = "bytes=";
-    if (!raw.toLowerCase().startsWith(prefix)) return { kind: "invalid" };
-    const spec = raw.slice(prefix.length).trim();
-    if (!spec || spec.includes(",")) return { kind: "invalid" };
-
-    const [startRaw, endRaw] = spec.split("-", 2);
-    if (endRaw === undefined) return { kind: "invalid" };
-
-    if (startRaw === "") {
-      const suffixLength = Number.parseInt(endRaw, 10);
-      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return { kind: "invalid" };
-      const start = Math.max(contentLength - suffixLength, 0);
-      return { kind: "range", start, end: contentLength - 1 };
-    }
-
-    const start = Number.parseInt(startRaw, 10);
-    if (!Number.isSafeInteger(start) || start < 0 || start >= contentLength) return { kind: "invalid" };
-    const end = endRaw === "" ? contentLength - 1 : Number.parseInt(endRaw, 10);
-    if (!Number.isSafeInteger(end) || end < start) return { kind: "invalid" };
-    return { kind: "range", start, end: Math.min(end, contentLength - 1) };
-  }
-
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
   }
@@ -2225,17 +2202,57 @@ export function issueRoutes(
     return parsed;
   }
 
-  async function runSingleFileUpload(req: Request, res: Response, fileSizeLimit: number) {
-    const upload = multer({
-      storage: multer.memoryStorage(),
-      limits: { fileSize: fileSizeLimit, files: 1 },
-    });
-    await new Promise<void>((resolve, reject) => {
-      upload.single("file")(req, res, (err: unknown) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+  /**
+   * Receives the one "file" field of a task attachment or company file
+   * upload. D18: a video may be up to the company's video limit (2 GB by
+   * default) and is spooled to disk past the ordinary limit; every other
+   * file keeps the company's attachment limit and stays in memory, as
+   * before. Answers the 4xx itself and returns null when there is nothing
+   * to store; the caller removes the spool file (discardUpload).
+   */
+  async function receiveUpload(req: Request, res: Response, companyId: string, noun: "Attachment" | "File"): Promise<ReceivedUpload | null> {
+    const company = await companiesSvc.getById(companyId);
+    const limits = await companyFileLimits(db, companyId, company);
+    let file: ReceivedUpload | undefined;
+    try {
+      file = await receiveCompanyFileUpload(req, res, limits);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: `${noun} exceeds ${uploadLimitBytes(err, limits)} bytes` });
+          return null;
+        }
+        res.status(400).json({ error: err.message });
+        return null;
+      }
+      throw err;
+    }
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return null;
+    }
+    if (file.size <= 0) {
+      await discardUpload(file);
+      res.status(422).json({ error: `${noun} is empty` });
+      return null;
+    }
+    try {
+      await assertLargeUploadIsVideo(file, limits);
+    } catch (err) {
+      await discardUpload(file);
+      throw err;
+    }
+    return file;
+  }
+
+  /** Stores a received upload: from memory, or streamed from its spool file (a large video). */
+  async function storeUpload(companyId: string, namespace: string, file: ReceivedUpload) {
+    const contentType = normalizeContentType(file.mimetype);
+    const originalFilename = file.originalname || null;
+    if (file.path) {
+      return storage.putFileFromPath({ companyId, namespace, originalFilename, contentType, filePath: file.path });
+    }
+    return storage.putFile({ companyId, namespace, originalFilename, contentType, body: file.buffer ?? Buffer.alloc(0) });
   }
 
   async function assertCanManageIssueApprovalLinks(
@@ -9963,49 +9980,24 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
-    const company = await companiesSvc.getById(companyId);
-    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
-
-    try {
-      await runSingleFileUpload(req, res, attachmentMaxBytes);
-    } catch (err) {
-      if (err instanceof multer.MulterError) {
-        if (err.code === "LIMIT_FILE_SIZE") {
-          res.status(422).json({ error: `Attachment exceeds ${attachmentMaxBytes} bytes` });
-          return;
-        }
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      throw err;
-    }
-
-    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
-    if (!file) {
-      res.status(400).json({ error: "Missing file field 'file'" });
-      return;
-    }
-    const contentType = normalizeContentType(file.mimetype);
-    if (file.buffer.length <= 0) {
-      res.status(422).json({ error: "Attachment is empty" });
-      return;
-    }
+    const file = await receiveUpload(req, res, companyId, "Attachment");
+    if (!file) return;
 
     const parsedMeta = createIssueAttachmentMetadataSchema.safeParse(req.body ?? {});
     if (!parsedMeta.success) {
+      await discardUpload(file);
       res.status(400).json({ error: "Invalid attachment metadata", details: parsedMeta.error.issues });
       return;
     }
 
-    const actor = getActorInfo(req);
-    const stored = await storage.putFile({
-      companyId,
-      namespace: `issues/${issueId}`,
-      originalFilename: file.originalname || null,
-      contentType,
-      body: file.buffer,
-    });
+    let stored: Awaited<ReturnType<typeof storeUpload>>;
+    try {
+      stored = await storeUpload(companyId, `issues/${issueId}`, file);
+    } finally {
+      await discardUpload(file);
+    }
 
+    const actor = getActorInfo(req);
     const attachment = await svc.createAttachment({
       issueId,
       issueCommentId: parsedMeta.data.issueCommentId ?? null,
@@ -10050,43 +10042,17 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
-    const company = await companiesSvc.getById(companyId);
-    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+    const file = await receiveUpload(req, res, companyId, "File");
+    if (!file) return;
 
+    let stored: Awaited<ReturnType<typeof storeUpload>>;
     try {
-      await runSingleFileUpload(req, res, attachmentMaxBytes);
-    } catch (err) {
-      if (err instanceof multer.MulterError) {
-        if (err.code === "LIMIT_FILE_SIZE") {
-          res.status(422).json({ error: `File exceeds ${attachmentMaxBytes} bytes` });
-          return;
-        }
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      throw err;
-    }
-
-    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
-    if (!file) {
-      res.status(400).json({ error: "Missing file field 'file'" });
-      return;
-    }
-    const contentType = normalizeContentType(file.mimetype);
-    if (file.buffer.length <= 0) {
-      res.status(422).json({ error: "File is empty" });
-      return;
+      stored = await storeUpload(companyId, "company-files", file);
+    } finally {
+      await discardUpload(file);
     }
 
     const actor = getActorInfo(req);
-    const stored = await storage.putFile({
-      companyId,
-      namespace: "company-files",
-      originalFilename: file.originalname || null,
-      contentType,
-      body: file.buffer,
-    });
-
     const created = await svc.createCompanyFile({
       companyId,
       provider: stored.provider,
@@ -10129,7 +10095,7 @@ export function issueRoutes(
     assertCompanyAccess(req, attachment.companyId);
 
     const contentLength = attachment.byteSize;
-    const range = parseAttachmentRangeHeader(
+    const range = parseByteRangeHeader(
       typeof req.headers.range === "string" ? req.headers.range : undefined,
       contentLength,
     );
@@ -10169,6 +10135,10 @@ export function issueRoutes(
 
     object.stream.on("error", (err) => {
       next(err);
+    });
+    // A video player that seeks drops its earlier request: release the file at once (D18: videos up to 2 GB).
+    res.on("close", () => {
+      if (!object.stream.destroyed) object.stream.destroy?.();
     });
     if (range.kind === "range") {
       const rangeLength = range.end - range.start + 1;

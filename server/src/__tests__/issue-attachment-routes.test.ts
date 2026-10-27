@@ -383,6 +383,46 @@ describe("issue attachment routes", () => {
     expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
   });
 
+  it("D18: streams a video past the ordinary limit from disk into storage; other files keep the limit", async () => {
+    const storage = createStorageService();
+    const streamed: Array<{ namespace: string; contentType: string; size: number; head: string }> = [];
+    storage.putFileFromPath = vi.fn(async (input) => {
+      const { readFile } = await import("node:fs/promises");
+      const body = await readFile(input.filePath);
+      streamed.push({ namespace: input.namespace, contentType: input.contentType, size: body.length, head: body.subarray(4, 8).toString("latin1") });
+      return { provider: "local_disk", objectKey: `${input.namespace}/film.mp4`, contentType: input.contentType, byteSize: body.length, sha256: "sha", originalFilename: input.originalFilename };
+    });
+    mockCompanyService.getById.mockResolvedValue({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 16 });
+    mockIssueService.getById.mockResolvedValue({
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "99999999-9999-4999-8999-999999999999",
+      identifier: "PAP-1",
+    });
+    mockIssueService.createAttachment.mockResolvedValue(makeAttachment("video/mp4", "film.mp4"));
+    const video = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom", "latin1"), Buffer.alloc(4096, 9)]);
+
+    const app = await createApp(storage);
+    const res = await request(app)
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+    expect(res.status).toBe(201);
+    expect(streamed).toEqual([{ namespace: "issues/11111111-1111-4111-8111-111111111111", contentType: "video/mp4", size: video.length, head: "ftyp" }]);
+    expect(storage.__calls.putFile).toBeUndefined();
+    expect(mockIssueService.createAttachment).toHaveBeenCalledWith(expect.objectContaining({ contentType: "video/mp4", byteSize: video.length }));
+
+    // A file that only claims to be a video, and a large picture, keep the ordinary limit.
+    const fake = await request(app)
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .attach("file", Buffer.alloc(4096, 1), { filename: "x.mp4", contentType: "video/mp4" });
+    expect(fake.status).toBe(422);
+    const picture = await request(app)
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .attach("file", Buffer.alloc(4096, 1), { filename: "x.png", contentType: "image/png" });
+    expect(picture.status).toBe(422);
+    expect(picture.body.error).toBe("Attachment exceeds 16 bytes");
+    expect(streamed).toHaveLength(1);
+  });
+
   it("serves html attachments as downloads with nosniff", async () => {
     const storage = createStorageService();
     mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("text/html", "report.html"));

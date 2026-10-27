@@ -88,9 +88,11 @@ import { sanitizeRecord } from "../redaction.js";
 import { getStorageService } from "../storage/index.js";
 import {
   isAllowedContentType,
+  maxBytesForContentType,
   normalizeContentType,
-  normalizeIssueAttachmentMaxBytes,
 } from "../attachment-types.js";
+import { companyFileLimits, type CompanyFileLimits } from "./media-video-limits.js";
+import { sniffVideoContainer } from "./video-ffmpeg.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -296,6 +298,17 @@ const PLUGIN_FILE_READ_MAX_BYTES = 10 * 1024 * 1024;
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+/**
+ * D18: a file over the company's ordinary limit got through only because it
+ * is labelled a video; its first bytes must agree (MP4/MOV or WebM), so a
+ * large file of another kind cannot pass as a video to get the larger limit.
+ */
+function assertLargeFileIsVideo(buffer: Buffer, limits: CompanyFileLimits): void {
+  if (buffer.length > limits.attachmentMaxBytes && !sniffVideoContainer(buffer)) {
+    throw new Error("This file is too large for this company unless it is a video, and it is not an MP4, MOV or WebM video.");
+  }
 }
 
 type CompanyFileRow = {
@@ -2166,10 +2179,12 @@ export function buildHostServices(
         }
 
         const company = await companies.getById(companyId);
-        const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        const limits = await companyFileLimits(db, companyId, company);
+        const attachmentMaxBytes = maxBytesForContentType(contentType, limits);
         if (buffer.length > attachmentMaxBytes) {
           throw new Error(`Attachment exceeds ${attachmentMaxBytes} bytes`);
         }
+        assertLargeFileIsVideo(buffer, limits);
 
         const stored = await getStorage().putFile({
           companyId,
@@ -2958,11 +2973,14 @@ export function buildHostServices(
         if (buffer.length <= 0) {
           throw new Error("The file is empty");
         }
+        // D18: a video Media Studio made may be up to the company's video limit; other files keep the attachment limit.
         const company = await companies.getById(companyId);
-        const maxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        const limits = await companyFileLimits(db, companyId, company);
+        const maxBytes = maxBytesForContentType(contentType, limits);
         if (buffer.length > maxBytes) {
           throw new Error(`The file is larger than this company allows (${maxBytes} bytes)`);
         }
+        assertLargeFileIsVideo(buffer, limits);
 
         const stored = await getStorage().putFile({
           companyId,

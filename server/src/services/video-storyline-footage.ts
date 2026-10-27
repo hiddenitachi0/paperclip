@@ -12,6 +12,7 @@ import {
   type VideoUploadSummary,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
+import { applyInstanceVideoCeiling, mediaFootageHardLimits } from "./media-video-limits.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastAgeRefusals, readPluginState } from "./storyline-cast.js";
 import { storylineCompanyModel } from "./video-storyline-company-model.js";
@@ -170,23 +171,32 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
 
   // ─── Per-company settings ───
 
+  /** The company's settings as the server applies them (D18: video limits never above the server's ceiling). */
   async function getSettings(companyId: string): Promise<MediaFootageSettings> {
     const id = await pluginId();
-    if (!id) return readMediaFootageSettings(null);
+    if (!id) return applyInstanceVideoCeiling(readMediaFootageSettings(null));
     const row = await registry.getCompanySettings(id, companyId);
-    return readMediaFootageSettings((row?.settingsJson ?? null) as Record<string, unknown> | null);
+    return applyInstanceVideoCeiling(readMediaFootageSettings((row?.settingsJson ?? null) as Record<string, unknown> | null));
   }
 
   async function setSettings(companyId: string, patch: UpdateMediaFootageSettingsInput): Promise<MediaFootageSettings> {
     const id = await pluginId();
     if (!id) throw notFound("The media-studio plugin is not installed.");
+    // D18: the server may set a lower ceiling than the hard limit; say so instead of quietly saving less.
+    const hard = mediaFootageHardLimits();
+    if (patch.maxVideoMb !== undefined && patch.maxVideoMb > hard.maxVideoMb) {
+      throw unprocessable(`This server allows uploaded videos up to ${hard.maxVideoMb} MB. Choose ${hard.maxVideoMb} MB or less.`);
+    }
+    if (patch.maxVideoFileMb !== undefined && patch.maxVideoFileMb > hard.maxVideoFileMb) {
+      throw unprocessable(`This server allows video files up to ${hard.maxVideoFileMb} MB. Choose ${hard.maxVideoFileMb} MB or less.`);
+    }
     const existing = await registry.getCompanySettings(id, companyId);
     const next: Record<string, unknown> = { ...((existing?.settingsJson ?? {}) as Record<string, unknown>) };
     for (const [field, key] of Object.entries(MEDIA_FOOTAGE_SETTINGS_KEYS) as Array<[keyof MediaFootageSettings, string]>) {
       if (patch[field] !== undefined) next[key] = patch[field];
     }
     await registry.upsertCompanySettings(id, companyId, { settingsJson: next });
-    return readMediaFootageSettings(next);
+    return applyInstanceVideoCeiling(readMediaFootageSettings(next));
   }
 
   // ─── The picture-reading model (age check, transition context) ───

@@ -5,12 +5,15 @@ import { errorText, storylineFetchJson } from "./storyline-api.js";
 // videos -- the storage limit, upload limits, clean-up days, and "Never send
 // uploaded footage to Sogni" (on by default). Everyone in the company sees
 // them; only the owner or an admin can change them (the server enforces it).
+// D18: "Largest film or saved video" is the per-file limit for finished
+// films and videos kept in Files (2 GB by default, under the server's ceiling).
 
 type Settings = {
   storageQuotaBytes: number;
   maxVideoMb: number;
   maxPhotoMb: number;
   maxVideoSeconds: number;
+  maxVideoFileMb: number;
   cleanupDays: number;
   neverSendUploadsToSogni: boolean;
 };
@@ -82,6 +85,7 @@ export function FootageSettingsPanel({ companyId }: { companyId: string }) {
         {number("maxVideoMb", "Largest video (MB)")}
         {number("maxPhotoMb", "Largest photo (MB)")}
         {number("maxVideoSeconds", "Longest video (seconds)")}
+        {typeof draft.maxVideoFileMb === "number" && number("maxVideoFileMb", "Largest film or saved video (MB)")}
         {number("cleanupDays", "Clean up unused after (days)")}
       </div>
       <button

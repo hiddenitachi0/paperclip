@@ -186,6 +186,33 @@ describeEmbeddedPostgres("plugin-host-services files (company files not tied to 
     expect(await db.select().from(issueAttachments)).toHaveLength(0);
   });
 
+  it("D18: lets a video Media Studio made go past the company's ordinary file limit, but nothing else", async () => {
+    const { companyId, runId } = await seed();
+    await db.update(companies).set({ attachmentMaxBytes: 16 }).where(eq(companies.id, companyId));
+    const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom", "latin1"), Buffer.alloc(64, 1)]);
+    const storage = createStorageServiceStub();
+
+    const video = await services(storage).files.createCompanyFile({
+      companyId,
+      contentBase64: mp4.toString("base64"),
+      contentType: "video/mp4",
+      filename: "video-fal-1234.mp4",
+      runId,
+    });
+    expect(video.byteSize).toBe(mp4.length);
+    expect(storage.putFile).toHaveBeenCalledWith(expect.objectContaining({ companyId, namespace: "files", contentType: "video/mp4" }));
+
+    // A picture keeps the ordinary limit.
+    await expect(
+      services().files.createCompanyFile({ companyId, ...png(), contentBase64: Buffer.alloc(64, 2).toString("base64"), runId }),
+    ).rejects.toThrow("The file is larger than this company allows (16 bytes)");
+    // Something that only says it is a video does not get the larger limit.
+    await expect(
+      services().files.createCompanyFile({ companyId, contentBase64: Buffer.alloc(64, 3).toString("base64"), contentType: "video/mp4", filename: "x.mp4", runId }),
+    ).rejects.toThrow("not an MP4, MOV or WebM video");
+    expect(await db.select().from(issueAttachments)).toHaveLength(1);
+  });
+
   it("refuses a disallowed file type", async () => {
     const { companyId, runId } = await seed();
     await expect(

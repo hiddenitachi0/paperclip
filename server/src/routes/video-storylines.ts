@@ -1,5 +1,4 @@
 import { readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { Router, type Request, type RequestHandler } from "express";
 import multer from "multer";
 import type { Db } from "@paperclipai/db";
@@ -66,6 +65,7 @@ import { HttpError, badRequest, notFound, unprocessable } from "../errors.js";
 const POSTER_MAX_CLIP_BYTES = 100 * 1024 * 1024;
 import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
+import { contentDispositionHeader, sendStoredObject } from "../http/byte-range.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineStitchService } from "../services/video-storyline-stitch.js";
@@ -78,8 +78,9 @@ import { videoStorylineDirectorReviewService } from "../services/video-storyline
 import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
 import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
 import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
-import { videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
+import { uploadKindFor, videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
 import { videoStorylineFootageService } from "../services/video-storyline-footage.js";
+import { mediaFootageHardLimits, mediaWorkDir } from "../services/media-video-limits.js";
 import { videoStorylineDirectorsService } from "../services/video-storyline-directors.js";
 import { videoStorylineWriterService } from "../services/video-storyline-writer.js";
 import { extractPosterJpeg } from "../services/video-ffmpeg.js";
@@ -140,14 +141,17 @@ export function videoStorylineRoutes(rawDb: Db) {
   /** Multer for one footage upload, capped at THIS company's own largest file (security review DUR-4745), never above the hard limit. */
   function footageUploadFor(maxBytes: number) {
     return multer({
-      storage: multer.diskStorage({ destination: tmpdir() }),
+      // D18: videos up to the company's limit (2 GB by default) land in the media work folder, never in memory.
+      storage: multer.diskStorage({ destination: (_req, _file, cb) => void mediaWorkDir().then((dir) => cb(null, dir), (err: Error) => cb(err, "")) }),
       limits: { fileSize: Math.min(maxBytes, MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb * 1024 * 1024), files: 1, fields: 10 },
     });
   }
   /**
-   * Uploads in flight per company: each is read into memory to be stored,
-   * so a burst of large uploads could exhaust the server (security review
-   * DUR-4745). A third one at the same time is asked to wait.
+   * Uploads in flight per company: photos and music are read into memory to
+   * be stored, and every upload takes disk and a slot in the media queue, so
+   * a burst of large uploads could exhaust the server (security review
+   * DUR-4745). A third one at the same time is asked to wait. (D18: videos
+   * are streamed from their temp file into storage, never read into memory.)
    */
   const UPLOADS_IN_FLIGHT_PER_COMPANY = 2;
   const uploadsInFlight = new Map<string, number>();
@@ -167,8 +171,13 @@ export function videoStorylineRoutes(rawDb: Db) {
   }
   const musicUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 5 } });
 
-  /** Runs multer for one "file" field and hands back the file (bytes read only after the size passed), in plain-English errors. */
-  async function receiveFile(upload: ReturnType<typeof multer>, req: Request, res: Response, maxBytesForRead: number): Promise<IncomingFile> {
+  /**
+   * Runs multer for one "file" field and hands the file to `use` (bytes read
+   * only after the size passed), in plain-English errors. D18: a video
+   * written to a temp file stays on disk -- the service streams it into
+   * storage -- and the temp file is removed once `use` is done.
+   */
+  async function receiveFile<T>(upload: ReturnType<typeof multer>, req: Request, res: Response, maxBytesForRead: number, use: (file: IncomingFile) => Promise<T>): Promise<T> {
     try {
       await new Promise<void>((resolve, reject) => upload.single("file")(req, res, (err: unknown) => (err ? reject(err) : resolve())));
     } catch (err) {
@@ -182,8 +191,12 @@ export function videoStorylineRoutes(rawDb: Db) {
     if (!file) throw badRequest("Choose a file to upload.");
     try {
       if (file.size > maxBytesForRead) throw new HttpError(413, "This file is larger than this company allows. Make it smaller and upload it again.");
+      const incoming = { originalName: file.originalname || null, contentType: file.mimetype || "application/octet-stream", size: file.size };
+      if (file.path && uploadKindFor(incoming.contentType, incoming.originalName) === "video") {
+        return await use({ ...incoming, path: file.path });
+      }
       const buffer = file.buffer ?? (await readFile(file.path));
-      return { buffer, originalName: file.originalname || null, contentType: file.mimetype || "application/octet-stream", size: file.size };
+      return await use({ ...incoming, buffer });
     } finally {
       if (file.path) await rm(file.path, { force: true }).catch(() => undefined);
     }
@@ -193,16 +206,16 @@ export function videoStorylineRoutes(rawDb: Db) {
     return value === true || value === "true" || value === "1" || value === "on";
   }
 
-  /** Streams one stored object of THIS company (the key always comes from a stored row, never the request). */
-  async function streamStored(res: Response, next: NextFunction, companyId: string, objectKey: string, contentType: string, byteSize: number | null) {
-    const object = await getStorageService().getObject(companyId, objectKey);
-    res.setHeader("Content-Type", contentType || object.contentType || "application/octet-stream");
-    res.setHeader("Content-Length", String(byteSize || object.contentLength || 0));
+  /**
+   * Streams one stored object of THIS company (the key always comes from a
+   * stored row, never the request), with byte ranges so a clip can be
+   * seeked in the player without downloading it whole (D18).
+   */
+  async function streamStored(req: Request, res: Response, next: NextFunction, companyId: string, objectKey: string, contentType: string, byteSize: number | null) {
     res.setHeader("Cache-Control", "private, max-age=60");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Disposition", "inline");
-    object.stream.on("error", (err) => next(err));
-    object.stream.pipe(res);
+    await sendStoredObject(req, res, next, getStorageService(), { companyId, objectKey, byteSize, contentType, fallbackContentType: "application/octet-stream" });
   }
 
   function scope() {
@@ -418,7 +431,7 @@ export function videoStorylineRoutes(rawDb: Db) {
    */
   router.get("/companies/:companyId/video-storylines/settings/footage", scope(), async (req, res) => {
     const companyId = req.params.companyId as string;
-    res.json({ settings: await footage.getSettings(companyId), usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: MEDIA_FOOTAGE_HARD_LIMITS });
+    res.json({ settings: await footage.getSettings(companyId), usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: mediaFootageHardLimits() });
   });
 
   router.patch(
@@ -439,7 +452,7 @@ export function videoStorylineRoutes(rawDb: Db) {
         entityId: companyId,
         details: { fields: Object.keys(req.body) },
       });
-      res.json({ settings: saved, usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: MEDIA_FOOTAGE_HARD_LIMITS });
+      res.json({ settings: saved, usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: mediaFootageHardLimits() });
     },
   );
 
@@ -452,10 +465,9 @@ export function videoStorylineRoutes(rawDb: Db) {
 
   router.post("/companies/:companyId/video-storylines/music-files", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
-    const choice = await withUploadSlot(companyId, async () => {
-      const file = await receiveFile(musicUpload, req, res, 50 * 1024 * 1024);
-      return clips.uploadMusic(companyId, file, actorOf(req));
-    });
+    const choice = await withUploadSlot(companyId, () =>
+      receiveFile(musicUpload, req, res, 50 * 1024 * 1024, (file) => clips.uploadMusic(companyId, file, actorOf(req))),
+    );
     res.status(201).json(choice);
   });
 
@@ -517,7 +529,7 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const take = await transitions.getTake(companyId, req.params.storylineId as string, req.params.transitionId as string, req.params.takeId as string);
       if (!take.resultObjectKey) throw notFound("This version has no video yet.");
-      await streamStored(res, next, companyId, take.resultObjectKey, take.resultContentType || "video/mp4", take.resultByteSize);
+      await streamStored(req, res, next, companyId, take.resultObjectKey, take.resultContentType || "video/mp4", take.resultByteSize);
     },
   );
 
@@ -529,7 +541,7 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const shot = await storylines.getShotRow(companyId, req.params.storylineId as string, req.params.shotId as string);
       if (!shot.resultObjectKey) throw notFound("This shot has no rendered clip yet.");
-      await streamStored(res, next, companyId, shot.resultObjectKey, shot.resultContentType || "video/mp4", shot.resultByteSize);
+      await streamStored(req, res, next, companyId, shot.resultObjectKey, shot.resultContentType || "video/mp4", shot.resultByteSize);
     },
   );
 
@@ -544,16 +556,16 @@ export function videoStorylineRoutes(rawDb: Db) {
         // Your own video: its upload's ready-made poster (no ffmpeg in the request).
         const upload = await clips.getUpload(companyId, shot.storylineId, shot.sourceUploadId).catch(() => null);
         if (upload?.posterObjectKey) {
-          await streamStored(res, next, companyId, upload.posterObjectKey, "image/jpeg", upload.posterByteSize || null);
+          await streamStored(req, res, next, companyId, upload.posterObjectKey, "image/jpeg", upload.posterByteSize || null);
           return;
         }
       }
       if (shot.stillObjectKey) {
-        await streamStored(res, next, companyId, shot.stillObjectKey, shot.stillContentType || "image/png", shot.stillByteSize);
+        await streamStored(req, res, next, companyId, shot.stillObjectKey, shot.stillContentType || "image/png", shot.stillByteSize);
         return;
       }
       if (shot.previewObjectKey) {
-        await streamStored(res, next, companyId, shot.previewObjectKey, shot.previewContentType || "image/jpeg", shot.previewByteSize);
+        await streamStored(req, res, next, companyId, shot.previewObjectKey, shot.previewContentType || "image/jpeg", shot.previewByteSize);
         return;
       }
       if (!shot.resultObjectKey) throw notFound("This shot has no picture yet.");
@@ -590,12 +602,13 @@ export function videoStorylineRoutes(rawDb: Db) {
     const companyId = req.params.companyId as string;
     const limits = await footage.getSettings(companyId);
     const maxBytes = Math.max(limits.maxVideoMb, limits.maxPhotoMb) * 1024 * 1024;
-    const created = await withUploadSlot(companyId, async () => {
-      const file = await receiveFile(footageUploadFor(maxBytes), req, res, maxBytes);
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const consent = { showsPeople: bodyFlag(body.showsPeople), consentLikeness: bodyFlag(body.consentLikeness), consentAdults: bodyFlag(body.consentAdults) };
-      return clips.createUpload(companyId, req.params.storylineId as string, file, consent, actorOf(req));
-    });
+    const created = await withUploadSlot(companyId, () =>
+      receiveFile(footageUploadFor(maxBytes), req, res, maxBytes, (file) => {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const consent = { showsPeople: bodyFlag(body.showsPeople), consentLikeness: bodyFlag(body.consentLikeness), consentAdults: bodyFlag(body.consentAdults) };
+        return clips.createUpload(companyId, req.params.storylineId as string, file, consent, actorOf(req));
+      }),
+    );
     res.status(201).json(created);
   });
 
@@ -618,14 +631,14 @@ export function videoStorylineRoutes(rawDb: Db) {
     const companyId = req.params.companyId as string;
     const upload = await clips.getUpload(companyId, req.params.storylineId as string, req.params.uploadId as string);
     if (!upload.previewObjectKey) throw notFound("This upload has no preview yet.");
-    await streamStored(res, next, companyId, upload.previewObjectKey, upload.previewContentType || "application/octet-stream", upload.previewByteSize || null);
+    await streamStored(req, res, next, companyId, upload.previewObjectKey, upload.previewContentType || "application/octet-stream", upload.previewByteSize || null);
   });
 
   router.get("/companies/:companyId/video-storylines/:storylineId/uploads/:uploadId/poster", ...gatedScope(), async (req, res, next) => {
     const companyId = req.params.companyId as string;
     const upload = await clips.getUpload(companyId, req.params.storylineId as string, req.params.uploadId as string);
     if (!upload.posterObjectKey) throw notFound("This upload has no picture yet.");
-    await streamStored(res, next, companyId, upload.posterObjectKey, "image/jpeg", (upload.posterObjectKey === upload.previewObjectKey ? upload.previewByteSize : upload.posterByteSize) || null);
+    await streamStored(req, res, next, companyId, upload.posterObjectKey, "image/jpeg", (upload.posterObjectKey === upload.previewObjectKey ? upload.previewByteSize : upload.posterByteSize) || null);
   });
 
   router.post("/companies/:companyId/video-storylines/:storylineId/clips", validate(createVideoClipSchema), ...gatedScope(), async (req, res) => {
@@ -921,6 +934,10 @@ export function videoStorylineRoutes(rawDb: Db) {
    * DUR-4170: streams the finished stitched film, same pattern as
    * assets.ts's GET /assets/:assetId/content -- content-type/length off the
    * stored row, inline disposition, company-scoped access via gatedScope().
+   * D18: long films (up to 2 GB) are streamed from the server's disk with
+   * byte ranges, so the player can seek and a download can resume without
+   * the whole file ever being read into memory. `?download=1` asks the
+   * browser to save it instead of playing it.
    */
   router.get(
     "/companies/:companyId/video-storylines/:storylineId/final/content",
@@ -933,20 +950,17 @@ export function videoStorylineRoutes(rawDb: Db) {
         throw notFound("This storyline has no finished video yet.");
       }
 
-      const storage = getStorageService();
-      const object = await storage.getObject(companyId, storyline.finalObjectKey);
-      const responseContentType = storyline.finalContentType || object.contentType || "video/mp4";
-      res.setHeader("Content-Type", responseContentType);
-      res.setHeader("Content-Length", String(storyline.finalByteSize || object.contentLength || 0));
       res.setHeader("Cache-Control", "private, max-age=60");
       res.setHeader("X-Content-Type-Options", "nosniff");
-      const filename = `${(storyline.title || "video-storyline").replaceAll('"', "")}.mp4`;
-      res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
-
-      object.stream.on("error", (err) => {
-        next(err);
+      const disposition = bodyFlag(req.query.download) ? "attachment" : "inline";
+      res.setHeader("Content-Disposition", contentDispositionHeader(disposition, `${storyline.title || "video-storyline"}.mp4`));
+      await sendStoredObject(req, res, next, getStorageService(), {
+        companyId,
+        objectKey: storyline.finalObjectKey,
+        byteSize: storyline.finalByteSize,
+        contentType: storyline.finalContentType,
+        fallbackContentType: "video/mp4",
       });
-      object.stream.pipe(res);
     },
   );
 
