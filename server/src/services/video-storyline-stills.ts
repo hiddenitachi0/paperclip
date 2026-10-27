@@ -11,6 +11,9 @@ import {
   type VideoStoryboardSummary,
   readVideoStorylineCast,
   videoShotCast,
+  videoShotOnlyCastLine,
+  unconfirmedVideoCastMessage,
+  unconfirmedVideoCastShots,
 } from "@paperclipai/shared";
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
@@ -74,6 +77,8 @@ interface ShotCastPeople {
   castIds: string[];
   people: CastPerson[];
   notes: string[];
+  /** "Only these people are in this shot: ..." from the confirmed cast; "" when the shot is not confirmed or the film has no linked person. */
+  onlyLine: string;
   pluginId?: string | null;
 }
 
@@ -201,6 +206,11 @@ export function videoStorylineStillsService(db: Db) {
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
 
+    // A film with a linked person needs a person's own pick of who is in this shot (see startRender).
+    if (unconfirmedVideoCastShots(readVideoStorylineCast(storyline.pictureSettings), [shot]).length > 0) {
+      throw unprocessable(unconfirmedVideoCastMessage([shot.orderIndex + 1]));
+    }
+
     // Priced as one picture on the service that makes it (see pictureTarget).
     const { target, pluginId, cfg } = await pictureTarget(companyId, storyline, shot);
     if (target.lookId && !target.look) {
@@ -258,7 +268,7 @@ export function videoStorylineStillsService(db: Db) {
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
     const input: ImageGenerationInput = {
-      prompt: storyboardPrompt(shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
+      prompt: storyboardPrompt(cast.onlyLine ? `${shot.prompt}\n\n${cast.onlyLine}` : shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
     };
     if (target.providerId === "sogni") {
@@ -386,11 +396,11 @@ export function videoStorylineStillsService(db: Db) {
     shot: Pick<ShotRow, "id" | "prompt" | "cameraNotes">,
   ): Promise<ShotCastPeople> {
     const cast = readVideoStorylineCast(storyline.pictureSettings);
-    if (cast.members.length === 0) return { castIds: [], people: [], notes: [] };
+    if (cast.members.length === 0) return { castIds: [], people: [], notes: [], onlyLine: "" };
     const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
     const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
     const { people, notes } = castPeople(castIds, cast.members, identities);
-    return { castIds, people, notes, pluginId };
+    return { castIds, people, notes, onlyLine: videoShotOnlyCastLine(shot, cast), pluginId };
   }
 
   /**
@@ -455,7 +465,7 @@ export function videoStorylineStillsService(db: Db) {
       ) as CharacterSheet;
     }
     let prompt = assemblePrompt({
-      request: castLine ? `${shot.prompt}\n\n${castLine}` : shot.prompt,
+      request: [shot.prompt, castLine, cast.onlyLine].filter(Boolean).join("\n\n"),
       style: look?.style,
       sheet,
       roles,

@@ -13,6 +13,9 @@ import {
   readVideoStorylineCast,
   videoRenderDurationSeconds,
   videoShotCast,
+  unconfirmedVideoCastMessage,
+  unconfirmedVideoCastShots,
+  videoShotOnlyCastLine,
   videoShotVideoPrompt,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
@@ -361,6 +364,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return rows.length > 0 ? rows[rows.length - 1]! : null;
   }
 
+  /** The video text of a shot: description and camera notes, plus the "only these people" line when its cast is confirmed. */
+  function shotVideoPrompt(storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect): string {
+    const base = videoShotVideoPrompt(shot.prompt, shot.cameraNotes);
+    const line = videoShotOnlyCastLine(shot, readVideoStorylineCast(storyline.pictureSettings));
+    return line ? `${base}\n\n${line}` : base;
+  }
+
   /**
    * The shot's linked cast members' pictures for the video call: per person
    * the face crop, the canonical render and the body crop (the approved
@@ -492,7 +502,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const input: MediaJobInput = {
       kind: "video",
       // Camera notes go with the description (they used to be dropped).
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      prompt: shotVideoPrompt(storyline, shot),
       // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
       promptRewrite: false,
       model: model ?? undefined,
@@ -601,6 +611,19 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Phase 2: only AI shots render (and cost money); the company's own
     // videos and photos are prepared by ffmpeg, free.
     const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
+
+    // Who is in a shot is a person's choice, not a guess from names in the
+    // text: a film with a person linked to its cast needs every shot still to
+    // render confirmed first. Only here, at start -- never in beginShotRender,
+    // so a film that is rendering (the chain continues) or paused (it was
+    // started, so it passed this or predates it) finishes or resumes normally.
+    if (storyline.status !== "paused") {
+      const unconfirmed = unconfirmedVideoCastShots(
+        readVideoStorylineCast(storyline.pictureSettings),
+        renderableShots.filter((s) => s.status !== "done"),
+      );
+      if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
+    }
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
     // still needs to render must already be approved. Checked here, upfront
@@ -922,7 +945,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      prompt: shotVideoPrompt(storyline, shot),
       promptRewrite: false,
       model: model ?? undefined,
       startImage,

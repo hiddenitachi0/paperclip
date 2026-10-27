@@ -262,6 +262,7 @@ d("storyline cast (database)", () => {
     await saveIdentities(companyId, [maja]);
     const storylines = videoStorylineService(db);
     await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+    await storylines.setShotCast(companyId, storylineId, shotId, ["c1"], ACTOR);
     await storylines.updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni" } }, ACTOR);
 
     const result = await videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR);
@@ -282,6 +283,7 @@ d("storyline cast (database)", () => {
     await saveIdentities(companyId, [maja, bo]);
     const storylines = videoStorylineService(db);
     await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }, { name: "Bo", identityId: bo.id }] }, ACTOR);
+    await storylines.setShotCast(companyId, storylineId, shotId, ["c1", "c2"], ACTOR);
     const stills = videoStorylineStillsService(db);
 
     const result = await stills.generateStill(companyId, storylineId, shotId, ACTOR);
@@ -304,6 +306,7 @@ d("storyline cast (database)", () => {
     await saveIdentities(companyId, [maja]);
     await db.insert(pluginState).values({ pluginId, scopeKind: "company", scopeId: companyId, namespace: "default", stateKey: "identityAgeBlocks", valueJson: [maja.crops[0]!.fileId] });
     await videoStorylineService(db).setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+    await videoStorylineService(db).setShotCast(companyId, storylineId, shotId, ["c1"], ACTOR);
     await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
       status: 422,
       message: expect.stringContaining("age check"),
@@ -320,6 +323,7 @@ d("storyline cast (database)", () => {
     await saveIdentities(companyId, [maja, bo]);
     const storylines = videoStorylineService(db);
     await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }, { name: "Bo", identityId: bo.id }] }, ACTOR);
+    await storylines.setShotCast(companyId, storylineId, shotId, ["c1", "c2"], ACTOR);
     await db
       .update(videoShots)
       .set({ storyboardStatus: "approved", stillObjectKey: "approved-still", stillProvider: "local", stillContentType: "image/png" })
@@ -335,5 +339,109 @@ d("storyline cast (database)", () => {
     ]);
     const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
     expect(storyline!.status).toBe("rendering");
+  });
+  /** A second shot in the same storyline (approved still, so only the cast gate can stop its render). */
+  async function addShot(companyId: string, storylineId: string, sceneId: string, orderIndex: number, prompt: string) {
+    const shot = await videoStorylineService(db).createShot(
+      companyId,
+      storylineId,
+      { sceneId, orderIndex, prompt, cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [], transitionIn: null },
+      ACTOR,
+    );
+    return shot.id;
+  }
+
+  async function approve(shotId: string) {
+    await db.update(videoShots).set({ storyboardStatus: "approved", stillObjectKey: "approved-still", stillProvider: "local", stillContentType: "image/png" }).where(eq(videoShots.id, shotId));
+  }
+
+  describe("confirmed cast gate", () => {
+    it("refuses an unconfirmed shot at start (listing the shots) and at still generation, before any paid call", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed();
+      const second = await addShot(companyId, storylineId, sceneId, 1, "Bo waits");
+      const third = await addShot(companyId, storylineId, sceneId, 2, "Maja leaves");
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      const storylines = videoStorylineService(db);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+      await Promise.all([shotId, second, third].map(approve));
+      await storylines.setShotCast(companyId, storylineId, second, ["c1"], ACTOR);
+
+      await expect(videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shots 1 and 3 first."),
+      });
+      expect(captured.videos).toHaveLength(0);
+      const [row] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+      expect(row!.status).not.toBe("rendering");
+
+      const stills = videoStorylineStillsService(db);
+      await expect(stills.generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 1 first."),
+      });
+      expect(captured.pictures).toHaveLength(0);
+      // The confirmed shot is not refused.
+      await stills.generateStill(companyId, storylineId, second, ACTOR);
+      expect(captured.pictures).toHaveLength(1);
+      // "Nobody" is a confirmation too.
+      await storylines.setShotCast(companyId, storylineId, shotId, [], ACTOR);
+      await storylines.setShotCast(companyId, storylineId, third, ["c1"], ACTOR);
+      await approve(second); // generating its still put it back to waiting for review
+      await videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(1);
+    });
+
+    it("does not touch a film with no person linked to its cast", async () => {
+      const { companyId, storylineId, shotId } = await seed({ prompt: "Maja opens the door" });
+      await videoStorylineService(db).setCast(companyId, storylineId, { members: [{ name: "Maja" }] }, ACTOR);
+      await approve(shotId);
+      await videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR);
+      await approve(shotId); // generating the still put it back to waiting for review
+      expect(String(captured.pictures[0]!.input.prompt)).not.toMatch(/Nobody else|these people|this person is/);
+      await videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {});
+      expect(String(captured.videos[0]!.input.prompt)).not.toMatch(/Nobody else|these people|this person is/);
+    });
+
+    it("a paused film with unconfirmed shots resumes, and beginShotRender never checks the cast", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed();
+      const second = await addShot(companyId, storylineId, sceneId, 1, "Bo waits");
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      await videoStorylineService(db).setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+      await Promise.all([shotId, second].map(approve));
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      const render = videoStorylineRenderService(db);
+
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(1);
+      // The chain's own next-shot call (a film that was rendering at deploy time) goes through too.
+      const storyline = await videoStorylineService(db).getStorylineRow(companyId, storylineId);
+      const [next] = await db.select().from(videoShots).where(eq(videoShots.id, second));
+      await render.beginShotRender(companyId, storyline, next!, "user-1");
+      expect(captured.videos).toHaveLength(2);
+    });
+
+    it("stills and video prompts say only the confirmed people are in the shot", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed({ prompt: "Maja hands Bo the keys" });
+      const empty = await addShot(companyId, storylineId, sceneId, 1, "An empty street");
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      const storylines = videoStorylineService(db);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }, { name: "Bo" }] }, ACTOR);
+      await storylines.setShotCast(companyId, storylineId, shotId, ["c1", "c2"], ACTOR);
+      await storylines.setShotCast(companyId, storylineId, empty, [], ACTOR);
+      await Promise.all([shotId, empty].map(approve));
+      const stills = videoStorylineStillsService(db);
+
+      await stills.generateStill(companyId, storylineId, shotId, ACTOR);
+      expect(String(captured.pictures[0]!.input.prompt)).toContain("Only these people are in this shot: Maja and Bo. Nobody else.");
+      await stills.generateStill(companyId, storylineId, empty, ACTOR);
+      expect(String(captured.pictures[1]!.input.prompt)).toContain("No people appear in this shot.");
+      await Promise.all([shotId, empty].map(approve));
+
+      await videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {});
+      expect(String(captured.videos[0]!.input.prompt)).toContain("Only these people are in this shot: Maja and Bo. Nobody else.");
+    });
   });
 });
