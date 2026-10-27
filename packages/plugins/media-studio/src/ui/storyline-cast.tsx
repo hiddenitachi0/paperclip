@@ -244,12 +244,16 @@ export function StorylineCastSection(props: {
   onSaved: (storyline: unknown) => void | Promise<void>;
   /** The company's saved people (the page loads them with identities.list). */
   identities: CastIdentityOption[];
+  /** True once the saved people have been loaded. Until then the cast of each shot cannot be confirmed. */
+  identitiesLoaded: boolean;
   /** Why the saved people could not be loaded, if they could not. */
   identityError?: string | null;
 }) {
   const { base, cast, shots, editable, identities } = props;
   const identityError = props.identityError ?? null;
   const [busy, setBusy] = useState(false);
+  // True while the "who is in each shot" block below is saving: member edits wait for it, and the other way round.
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newNickname, setNewNickname] = useState("");
@@ -273,7 +277,7 @@ export function StorylineCastSection(props: {
     [base, props.onSaved],
   );
 
-  const disabled = busy || !editable;
+  const disabled = busy || confirmBusy || !editable;
   const linked = cast.members.filter((m) => m.identityId && identities.some((i) => i.id === m.identityId));
   const example = linked[0]?.name ?? cast.members[0]?.name ?? "Maja";
 
@@ -358,7 +362,18 @@ export function StorylineCastSection(props: {
         </div>
       )}
 
-      <ShotCastConfirm base={base} cast={cast} shots={shots} identities={identities} editable={editable} onSaved={props.onSaved} />
+      <ShotCastConfirm
+        base={base}
+        cast={cast}
+        shots={shots}
+        identities={identities}
+        identitiesLoaded={props.identitiesLoaded}
+        identityError={identityError}
+        editable={editable}
+        locked={busy}
+        onBusyChange={setConfirmBusy}
+        onSaved={props.onSaved}
+      />
     </div>
   );
 }
@@ -381,12 +396,23 @@ export function ShotCastConfirm(props: {
   cast: StorylineCast;
   shots: CastShot[];
   identities: CastIdentityOption[];
+  /** True once the saved people have been loaded. Suggestions are only trustworthy after that. */
+  identitiesLoaded: boolean;
+  /** Why the saved people could not be loaded, if they could not. */
+  identityError?: string | null;
   editable: boolean;
+  /** Another change to the cast is being saved, so wait. */
+  locked?: boolean;
+  /** Tells the parent while this block is saving. */
+  onBusyChange?: (busy: boolean) => void;
   onSaved: (storyline: unknown) => void | Promise<void>;
   /** Shown beside a character who is not linked to a saved person (the storyboard step sends people to step 2). */
   onLinkPerson?: () => void;
 }) {
   const { base, cast, shots, identities } = props;
+  const identityError = props.identityError ?? null;
+  // Without the saved people, a shot that names a linked character looks like "nobody": do not let anyone confirm that.
+  const ready = props.identitiesLoaded && !identityError;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -394,7 +420,11 @@ export function ShotCastConfirm(props: {
   const sortedShots = useMemo(() => shots.slice().sort((a, b) => a.orderIndex - b.orderIndex), [shots]);
   const rows = sortedShots.map((shot) => ({ shot, ...shotCastFor(shot, cast, identities) }));
   const unconfirmed = rows.filter((r) => !r.picked);
-  const disabled = busy || !props.editable;
+  const disabled = busy || !!props.locked || !props.editable || !ready;
+  // Shots with no name found stay for the per-shot "Confirm nobody": confirming nobody for all of them at once would be a guess.
+  const bulkRows = unconfirmed.filter((r) => r.castIds.length > 0);
+  const leftForYou = unconfirmed.length - bulkRows.length;
+  const shotsText = (n: number) => (n === 1 ? "1 shot" : `${n} shots`);
   const linkedIds = new Set(cast.members.filter((m) => m.identityId && identities.some((i) => i.id === m.identityId)).map((m) => m.id));
   const crowded = rows.filter((r) => r.castIds.filter((id) => linkedIds.has(id)).length > 1);
   const unlinkedInShots = cast.members.filter((m) => !linkedIds.has(m.id) && rows.some((r) => r.castIds.includes(m.id)));
@@ -402,25 +432,33 @@ export function ShotCastConfirm(props: {
   const save = useCallback(
     async (changes: Array<{ shotId: string; castIds: string[] | null }>, doneText: string) => {
       setBusy(true);
+      props.onBusyChange?.(true);
       setError(null);
       setDone(null);
       let saved = 0;
+      let last: unknown = null;
       try {
         // One after another: each change rewrites the same stored settings.
         for (const change of changes) {
-          const storyline = await storylineFetchJson(`${base}/shots/${change.shotId}/cast`, { method: "PUT", body: JSON.stringify({ castIds: change.castIds }) }, "saving who is in the shot");
-          await props.onSaved(storyline);
+          last = await storylineFetchJson(`${base}/shots/${change.shotId}/cast`, { method: "PUT", body: JSON.stringify({ castIds: change.castIds }) }, "saving who is in the shot");
           saved += 1;
         }
         setDone(doneText);
       } catch (e) {
         setError(changes.length > 1 && saved > 0 ? `${errorText(e)}\n${saved} of ${changes.length} shots were confirmed before this stopped.` : errorText(e));
       } finally {
+        // Reload once at the end, also after a failure, so the screen shows what was really saved.
+        try {
+          await props.onSaved(last);
+        } catch (e) {
+          setError((prev) => prev ?? errorText(e));
+        }
         setBusy(false);
+        props.onBusyChange?.(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [base, props.onSaved],
+    [base, props.onSaved, props.onBusyChange],
   );
 
   if (cast.members.length === 0 || sortedShots.length === 0) return null;
@@ -433,26 +471,38 @@ export function ShotCastConfirm(props: {
           We suggest people by the names in each shot's description. Click a name to add or remove it. Pictures and clips use the people you confirm, so check each shot.
         </p>
       </div>
+      {identityError && <div style={errorBox} role="alert" data-testid="shot-cast-identity-error">{identityError} Confirming who is in each shot is paused until the saved people load. Reload the page to try again.</div>}
+      {!props.identitiesLoaded && !identityError && <p style={muted} data-testid="shot-cast-loading">Loading your saved people...</p>}
       {error && <div style={errorBox} role="alert" data-testid="shot-cast-error">{error}</div>}
       {done && !error && <div style={noticeBox} role="status">{done}</div>}
       {!props.editable && <p style={muted}>The cast cannot be changed while the video is rendering.</p>}
       {unconfirmed.length > 0 ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            style={secondaryBtn}
-            disabled={disabled}
-            data-testid="confirm-all-cast"
-            onClick={() => void save(unconfirmed.map((r) => ({ shotId: r.shot.id, castIds: r.castIds })), `Confirmed the cast for ${unconfirmed.length === 1 ? "1 shot" : `${unconfirmed.length} shots`}.`)}
-          >
-            Confirm suggested cast for all shots
-          </button>
-          <span style={muted}>{unconfirmed.length === 1 ? "1 shot is" : `${unconfirmed.length} shots are`} still waiting for you to confirm.</span>
+          {bulkRows.length > 0 && (
+            <button
+              type="button"
+              style={secondaryBtn}
+              disabled={disabled}
+              data-testid="confirm-all-cast"
+              onClick={() =>
+                void save(
+                  bulkRows.map((r) => ({ shotId: r.shot.id, castIds: r.castIds })),
+                  `Confirmed the cast for ${shotsText(bulkRows.length)}.${leftForYou > 0 ? ` ${shotsText(leftForYou)} with nobody named ${leftForYou === 1 ? "was" : "were"} left for you to check.` : ""}`,
+                )
+              }
+            >
+              {leftForYou > 0 ? `Confirm the ${shotsText(bulkRows.length)} with a name found` : "Confirm suggested cast for all shots"}
+            </button>
+          )}
+          <span style={muted}>
+            {unconfirmed.length === 1 ? "1 shot is" : `${unconfirmed.length} shots are`} still waiting for you to confirm.
+            {leftForYou > 0 && ` ${shotsText(leftForYou)} with nobody named ${leftForYou === 1 ? "is" : "are"} left for you to check: pick who is there, or press "Confirm nobody" on that shot.`}
+          </span>
         </div>
       ) : (
         <p style={{ ...muted, color: "#2b8a3e" }} data-testid="all-cast-confirmed">The cast is confirmed for every shot.</p>
       )}
-      {unlinkedInShots.length > 0 && (
+      {ready && unlinkedInShots.length > 0 && (
         <div style={noticeBox} data-testid="cast-unlinked-note">
           {unlinkedInShots.map((m) => m.name).join(", ")} {unlinkedInShots.length === 1 ? "is" : "are"} not linked to a person, so they are drawn from the
           description only and may look different from shot to shot.{" "}

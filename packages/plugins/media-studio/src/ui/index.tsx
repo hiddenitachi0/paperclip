@@ -3793,6 +3793,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listCastIdentities = usePluginAction(CAST_IDENTITIES_ACTION);
   const [castIdentities, setCastIdentities] = useState<CastIdentityOption[]>([]);
   const [castIdentityError, setCastIdentityError] = useState<string | null>(null);
+  const [castIdentitiesLoaded, setCastIdentitiesLoaded] = useState(false);
   useEffect(() => {
     if (!companyId || !selectedId) return;
     let cancelled = false;
@@ -3801,6 +3802,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       .then((r) => {
         if (cancelled) return;
         setCastIdentities(castIdentityOptions(r));
+        setCastIdentitiesLoaded(true);
         setCastIdentityError(null);
       })
       .catch((e) => {
@@ -4608,6 +4610,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       sceneNotes={sortedScenes.map((sc) => sc.notes)}
                       editable={editable}
                       identities={castIdentities}
+                      identitiesLoaded={castIdentitiesLoaded}
                       identityError={castIdentityError}
                       onSaved={async () => {
                         await loadStorylines();
@@ -4661,10 +4664,13 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
                     castConfirm={
                       <ShotCastConfirm
+                        key={selectedId}
                         base={base}
                         cast={selected.cast ?? EMPTY_CAST}
                         shots={detailFor === selectedId ? shots : []}
                         identities={castIdentities}
+                        identitiesLoaded={castIdentitiesLoaded}
+                        identityError={castIdentityError}
                         editable={editable}
                         onSaved={async () => {
                           await loadStorylines();
