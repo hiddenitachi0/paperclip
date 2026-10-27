@@ -911,6 +911,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (!b.resultObjectKey && !b.stillObjectKey) {
       throw unprocessable(`Shot ${b.orderIndex + 1} has no clip or approved picture yet, so there is no end picture for the AI bridge.`);
     }
+    // Cast pictures for both sides are name-guessed unless each shot's cast is confirmed.
+    render.assertVideoCastConfirmed(storyline, [a, b]);
     const [running] = await db
       .select({ id: videoTransitionTakes.id })
       .from(videoTransitionTakes)

@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
-import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines } from "@paperclipai/db";
+import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines, videoUploads } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
@@ -96,6 +96,7 @@ vi.mock("../services/video-provider-clients.js", async (importOriginal) => {
 const { videoStorylineSettingsService } = await import("../services/video-storyline-settings.ts");
 const { videoStorylineStillsService } = await import("../services/video-storyline-stills.ts");
 const { videoStorylineRenderService } = await import("../services/video-storyline-render.ts");
+const { videoStorylineClipsService } = await import("../services/video-storyline-clips.ts");
 const { videoStorylineService } = await import("../services/video-storylines.ts");
 const { validateVideoStorylineScript } = await import("@paperclipai/shared");
 
@@ -389,6 +390,59 @@ d("storyline cast (database)", () => {
       await storylines.setShotCast(companyId, storylineId, third, ["c1"], ACTOR);
       await approve(second); // generating its still put it back to waiting for review
       await videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(1);
+    });
+
+    it("re-render, preview and animate refuse an unconfirmed shot before any paid call; a re-render cannot start the film's chain either", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed();
+      const second = await addShot(companyId, storylineId, sceneId, 1, "Maja leaves");
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      const storylines = videoStorylineService(db);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+      await Promise.all([shotId, second].map(approve));
+      const render = videoStorylineRenderService(db);
+
+      // The shot itself is unconfirmed.
+      await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shots 1 and 2 first."),
+      });
+      // Only the target is confirmed: the draft film would flip to rendering and chain into the unconfirmed shot, so still refused.
+      await storylines.setShotCast(companyId, storylineId, shotId, ["c1"], ACTOR);
+      await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 2 first."),
+      });
+      const [draft] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+      expect(draft!.status).not.toBe("rendering");
+
+      // Preview needs the target shot confirmed, nothing else.
+      await videoStorylineSettingsService(db).setAdvancedEnabled(companyId, true);
+      await expect(render.renderPreview(companyId, storylineId, second, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 2 first."),
+      });
+      const [afterPreview] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+      expect(afterPreview!.spentCents).toBe(0);
+
+      // A photo clip animated into an AI shot.
+      const [upload] = await db
+        .insert(videoUploads)
+        .values({ companyId, storylineId, kind: "photo", status: "ready", sourceContentType: "image/png", objectKey: "photo-key", contentType: "image/png" })
+        .returning();
+      await db.update(videoShots).set({ clipKind: "still", sourceUploadId: upload!.id }).where(eq(videoShots.id, second));
+      await expect(
+        videoStorylineClipsService(db).animate(companyId, storylineId, second, { prompt: "Maja smiles", confirmCostCents: 100_000 }, ACTOR),
+      ).rejects.toMatchObject({ status: 422, message: expect.stringContaining("Confirm who is in shot 2 first.") });
+      expect(captured.videos).toHaveLength(0);
+      const [afterAnimate] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+      expect(afterAnimate!.spentCents).toBe(0);
+
+      // Everything confirmed: the re-render goes through.
+      await db.update(videoShots).set({ clipKind: "generated", sourceUploadId: null }).where(eq(videoShots.id, second));
+      await storylines.setShotCast(companyId, storylineId, second, [], ACTOR);
+      await render.reRenderShot(companyId, storylineId, shotId, ACTOR);
       expect(captured.videos).toHaveLength(1);
     });
 

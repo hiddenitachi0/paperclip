@@ -372,6 +372,21 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   }
 
   /**
+   * Refuses a paid call that would send a linked person's pictures for shots
+   * nobody has confirmed the cast for (castVideoInput would otherwise guess
+   * from names in the text). Used by every entry point other than the render
+   * chain itself (startRender checks its own list; the chain and a paused
+   * film's resume deliberately skip it, see startRender).
+   */
+  function assertVideoCastConfirmed(
+    storyline: typeof videoStorylines.$inferSelect,
+    shots: ReadonlyArray<{ id: string; orderIndex: number }>,
+  ): void {
+    const unconfirmed = unconfirmedVideoCastShots(readVideoStorylineCast(storyline.pictureSettings), shots);
+    if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
+  }
+
+  /**
    * The shot's linked cast members' pictures for the video call: per person
    * the face crop, the canonical render and the body crop (the approved
    * storyboard picture stays the start frame). Whether a video model really
@@ -775,6 +790,16 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (shot.storyboardStatus !== "approved") {
       throw unprocessable(`Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
     }
+    // Who is in the shot is a person's choice (see startRender). This shot is
+    // always checked; when the film is not already rendering or paused, this
+    // re-render flips it to "rendering" and the chain then renders every other
+    // pending shot, so those must be confirmed too.
+    const chainStarts = storyline.status !== "rendering" && storyline.status !== "paused";
+    const chainShots = chainStarts
+      ? (await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)))
+          .filter((s) => s.id !== shot.id && s.status !== "done" && s.storyboardStatus !== "dropped" && s.clipKind === "generated")
+      : [];
+    assertVideoCastConfirmed(storyline, [shot, ...chainShots].sort((x, y) => x.orderIndex - y.orderIndex));
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
     const shotEstimate = estimateShotRenderCents(storyline, [shot]);
@@ -871,6 +896,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (shot.status === "queued" || shot.status === "rendering") {
       throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
     }
+
+    assertVideoCastConfirmed(storyline, [shot]);
 
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // The shortest clip this model will actually make (1s for a model that
@@ -1425,6 +1452,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     releaseShotReservation,
     resolveProviderApiKey,
     castVideoInput,
+    assertVideoCastConfirmed,
     downloadResultBytes,
     downloadClipFromStorage,
   };

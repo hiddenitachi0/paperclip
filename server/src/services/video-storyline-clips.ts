@@ -965,6 +965,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     if (threshold !== null && quote > threshold) {
       throw unprocessable(`Animating this photo costs about ${dollars(quote)}, over this company's approval limit of ${dollars(threshold)}. Make it shorter, or ask the owner to raise the limit.`);
     }
+    // The new prompt is name-guessed for cast pictures unless the shot's cast is confirmed first.
+    render.assertVideoCastConfirmed(storyline, [shot]);
     const providerId = storyline.providerId === "sogni" ? "sogni" : "fal";
     const actorId = actor.agentId ?? actor.actorId;
     // The company's own key, before anything is held (decision 15).
