@@ -18,6 +18,7 @@
 // 429/409 (the person just presses Make picture again).
 
 import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
+import { PROMPT_EXPANSION_UNSUPPORTED, SEED_UNSUPPORTED, safetyFieldsOf, seedSent, type SentRequestFacts } from "./generation-facts.js";
 import { readSogniWorkflowCredits } from "./sogni-cost.js";
 
 export type ImageFetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
@@ -50,6 +51,8 @@ export function sogniStillSizeFor(aspect: ImageGenerationInput["aspect"]): { wid
 }
 
 export interface ImageGenerationResult {
+  /** DUR-4902: what the request really carried (safety fields, tool, seed), for the "How was this made?" record. */
+  sent?: SentRequestFacts;
   /** Sogni credits the workflow reported, when it did (for the cost record). */
   sogniCredits?: number | null;
   provider: string;
@@ -123,6 +126,14 @@ export class FalImageProvider implements ImageGenerationProvider {
       body: JSON.stringify({ ...body, ...falSafetyFields(model) }),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
+    const sent: SentRequestFacts = {
+      tool: null,
+      safety: safetyFieldsOf(body),
+      contentFilterOn: null,
+      promptExpansion: PROMPT_EXPANSION_UNSUPPORTED,
+      seed: SEED_UNSUPPORTED,
+      negativePrompt: null,
+    };
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }> };
     // Fal's own check flagged the picture (it comes back black): a failure, never stored, approved or chained.
     // Fal still bills it, so the error carries the usage for the caller to record first.
@@ -130,7 +141,7 @@ export class FalImageProvider implements ImageGenerationProvider {
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const megapixels = typeof image.width === "number" && typeof image.height === "number" ? (image.width * image.height) / 1_000_000 : undefined;
-    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", ...(megapixels !== undefined ? { megapixels } : {}) };
+    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", sent, ...(megapixels !== undefined ? { megapixels } : {}) };
     if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
     if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
     return { ...base, imageUrl: image.url };
@@ -293,10 +304,21 @@ export class SogniImageProvider implements ImageGenerationProvider {
     const header = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     const contentType = header.startsWith("image/") ? header : "image/jpeg";
     const credits = readSogniWorkflowCredits(workflow);
+    const stepArguments = (step.arguments ?? {}) as Json;
+    const sent: SentRequestFacts = {
+      tool: String(step.toolName),
+      safety: safetyFieldsOf(body),
+      contentFilterOn: body.safe_content_filter !== false,
+      promptExpansion: PROMPT_EXPANSION_UNSUPPORTED,
+      // edit_image has no seed setting; generate_image always sends one (ours, or a random one).
+      seed: references.length > 0 ? SEED_UNSUPPORTED : seedSent(stepArguments.seed),
+      negativePrompt: typeof stepArguments.negativePrompt === "string" ? stepArguments.negativePrompt : null,
+    };
     return {
       provider: this.name,
       model: rawModel,
       contentType,
+      sent,
       imageDataUrl: `data:${contentType};base64,${bytes.toString("base64")}`,
       sogniCredits: credits,
     };

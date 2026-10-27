@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
+import { HowWasThisMade } from "./generation-details.js";
 import { SKIP_PICTURES_EXPLANATION, dollars, pictureCostCents, pictureCounts, plural } from "./storyline-flow.js";
 
 // Standalone ES module (see index.tsx's note): bare specifiers only outside
@@ -491,6 +492,7 @@ export function StoryboardPanel(props: {
                   ))}
                 </ul>
               )}
+              {shot.stillObjectKey && <HowWasThisMade base={base} shotId={shot.id} kind="still" version={shot.stillGeneratedAt} />}
               {props.editable && text && !editing && shot.storyboardStatus !== "dropped" && (props.looks?.length ?? 0) > 0 && props.onShotLook && (
                 <label style={{ fontSize: 11, color: "#868e96", display: "flex", flexDirection: "column", gap: 2 }}>
                   Look for this picture

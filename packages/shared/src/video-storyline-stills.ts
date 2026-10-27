@@ -124,3 +124,61 @@ export interface VideoStoryboardSummary {
   /** What the next storyboard picture is made with, after defaults: service, model (null = the service's default) and look. */
   picture: { providerId: VideoStorylineProvider; model: string | null; lookId: string | null; costPerPictureCents: number };
 }
+
+// ─── "How was this made?" record (DUR-4902) ─────────────────────────────
+
+/** What a record says for a seed when the tool has no seed setting. */
+export const GENERATION_SEED_UNSUPPORTED = "not supported by this tool";
+/** What a record says for a seed when the tool takes one but none was sent, so the service chose it. */
+export const GENERATION_SEED_SERVICE_CHOSE = "not sent (the service chose one)";
+
+/**
+ * Exactly what one storyboard picture or one video clip was made with: the
+ * words, the model, the LoRAs, the safety settings, the pictures sent and what
+ * it cost. Written into the activity log's `details.generation` when the
+ * picture/clip is made, so a picture that drifted can be explained later.
+ * Built only from named fields: no keys, no tokens, and never picture bytes
+ * (pictures appear as file ids with their roles).
+ */
+export interface VideoShotGenerationRecord {
+  version: 1;
+  kind: "still" | "clip";
+  madeAt: string;
+  /** The prompt actually sent (after the safe-for-work words and any LoRA trigger word were added). */
+  promptSent: string;
+  /** The "things to avoid" text actually sent; null when the tool has none or none was sent. */
+  negativePromptSent: string | null;
+  provider: string;
+  /** The model asked for; null = the service's default for this tool. */
+  model: string | null;
+  /** The picture-editing model, when the picture was made from reference pictures; null otherwise. */
+  editModel: string | null;
+  /** The service's tool (e.g. generate_image, edit_image, animate_photo); null when it has one endpoint per model. */
+  tool: string | null;
+  loras: Array<{ id: string; strength: number }>;
+  lorasDropped: Array<{ id: string; reason: string }>;
+  contentRating: "sfw" | "mature";
+  /** Sogni's content filter as sent (true = on); null for services with only the safety fields below. */
+  contentFilterOn: boolean | null;
+  /** The provider's own safety fields exactly as sent. */
+  providerSafety: Record<string, string | number | boolean>;
+  /** "off", "on", "service default" or "not supported by this tool". */
+  promptExpansion: string;
+  references: Array<{ fileId: string | null; role: string }>;
+  /** How many reference pictures were chosen but could not be read, so were not sent. */
+  referencesNotSent: number;
+  /** The seed sent, or GENERATION_SEED_UNSUPPORTED / GENERATION_SEED_SERVICE_CHOSE. */
+  seed: number | string;
+  estimatedCostCents: number | null;
+  actualCostCents: number | null;
+  /** Sogni credits the job reported, when it did. */
+  providerCredits: number | null;
+  /** Plain notes made while the request was built (a LoRA left out, a setting the tool ignores, ...). */
+  notes: string[];
+}
+
+/** GET .../shots/:shotId/generation: the newest record of each kind for one shot; null = none was written (made before records existed). */
+export interface VideoShotGenerationResponse {
+  still: VideoShotGenerationRecord | null;
+  clip: VideoShotGenerationRecord | null;
+}
