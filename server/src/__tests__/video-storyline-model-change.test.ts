@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { companies, createDb, plugins, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
+import { approvals, companies, createDb, plugins, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -406,6 +406,105 @@ d("storyline model change", () => {
       const after = await storylineRow(storylineId);
       expect(after.status).toBe("paused");
       expect(after.errorMessage).toMatch(/No budget cap/);
+    });
+  });
+
+  describe("approval threshold on a single-shot re-render (DUR-4915, security review)", () => {
+    const shotStatuses = async (ids: string[]) => Promise.all(ids.map(async (id) => (await shotRow(id)).status));
+    const cards = (companyId: string) => db.select().from(approvals).where(eq(approvals.companyId, companyId));
+
+    function renderer() {
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      return { rec, render: videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" }) };
+    }
+
+    async function approvedCard(companyId: string, storylineId: string, estimatedTotalCents: number) {
+      await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: new Date(),
+        payload: { kind: "video_render", storylineId, shotCount: 1, estimatedTotalCents, thresholdCents: 300, title: "Render", summary: "ok" },
+      });
+    }
+
+    it("(a) an over-threshold re-render with no approval is refused, files a card, and starts nothing", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 100);
+      const { rec, render } = renderer();
+      await expect(render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("approval threshold") });
+      await expect(render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 422 });
+      expect(rec.started).toHaveLength(0);
+      expect(await shotStatuses(shotIds)).toEqual(["draft", "draft"]);
+      const filed = await cards(companyId);
+      expect(filed).toHaveLength(1);
+      expect(filed[0]).toMatchObject({ status: "pending", payload: expect.objectContaining({ kind: "video_render", storylineId, estimatedTotalCents: 250, thresholdCents: 100 }) });
+      expect((await storylineRow(storylineId)).spentCents).toBe(0);
+    });
+
+    it("(b) with an approved card for that total, exactly one shot renders", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 100);
+      await approvedCard(companyId, storylineId, 250);
+      const { rec, render } = renderer();
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft"]);
+    });
+
+    it("an approved card for a different total does not clear the re-render", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 100);
+      await approvedCard(companyId, storylineId, 999);
+      const { rec, render } = renderer();
+      await expect(render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 422 });
+      expect(rec.started).toHaveLength(0);
+    });
+
+    it("(c) a re-render within the threshold still works and files no card", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 300);
+      const { rec, render } = renderer();
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft"]);
+      expect(await cards(companyId)).toHaveLength(0);
+    });
+
+    it("(d) re-rendering the shots of a 4-shot film one at a time stops before spend passes the threshold", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 300);
+      const { rec, render } = renderer();
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await render.tick();
+      await render.tick();
+      expect((await storylineRow(storylineId)).spentCents).toBe(250);
+      for (const id of shotIds.slice(1)) {
+        await expect(render.reRenderShot(companyId, storylineId, id, ACTOR)).rejects.toMatchObject({ status: 422 });
+      }
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft", "draft"]);
+      const after = await storylineRow(storylineId);
+      expect(after.spentCents).toBeLessThanOrEqual(300);
+      expect(await cards(companyId)).toHaveLength(1);
+    });
+
+    it("a film that is already rendering (a run startRender cleared) is not gated again", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 100);
+      await approvedCard(companyId, storylineId, 500);
+      const { render } = renderer();
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      await render.tick();
+      await db.update(videoShots).set({ status: "failed" }).where(eq(videoShots.id, shotIds[0]!));
+      await db.update(videoStorylines).set({ status: "rendering" }).where(eq(videoStorylines.id, storylineId));
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      expect(await cards(companyId)).toHaveLength(1);
     });
   });
 });

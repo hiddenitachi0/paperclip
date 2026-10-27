@@ -530,6 +530,41 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
   }
 
+  /**
+   * The approval-threshold gate startRender and a single-shot re-render share: null when `totalCents` is within the
+   * company's threshold (or none is set) or a board-approved card already covers exactly that total.
+   */
+  async function missingRenderApproval(companyId: string, storylineId: string, totalCents: number): Promise<{ thresholdCents: number } | null> {
+    const thresholdCents = await settings.getApprovalThresholdCents(companyId);
+    if (thresholdCents === null || totalCents <= thresholdCents) return null;
+    const approved = await approvals.findApprovedVideoRenderApproval(companyId, storylineId, totalCents);
+    return approved ? null : { thresholdCents };
+  }
+
+  /** File one open card for the storyline (never a second), then refuse. The stamped fields come from here, never the caller. */
+  async function refuseForApproval(
+    companyId: string,
+    title: string,
+    storylineId: string,
+    actor: VideoStorylineActor,
+    info: { thresholdCents: number; totalCents: number; shotCount: number; summary: string; refusal: string },
+  ): Promise<never> {
+    const open = await approvals.findOpenVideoRenderApproval(companyId, storylineId);
+    if (!open) {
+      const payload = videoRenderRequestPayloadSchema.parse({
+        kind: "video_render",
+        storylineId,
+        shotCount: info.shotCount,
+        estimatedTotalCents: info.totalCents,
+        thresholdCents: info.thresholdCents,
+        title: `Render "${title}"`,
+        summary: info.summary,
+      });
+      await approvals.create(companyId, { type: "request_board_approval", requestedByAgentId: actor.agentId, payload, status: "pending" });
+    }
+    throw unprocessable(info.refusal);
+  }
+
   async function startRender(companyId: string, storylineId: string, actor: VideoStorylineActor, input: StartVideoStorylineRenderInput) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -591,27 +626,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Mirrors browser-service.ts's purchase-clearance gate: file once, then
     // refuse until the board decides, never trusting the caller's own words
     // for the stamped fields.
-    const thresholdCents = await settings.getApprovalThresholdCents(companyId);
-    if (thresholdCents !== null && estimateResult.estimatedTotalCents > thresholdCents) {
-      const approved = await approvals.findApprovedVideoRenderApproval(companyId, storylineId, estimateResult.estimatedTotalCents);
-      if (!approved) {
-        const open = await approvals.findOpenVideoRenderApproval(companyId, storylineId);
-        if (!open) {
-          const payload = videoRenderRequestPayloadSchema.parse({
-            kind: "video_render",
-            storylineId,
-            shotCount: estimateResult.shotCount,
-            estimatedTotalCents: estimateResult.estimatedTotalCents,
-            thresholdCents,
-            title: `Render "${storyline.title}"`,
-            summary: `Rendering this storyline is estimated at ${estimateResult.estimatedTotalCents} cents across ${estimateResult.shotCount} shots, over this company's ${thresholdCents}-cent approval threshold.`,
-          });
-          await approvals.create(companyId, { type: "request_board_approval", requestedByAgentId: actor.agentId, payload, status: "pending" });
-        }
-        throw unprocessable(
-          `This render's estimated cost (${estimateResult.estimatedTotalCents} cents) is over this company's ${thresholdCents}-cent approval threshold. Waiting on a board decision before it can start.`,
-        );
-      }
+    const missing = await missingRenderApproval(companyId, storylineId, estimateResult.estimatedTotalCents);
+    if (missing) {
+      await refuseForApproval(companyId, storyline.title, storylineId, actor, {
+        thresholdCents: missing.thresholdCents,
+        totalCents: estimateResult.estimatedTotalCents,
+        shotCount: estimateResult.shotCount,
+        summary: `Rendering this storyline is estimated at ${estimateResult.estimatedTotalCents} cents across ${estimateResult.shotCount} shots, over this company's ${missing.thresholdCents}-cent approval threshold.`,
+        refusal: `This render's estimated cost (${estimateResult.estimatedTotalCents} cents) is over this company's ${missing.thresholdCents}-cent approval threshold. Waiting on a board decision before it can start.`,
+      });
     }
 
     const pending = renderableShots.find((s) => s.status !== "done");
@@ -724,11 +747,29 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
+    // Spend-cap gap (DUR-4915, security review): a re-render on a film that is not already running is a fresh paid
+    // render, so it needs the same board sign-off startRender asks for once the company's approval threshold is
+    // crossed. A film that is "rendering" is a run startRender already cleared. Never-made shots have no cost to
+    // refund, so one-shot-at-a-time must not walk past the threshold.
+    const gateTotal = spentAfterRefund + shotEstimate.estimatedTotalCents;
+    const refuseRerender = (thresholdCents: number, totalCents: number) =>
+      refuseForApproval(companyId, storyline.title, storylineId, actor, {
+        thresholdCents,
+        totalCents,
+        shotCount: 1,
+        summary: `Re-rendering shot ${shot.orderIndex + 1} of this storyline takes its render spend to ${totalCents} cents, over this company's ${thresholdCents}-cent approval threshold.`,
+        refusal: `Re-rendering this shot would take this storyline's render spend to ${totalCents} cents, over this company's ${thresholdCents}-cent approval threshold. Waiting on a board decision before it can render.`,
+      });
+    if (storyline.status !== "rendering") {
+      const missing = await missingRenderApproval(companyId, storylineId, gateTotal);
+      if (missing) await refuseRerender(missing.thresholdCents, gateTotal);
+    }
     // Security review (replace-import TOCTOU): queue the shot under the
     // storyline row lock a "replace" import also takes, re-checking the shot is
     // still there and idle. The storyline's own status is left alone (DUR-4915):
     // flipping it to "rendering" would make the tick carry on through every
     // other shot, past the approval threshold startRender enforces.
+    const lockedGate: { hit: { thresholdCents: number; totalCents: number } | null } = { hit: null };
     await withCompanyScope(db, companyId, async (tx) => {
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       if (locked.status === "stitching") {
@@ -749,6 +790,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         throw unprocessable(
           `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
         );
+      }
+      // The same threshold check again on the row as it is under the lock (spend, status or the threshold's card may
+      // have changed since the pre-lock check). The card is filed after the lock is released.
+      if (locked.status !== "rendering") {
+        const missing = await missingRenderApproval(companyId, storylineId, lockedTotal);
+        if (missing) {
+          lockedGate.hit = { thresholdCents: missing.thresholdCents, totalCents: lockedTotal };
+          return;
+        }
       }
       await tx
         .update(videoShots)
@@ -777,6 +827,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         })
         .where(eq(videoStorylines.id, storylineId));
     });
+    if (lockedGate.hit) await refuseRerender(lockedGate.hit.thresholdCents, lockedGate.hit.totalCents);
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
     try {
