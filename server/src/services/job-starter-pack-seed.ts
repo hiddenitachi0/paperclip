@@ -14,13 +14,20 @@ import { DUR_COMPANY_ID } from "./agent-role-seed.js";
 const LEGAL_ADVISOR_ROLE_KEY = "legal-advisor";
 
 // The job texts live in the shared position catalogue, so "Add from
-// catalogue" and this seed always create the same three jobs.
-const LEGAL_ADVISOR_JOBS: Array<{ title: string; instructions: string; outputFormat: string }> =
-  LEGAL_ADVISOR_CATALOGUE_JOBS.map((job) => ({
-    title: job.title,
-    instructions: job.instructions,
-    outputFormat: job.outputFormat,
-  }));
+// catalogue" and this seed always create the same jobs.
+const LEGAL_ADVISOR_JOBS = LEGAL_ADVISOR_CATALOGUE_JOBS.map((job) => ({
+  title: job.title,
+  instructions: job.instructions,
+  outputFormat: job.outputFormat,
+  variables: job.variables.map((variable) => ({
+    name: variable.name,
+    label: variable.label,
+    type: variable.type,
+    defaultValue: variable.defaultValue ?? null,
+    required: variable.required,
+    options: variable.options ?? [],
+  })),
+}));
 
 export async function seedLegalAdvisorStarterPack(db: Db): Promise<{ createdPosition: boolean; createdJobs: string[] }> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, DUR_COMPANY_ID));
@@ -58,7 +65,7 @@ export async function seedLegalAdvisorStarterPack(db: Db): Promise<{ createdPosi
         title: jobDef.title,
         instructions: jobDef.instructions,
         status: "active",
-        variables: [],
+        variables: jobDef.variables,
         runMode: "full_agent",
         outputFormat: jobDef.outputFormat,
         requiresApproval: false,
