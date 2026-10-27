@@ -287,7 +287,8 @@ export function describeAggregateCoverage(
 ): string {
   const label = (ref: { contractId: string; clauseRef: string | null }) =>
     `${titles[ref.contractId] ?? ref.contractId}${ref.clauseRef ? ` (${ref.clauseRef})` : ""}`;
-  const list = (refs: { contractId: string; clauseRef: string | null }[]) => refs.map(label).join("; ");
+  // Alphabetical, so the same data always reads the same (ids are random).
+  const list = (refs: { contractId: string; clauseRef: string | null }[]) => refs.map(label).sort().join("; ");
   const lines: string[] = [];
   const scope = [
     aggregate.filters.type ? `type ${aggregate.filters.type}` : "all types",
