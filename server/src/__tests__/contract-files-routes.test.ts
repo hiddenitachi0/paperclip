@@ -32,6 +32,7 @@ import { companySearchService } from "../services/company-search.js";
 
 let errorHandler: typeof import("../middleware/index.js").errorHandler;
 let contractRoutes: typeof import("../routes/contracts.js").contractRoutes;
+let assetRoutes: typeof import("../routes/assets.js").assetRoutes;
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -62,11 +63,13 @@ describeEmbeddedPostgres("contract files (DUR-4853)", () => {
     vi.doUnmock("../routes/contracts.js");
     vi.doUnmock("../middleware/index.js");
     vi.doUnmock("../middleware/company-scope.js");
-    const [routes, middleware] = await Promise.all([
+    const [routes, assetRouteModule, middleware] = await Promise.all([
       vi.importActual<typeof import("../routes/contracts.js")>("../routes/contracts.js"),
+      vi.importActual<typeof import("../routes/assets.js")>("../routes/assets.js"),
       vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
     ]);
     contractRoutes = routes.contractRoutes;
+    assetRoutes = assetRouteModule.assetRoutes;
     errorHandler = middleware.errorHandler;
   }, 30_000);
 
@@ -116,6 +119,7 @@ describeEmbeddedPostgres("contract files (DUR-4853)", () => {
       next();
     });
     app.use("/api", contractRoutes(db, storage, options));
+    app.use("/api", assetRoutes(db, storage));
     app.use(errorHandler);
     return app;
   }
@@ -299,6 +303,31 @@ describeEmbeddedPostgres("contract files (DUR-4853)", () => {
       const app = createApp({ agentId: legal, companyId: companyA });
       expect((await upload(app, companyA, { body: buildPdf(CLAUSE), name: "lease.pdf" })).status).toBe(201);
       expect((await upload(app, companyB, { body: buildPdf(CLAUSE), name: "lease.pdf" })).status).toBe(403);
+    });
+
+    it("keeps contract files out of the general asset route for callers who may not use contracts, even a replaced file", async () => {
+      const companyA = await seedCompany();
+      const legal = await seedAgent(companyA, { roleKey: "legal-advisor" });
+      const plainAgent = await seedAgent(companyA);
+      const owner = createApp({ board: [companyA] });
+      const created = await upload(owner, companyA, { body: buildPdf(CLAUSE), name: "lease.pdf" });
+      const id = created.body.contract.id as string;
+      const firstAsset = created.body.contract.assetId as string;
+      const replaced = await upload(owner, companyA, { body: buildPdf(CLAUSE), name: "v2.pdf" }, {}, `/api/companies/${companyA}/contracts/${id}/file`);
+      const secondAsset = replaced.body.contract.assetId as string;
+      expect(secondAsset).not.toBe(firstAsset);
+
+      for (const assetId of [firstAsset, secondAsset]) {
+        const url = `/api/assets/${assetId}/content`;
+        expect((await request(createApp({ agentId: plainAgent, companyId: companyA })).get(url)).status).toBe(404);
+        expect((await request(createApp({ board: [companyA], role: "viewer" })).get(url)).status).toBe(404);
+        expect((await request(createApp({ agentId: legal, companyId: companyA })).get(url)).status).toBe(200);
+        expect((await request(owner).get(url)).status).toBe(200);
+      }
+
+      // The activity log no longer hands out the asset id either.
+      const activity = await db.select().from(activityLog).where(eq(activityLog.entityType, "contract"));
+      expect(JSON.stringify(activity.map((row) => row.details))).not.toContain(firstAsset);
     });
 
     it("never reaches a contract of another company by id (file, re-extract, download)", async () => {

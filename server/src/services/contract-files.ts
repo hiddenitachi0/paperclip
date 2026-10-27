@@ -6,6 +6,7 @@ import type { ContractTextStatus } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import type { StorageService } from "../storage/types.js";
 import { assetService } from "./assets.js";
+import { CONTRACT_FILE_NAMESPACE } from "./contracts.js";
 import {
   extractContractText,
   type ExtractionFailureReason,
@@ -91,7 +92,7 @@ export function contractFileService(
   ) {
     const stored = await storage.putFile({
       companyId,
-      namespace: "contracts",
+      namespace: CONTRACT_FILE_NAMESPACE,
       originalFilename: file.originalname || null,
       // Our own detected type, never the client's.
       contentType: CONTRACT_FILE_CONTENT_TYPES[kind],

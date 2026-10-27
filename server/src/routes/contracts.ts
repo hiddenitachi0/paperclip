@@ -253,7 +253,6 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     const asset = await files.storeFile(companyId, file, kind, actorRef(getActorInfo(req)));
     await svc.updateContract(companyId, id, { assetId: asset.id, extractedText: null, textStatus: "pending" });
     await log(req, companyId, "contract.file_attached", "contract", id, {
-      assetId: asset.id,
       fileKind: kind,
       byteSize: asset.byteSize,
     });
@@ -292,7 +291,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     res.setHeader("Content-Disposition", `attachment; filename="contract${isDocx ? ".docx" : ".pdf"}"`);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-store");
-    await log(req, companyId, "contract.file_downloaded", "contract", id, { assetId: asset.id });
+    await log(req, companyId, "contract.file_downloaded", "contract", id, {});
     object.stream.on("error", next);
     object.stream.pipe(res);
   });
