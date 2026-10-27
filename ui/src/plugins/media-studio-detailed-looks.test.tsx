@@ -230,6 +230,73 @@ describe("Media Studio looks page: detailed looks", () => {
     await flush();
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="What picture 1 is for"]')!.value).toBe("other");
   });
+
+  it("removes a picked picture that is not in the newest pictures, with its role, and saves without it", async () => {
+    const OLD = "88888888-8888-4888-8888-888888888888";
+    actions["looks.list"] = vi.fn(async () => ({
+      looks: [{ ...OLD_LOOK, referenceFileIds: [OLD, PIC_A], referenceRoles: ["face", "outfit"] }],
+      canManage: true,
+      maxReferenceFiles: 4,
+    }));
+    root = createRoot(container);
+    root.render(<MediaStudioLooksPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+    buttonNamed(container, "Edit").click();
+    await flush();
+    expect(container.querySelector<HTMLImageElement>('img[alt="Reference picture 1"]')!.src).toContain(`/api/attachments/${OLD}/thumbnail`);
+    container.querySelector<HTMLButtonElement>('button[aria-label="Remove picture 1"]')!.click();
+    await flush();
+    expect(container.querySelectorAll('select[aria-label^="What picture"]')).toHaveLength(1);
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="What picture 1 is for"]')!.value).toBe("outfit");
+    buttonNamed(container, "Save look").click();
+    await flush();
+    expect(actions["looks.save"]).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceFileIds: [PIC_A], referenceRoles: ["outfit"] }),
+    );
+  });
+
+  it("shows a deleted picture as no longer in Files, can remove it, and shows the note after saving", async () => {
+    actions["looks.save"] = vi.fn(async () => ({ looks: [], note: "1 picture was removed because it is no longer in Files." }));
+    root = createRoot(container);
+    root.render(<MediaStudioLooksPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+    buttonNamed(container, "Edit").click();
+    await flush();
+    container.querySelector<HTMLImageElement>('img[alt="Reference picture 1"]')!.dispatchEvent(new Event("error"));
+    await flush();
+    expect(container.textContent).toContain("This picture is no longer in Files");
+    expect(container.querySelector('button[aria-label="Remove picture 1"]')).not.toBeNull();
+    buttonNamed(container, "Save look").click();
+    await flush();
+    expect(container.querySelector('[role="status"]')!.textContent).toBe("1 picture was removed because it is no longer in Files.");
+  });
+
+  it("searches pictures by name and loads more pages", async () => {
+    const PIC_C = "99999999-9999-4999-8999-999999999999";
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = new URL(url, "http://x");
+      const body = u.searchParams.get("cursor")
+        ? { artifacts: [{ title: "Older", contentPath: `/api/attachments/${PIC_C}/content`, mediaKind: "image" }], nextCursor: null }
+        : { artifacts: [{ title: "Maja face", contentPath: `/api/attachments/${PIC_A}/content`, mediaKind: "image" }], nextCursor: "next-page" };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await openNewLook();
+    expect(container.querySelector('button[title="Older"]')).toBeNull();
+    buttonNamed(container, "Load more pictures").click();
+    await flush();
+    expect(container.querySelector('button[title="Older"]')).not.toBeNull();
+    expect(container.querySelector('button[title="Maja face"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Load more pictures");
+
+    setValue(container.querySelector<HTMLInputElement>('input[aria-label="Search your pictures"]')!, "dress");
+    await flush();
+    buttonNamed(container, "Search").click();
+    await flush();
+    const lastUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
+    expect(lastUrl).toContain("q=dress");
+    expect(lastUrl).toContain("qScope=filename");
+  });
 });
 
 describe("detailed look helpers", () => {

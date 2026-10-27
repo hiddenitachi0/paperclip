@@ -324,9 +324,15 @@ describe("media-studio saved looks", () => {
       "Only the company's owner or an admin can change looks.",
     );
     await expect(harness.performAction("looks.save", draft, agent)).rejects.toThrow("Only the company's owner or an admin");
-    await expect(
-      harness.performAction("looks.save", { ...draft, referenceFileIds: [FOREIGN_REF] }, owner),
-    ).rejects.toThrow("One of the reference pictures is not in this company's Files.");
+    // Another company's (or a deleted) picture is never kept on the look: it is dropped and the answer says so.
+    const dropped = await harness.performAction<any>(
+      "looks.save",
+      { ...draft, name: "Dropped", referenceFileIds: [REF_A, FOREIGN_REF], referenceRoles: ["face", "outfit"] },
+      owner,
+    );
+    expect(dropped.note).toBe("1 picture was removed because it is no longer in Files.");
+    expect(dropped.looks.find((l: any) => l.name === "Dropped")).toMatchObject({ referenceFileIds: [REF_A], referenceRoles: ["face"] });
+    await harness.performAction("looks.delete", { id: dropped.looks.find((l: any) => l.name === "Dropped").id }, owner);
 
     const saved = await harness.performAction<any>("looks.save", draft, owner);
     expect(saved.looks).toHaveLength(1);
