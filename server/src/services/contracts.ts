@@ -1203,7 +1203,9 @@ export function contractService(db: Db, rawDb: Db = db) {
             .values(terms.map(({ key, ...term }) => ({ companyId, contractId: created.id, key, ...toTermColumns(term) })));
         }
         if (deadlines.length > 0) {
-          await t.insert(contractDeadlines).values(deadlines.map((deadline) => toDeadlineValues(companyId, created.id, deadline)));
+          await t
+            .insert(contractDeadlines)
+            .values(await Promise.all(deadlines.map((deadline) => toDeadlineValues(companyId, created.id, deadline))));
         }
         return { ...created, partyCount: parties.length, termCount: terms.length, deadlineCount: deadlines.length };
       });

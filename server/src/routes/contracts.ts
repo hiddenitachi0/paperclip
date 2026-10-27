@@ -229,6 +229,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
   router.post("/companies/:companyId/contracts/register", ...access(), validate(registerContractSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     const registered = await svc.registerContract(companyId, req.body, actorRef(getActorInfo(req)));
+    if (registered.deadlineCount > 0) await syncReminders(companyId, () => reminders.syncContract(companyId, registered.id));
     await log(req, companyId, "contract.registered", "contract", registered.id, {
       type: registered.type,
       status: registered.status,
