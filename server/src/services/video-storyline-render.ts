@@ -680,6 +680,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.getStoryline(companyId, storylineId);
   }
 
+  /** Older renders pinned the made-up name 'sogni-video' on the shot; a person never sets that. */
+  function hasAutomaticPin(shot: { model: string | null }): boolean {
+    return shot.model !== null && realVideoModel(shot.model) === null;
+  }
+
+  function withoutAutomaticPin<T extends { providerId: string | null; model: string | null }>(shot: T): T {
+    return hasAutomaticPin(shot) ? { ...shot, providerId: null, model: null } : shot;
+  }
+
   async function reRenderShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -701,7 +710,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
-    const shotEstimate = estimateShotRenderCents(storyline, [shot]);
+    // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
+    // estimate and the render use the same target.
+    const shotEstimate = estimateShotRenderCents(storyline, [withoutAutomaticPin(shot)]);
     if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
@@ -719,6 +730,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!current) throw conflict("This shot was removed while the re-render was starting.");
       if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
       const lockedRefund = current.actualCostCents ?? 0;
+      // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
+      // pre-lock check), priced with the same clear rule the update below applies.
+      if (locked.budgetCapCents !== null) {
+        const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
+        const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedEstimate;
+        if (lockedTotal > locked.budgetCapCents) {
+          throw unprocessable(
+            `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
+          );
+        }
+      }
       await tx
         .update(videoShots)
         .set({
@@ -734,7 +756,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           ...(current.clipKind === "generated" ? { sourceTrimInMs: null, sourceTrimOutMs: null } : {}),
           // Older renders pinned the made-up name 'sogni-video' on the shot. A person never sets that (the pin
           // API drops it), so it is an automatic pin: clear it so this render follows the film's model.
-          ...(current.model !== null && realVideoModel(current.model) === null ? { providerId: null, model: null } : {}),
+          ...(hasAutomaticPin(current) ? { providerId: null, model: null } : {}),
           updatedAt: nowOf(),
         })
         .where(eq(videoShots.id, shotId));

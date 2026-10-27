@@ -313,6 +313,22 @@ d("storyline model change", () => {
     expect([pinned.providerId, pinned.model]).toEqual(["sogni", null]);
   });
 
+  it("a re-render of a shot with an old 'sogni-video' pin is priced on the film's service, so the cap holds", async () => {
+    // Film on Fal Kling (7 s shot bills the 10 s minimum: 500 cents); the old automatic pin says Sogni (7 s x 40 = 280).
+    const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, durationSeconds: 7 });
+    await markMadeBy(companyId, storylineId, shotIds[0]!, "sogni", "sogni-video");
+    await db.update(videoShots).set({ providerId: "sogni", model: "sogni-video" }).where(eq(videoShots.id, shotIds[0]!));
+    // 400 cents: the Sogni price would pass, the Fal price must not.
+    await db.update(videoStorylines).set({ budgetCapCents: 400, spentCents: 500 }).where(eq(videoStorylines.id, storylineId));
+    const rec = recordingService({ model: KLING_16, provider: "fal" });
+    const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+    await expect(render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toThrow(/over the budget cap/);
+    expect(rec.started).toHaveLength(0);
+    const row = await shotRow(shotIds[0]!);
+    expect(row.status).toBe("done");
+    expect((await storylineRow(storylineId)).spentCents).toBe(500);
+  });
+
   it("(e) the estimate and the render use the same target", async () => {
     const { companyId, storylineId, shotIds, svc } = await seed({ providerId: "sogni", model: "ltx25", shots: 2, durationSeconds: 7 });
     await svc.updateShot(companyId, storylineId, shotIds[1]!, { providerId: "fal", model: KLING_16 }, ACTOR);
