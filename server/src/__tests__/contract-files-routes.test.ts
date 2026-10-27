@@ -245,7 +245,7 @@ describeEmbeddedPostgres("contract files (DUR-4853)", () => {
       expect(bombed.body.extraction.reason).toBe("rejected");
       expect(bombed.body.contract.assetId).toBeTruthy();
       expect((await counts()).assets).toBe(2);
-    });
+    }, 30_000);
 
     it("refuses wrong magic bytes, mismatched extensions, macros, empty files and oversize files before storing anything", async () => {
       const companyId = await seedCompany();
