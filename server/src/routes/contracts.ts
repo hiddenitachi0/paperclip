@@ -12,6 +12,7 @@ import {
   listContractsQuerySchema,
   updateContractDeadlineSchema,
   updateContractPartySchema,
+  updateContractSettingsSchema,
   updateContractSchema,
   upsertContractTermSchema,
 } from "@paperclipai/shared";
@@ -19,7 +20,9 @@ import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { badRequest, forbidden } from "../errors.js";
-import { logActivity } from "../services/index.js";
+import { logger } from "../middleware/logger.js";
+import { heartbeatService, logActivity } from "../services/index.js";
+import { contractDeadlineReminderService } from "../services/contract-deadline-reminders.js";
 import { agentMayUseContracts, contractService } from "../services/contracts.js";
 
 /**
@@ -41,6 +44,20 @@ export function contractRoutes(rawDb: Db) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = contractService(db, rawDb);
+  const reminders = contractDeadlineReminderService(db, { heartbeat: heartbeatService(db) });
+
+  /**
+   * Keep reminder issues in step with a deadline change. The write the caller
+   * asked for has already happened, so a failure here is logged (ids only) and
+   * left for the next daily sweep rather than turned into an error response.
+   */
+  async function syncReminders(companyId: string, run: () => Promise<unknown>) {
+    try {
+      await run();
+    } catch (error) {
+      logger.error({ err: error, companyId }, "contract deadline reminder sync failed after a deadline change");
+    }
+  }
 
   function scope() {
     return companyScopeFromParam(rawDb, assertCompanyAccess);
@@ -120,6 +137,25 @@ export function contractRoutes(rawDb: Db) {
     res.json(await svc.aggregateTerm(req.params.companyId as string, key.data, query.data));
   });
 
+  // --- Reminder settings (default lead times per company; board only to change) ---
+  router.get("/companies/:companyId/contract-settings", ...access(), async (req, res) => {
+    res.json(await svc.getSettings(req.params.companyId as string));
+  });
+
+  router.patch(
+    "/companies/:companyId/contract-settings",
+    ...boardAccess(),
+    validate(updateContractSettingsSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const updated = await svc.updateSettings(companyId, req.body);
+      await log(req, companyId, "contract.settings_updated", "company", companyId, {
+        changed: Object.keys(req.body).sort(),
+      });
+      res.json(updated);
+    },
+  );
+
   // --- Deadlines across the company ---
   router.get("/companies/:companyId/contract-deadlines", ...access(), async (req, res) => {
     const query = listContractDeadlinesQuerySchema.safeParse(req.query);
@@ -165,6 +201,7 @@ export function contractRoutes(rawDb: Db) {
   router.delete("/companies/:companyId/contracts/:id", ...boardAccess(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
+    await reminders.closeForContract(companyId, id);
     const removed = await svc.removeContract(companyId, id);
     await log(req, companyId, "contract.deleted", "contract", id, { type: removed.type });
     res.json({ ok: true });
@@ -183,6 +220,10 @@ export function contractRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const id = req.params.id as string;
       const result = await svc.linkPreviousVersion(companyId, id, req.body);
+      await syncReminders(companyId, async () => {
+        await reminders.syncContract(companyId, result.previousContractId);
+        await reminders.syncContract(companyId, id);
+      });
       await log(req, companyId, "contract.version_linked", "contract", id, {
         previousContractId: result.previousContractId,
         versionNo: result.versionNo,
@@ -243,6 +284,7 @@ export function contractRoutes(rawDb: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const created = await svc.addDeadline(companyId, req.params.id as string, req.body);
+      await syncReminders(companyId, () => reminders.syncDeadline(companyId, created.id));
       await log(req, companyId, "contract.deadline_added", "contract", req.params.id as string, {
         deadlineId: created.id,
         kind: created.kind,
@@ -264,6 +306,7 @@ export function contractRoutes(rawDb: Db) {
         req.params.deadlineId as string,
         req.body,
       );
+      await syncReminders(companyId, () => reminders.syncDeadline(companyId, updated.id));
       await log(req, companyId, "contract.deadline_updated", "contract", req.params.id as string, {
         deadlineId: updated.id,
         changed: Object.keys(req.body).sort(),
@@ -275,6 +318,7 @@ export function contractRoutes(rawDb: Db) {
 
   router.delete("/companies/:companyId/contracts/:id/deadlines/:deadlineId", ...access(), async (req, res) => {
     const companyId = req.params.companyId as string;
+    await reminders.closeForDeadline(companyId, req.params.deadlineId as string);
     await svc.removeDeadline(companyId, req.params.id as string, req.params.deadlineId as string);
     await log(req, companyId, "contract.deadline_removed", "contract", req.params.id as string, {
       deadlineId: req.params.deadlineId,

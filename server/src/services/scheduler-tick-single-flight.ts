@@ -162,6 +162,7 @@ export const SCHEDULER_TICK_CHAINS = [
   "tradingAgent",
   "cryptoWallets",
   "bragOnDone",
+  "contractDeadlineReminders",
 ] as const;
 
 export type SchedulerTickChain = (typeof SCHEDULER_TICK_CHAINS)[number];
@@ -226,6 +227,7 @@ export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   tradingAgent: "checking the trading agent",
   cryptoWallets: "following up crypto wallet payments",
   bragOnDone: "making brag videos for finished tasks",
+  contractDeadlineReminders: "opening contract deadline reminders",
 };
 
 /** At most one skip line per chain per minute, however often it skips. */

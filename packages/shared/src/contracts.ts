@@ -61,6 +61,23 @@ export function defaultLeadTimesDaysForKind(kind: ContractDeadlineKind): number[
 }
 
 /**
+ * Legal Phase 3 (DUR-4855): the origin kind of the issues the daily sweep opens
+ * for a deadline. Also the key the sweep's idempotency rests on.
+ */
+export const CONTRACT_DEADLINE_ORIGIN_KIND = "contract_deadline";
+
+/** Deadline kinds where the action is the owner's own decision (extend, terminate, renew). */
+export const OWNER_DECISION_DEADLINE_KINDS: readonly ContractDeadlineKind[] = [
+  "notice_extend",
+  "notice_terminate",
+  "renewal",
+];
+
+export function defaultNeedsOwnerForKind(kind: ContractDeadlineKind): boolean {
+  return OWNER_DECISION_DEADLINE_KINDS.includes(kind);
+}
+
+/**
  * Well-known term keys. The register accepts other keys too (free-form), but
  * these are the ones questions across contracts are expected to ask, so the
  * extractor and the aggregation both share one spelling.
@@ -190,6 +207,7 @@ export const createContractDeadlineSchema = z
     kind: contractDeadlineKindSchema,
     dueDate: isoDate,
     leadTimesDays: leadTimesDays.optional(),
+    needsOwner: z.boolean().optional(),
     clauseRef: optionalText(200),
     note: z.string().max(5_000).nullable().optional(),
   })
@@ -201,12 +219,22 @@ export const updateContractDeadlineSchema = z
     kind: contractDeadlineKindSchema.optional(),
     dueDate: isoDate.optional(),
     leadTimesDays: leadTimesDays.optional(),
+    needsOwner: z.boolean().optional(),
     clauseRef: optionalText(200),
     note: z.string().max(5_000).nullable().optional(),
     state: contractDeadlineStateSchema.exclude(["superseded"]).optional(),
   })
   .strict();
 export type UpdateContractDeadline = z.infer<typeof updateContractDeadlineSchema>;
+
+/** Per-company reminder defaults; null clears back to the built-in default. */
+export const updateContractSettingsSchema = z
+  .object({
+    noticeLeadTimesDays: leadTimesDays.nullable().optional(),
+    otherLeadTimesDays: leadTimesDays.nullable().optional(),
+  })
+  .strict();
+export type UpdateContractSettings = z.infer<typeof updateContractSettingsSchema>;
 
 export const listContractDeadlinesQuerySchema = z.object({
   state: contractDeadlineStateSchema.optional(),

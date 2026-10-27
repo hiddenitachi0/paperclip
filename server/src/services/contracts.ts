@@ -6,6 +6,7 @@ import {
   companyAgentRoles,
   contractDeadlines,
   contractParties,
+  contractSettings,
   contractTerms,
   contracts,
   crmOrganizations,
@@ -16,7 +17,11 @@ import {
   CONTRACT_STATUSES,
   CONTRACT_TERM_REGISTRY_KEYS,
   contractTermKeySchema,
-  defaultLeadTimesDaysForKind,
+  NOTICE_DEADLINE_KINDS,
+  DEFAULT_LEAD_TIMES_DAYS,
+  DEFAULT_NOTICE_LEAD_TIMES_DAYS,
+  defaultNeedsOwnerForKind,
+  type UpdateContractSettings,
   type AggregateContractTermQuery,
   type ContractStatus,
   type ContractTermAggregate,
@@ -289,13 +294,37 @@ export function contractService(db: Db, rawDb: Db = db) {
     }
   }
 
-  function toDeadlineValues(companyId: string, contractId: string, input: CreateContractDeadline) {
+  async function readSettings(companyId: string) {
+    const row = await db
+      .select({ notice: contractSettings.noticeLeadTimesDays, other: contractSettings.otherLeadTimesDays })
+      .from(contractSettings)
+      .where(eq(contractSettings.companyId, companyId))
+      .then((rows) => rows[0] ?? null);
+    return {
+      noticeLeadTimesDays: row?.notice ?? null,
+      otherLeadTimesDays: row?.other ?? null,
+      effectiveNoticeLeadTimesDays:
+        row?.notice && row.notice.length > 0 ? row.notice : [...DEFAULT_NOTICE_LEAD_TIMES_DAYS],
+      effectiveOtherLeadTimesDays: row?.other && row.other.length > 0 ? row.other : [...DEFAULT_LEAD_TIMES_DAYS],
+    };
+  }
+
+  /** The company's own default lead times for a kind, else the built-in ones. */
+  async function defaultLeadTimesFor(companyId: string, kind: CreateContractDeadline["kind"]): Promise<number[]> {
+    const settings = await readSettings(companyId);
+    return NOTICE_DEADLINE_KINDS.includes(kind)
+      ? settings.effectiveNoticeLeadTimesDays
+      : settings.effectiveOtherLeadTimesDays;
+  }
+
+  async function toDeadlineValues(companyId: string, contractId: string, input: CreateContractDeadline) {
     return {
       companyId,
       contractId,
       kind: input.kind,
       dueDate: input.dueDate,
-      leadTimesDays: input.leadTimesDays ?? defaultLeadTimesDaysForKind(input.kind),
+      leadTimesDays: input.leadTimesDays ?? (await defaultLeadTimesFor(companyId, input.kind)),
+      needsOwner: input.needsOwner ?? defaultNeedsOwnerForKind(input.kind),
       clauseRef: input.clauseRef ?? null,
       note: input.note ?? null,
     };
@@ -673,7 +702,7 @@ export function contractService(db: Db, rawDb: Db = db) {
       }
       return db
         .insert(contractDeadlines)
-        .values(toDeadlineValues(companyId, contractId, input))
+        .values(await toDeadlineValues(companyId, contractId, input))
         .returning()
         .then((rows) => rows[0]);
     },
@@ -717,6 +746,24 @@ export function contractService(db: Db, rawDb: Db = db) {
         .returning({ id: contractDeadlines.id })
         .then((rows) => rows[0] ?? null);
       if (!removed) throw notFound("Deadline not found");
+    },
+
+    // ------------------------------------------------------------ reminder settings
+    getSettings: readSettings,
+
+    /** Applies to deadlines created from now on; existing deadlines keep their own lead times. */
+    updateSettings: async (companyId: string, input: UpdateContractSettings) => {
+      const values: { noticeLeadTimesDays?: number[] | null; otherLeadTimesDays?: number[] | null } = {};
+      if (input.noticeLeadTimesDays !== undefined) values.noticeLeadTimesDays = input.noticeLeadTimesDays;
+      if (input.otherLeadTimesDays !== undefined) values.otherLeadTimesDays = input.otherLeadTimesDays;
+      await db
+        .insert(contractSettings)
+        .values({ companyId, ...values })
+        .onConflictDoUpdate({
+          target: contractSettings.companyId,
+          set: { ...values, updatedAt: new Date() },
+        });
+      return readSettings(companyId);
     },
 
     // ------------------------------------------------------------ terms

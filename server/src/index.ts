@@ -121,6 +121,7 @@ import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
 import { bragOnDoneService } from "./services/brag-on-done.js";
+import { contractDeadlineReminderService } from "./services/contract-deadline-reminders.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -1103,6 +1104,7 @@ export async function startServer(): Promise<StartedServer> {
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
     const escalationGrants = escalationGrantService(schedulerDb as any);
     const bragOnDone = bragOnDoneService(schedulerDb as any);
+    const contractDeadlineReminders = contractDeadlineReminderService(schedulerDb as any, { heartbeat });
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery. Wrapped in
@@ -2061,6 +2063,38 @@ export async function startServer(): Promise<StartedServer> {
     // settled and the first report does not describe a restart in progress.
     setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
     setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
+
+    // Legal Phase 3 (DUR-4855): the contract-deadline reminder sweep. Hourly
+    // tick; what it does is per calendar day and idempotent (the
+    // contract_deadline_reminders table and the origin index), so a restart
+    // or a missed tick only delays a reminder, it never loses or doubles one.
+    // Runs without any agent. Bypass scope: it walks every company's open
+    // deadlines, but each issue it opens is created inside the deadline's own
+    // company and only the Legal agent of that company can be assigned.
+    const tickContractDeadlineReminders = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.contractDeadlineReminders, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: contract deadline reminders",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:contractDeadlineReminders",
+          },
+          () => contractDeadlineReminders.sweep(),
+        )
+          .then((result) => {
+            if (result.created > 0 || result.closed > 0 || result.errors > 0) {
+              logger.info({ ...result }, "contract deadline reminder sweep changed reminders");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "contract deadline reminder sweep failed");
+          }),
+      );
+    };
+    setTimeout(tickContractDeadlineReminders, 3 * 60 * 1000).unref?.();
+    setInterval(tickContractDeadlineReminders, 60 * 60 * 1000);
 
     // DUR-4462: daily Fal + Sogni billing reconciliation. Hourly tick; the
     // job itself is once-per-day per company (run rows) and skips cleanly
