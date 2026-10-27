@@ -179,6 +179,12 @@ export const linkPreviousContractVersionSchema = z
      * false: the old version's open deadlines are marked superseded.
      */
     carryDeadlines: z.boolean(),
+    /**
+     * Agents must pass the id of a request_confirmation that a board user
+     * accepted for exactly this pair (see contractVersionLinkConfirmationKey).
+     * Board users linking directly do not need one.
+     */
+    confirmationInteractionId: z.string().uuid().optional(),
   })
   .strict();
 export type LinkPreviousContractVersion = z.infer<typeof linkPreviousContractVersionSchema>;
@@ -226,76 +232,94 @@ export const contractTermKeySchema = z
  * carry no value, and a value kind carries exactly its own value field, so a
  * "not mentioned" can never be read as a zero.
  */
+export const contractTermValueShape = {
+  valueKind: z.enum(CONTRACT_TERM_VALUE_KINDS),
+  numberValue: z.number().finite().nullable().optional(),
+  currency: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{3}$/, "Use a 3-letter currency code")
+    .nullable()
+    .optional(),
+  textValue: z.string().max(10_000).nullable().optional(),
+  boolValue: z.boolean().nullable().optional(),
+  clauseRef: optionalText(200),
+  pageRef: optionalText(80),
+};
+
+function refineContractTermValue(
+  term: {
+    valueKind: ContractTermValueKind;
+    numberValue?: number | null;
+    currency?: string | null;
+    textValue?: string | null;
+    boolValue?: boolean | null;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const has = {
+    number: term.numberValue !== null && term.numberValue !== undefined,
+    text: term.textValue !== null && term.textValue !== undefined && term.textValue.trim() !== "",
+    bool: term.boolValue !== null && term.boolValue !== undefined,
+    currency: term.currency !== null && term.currency !== undefined,
+  };
+  const fail = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+  switch (term.valueKind) {
+    case "number":
+      if (!has.number) fail("numberValue", "A number term needs numberValue");
+      if (has.text) fail("textValue", "A number term carries no text value");
+      if (has.bool) fail("boolValue", "A number term carries no bool value");
+      break;
+    case "text":
+      if (!has.text) fail("textValue", "A text term needs textValue");
+      if (has.number) fail("numberValue", "A text term carries no number value");
+      if (has.bool) fail("boolValue", "A text term carries no bool value");
+      if (has.currency) fail("currency", "A text term carries no currency");
+      break;
+    case "bool":
+      if (!has.bool) fail("boolValue", "A bool term needs boolValue");
+      if (has.number) fail("numberValue", "A bool term carries no number value");
+      if (has.text) fail("textValue", "A bool term carries no text value");
+      if (has.currency) fail("currency", "A bool term carries no currency");
+      break;
+    case "not_mentioned":
+    case "explicitly_none":
+      if (has.number) fail("numberValue", `A ${term.valueKind} term carries no value`);
+      if (has.text) fail("textValue", `A ${term.valueKind} term carries no value`);
+      if (has.bool) fail("boolValue", `A ${term.valueKind} term carries no value`);
+      if (has.currency) fail("currency", `A ${term.valueKind} term carries no currency`);
+      break;
+  }
+}
+
 export const upsertContractTermSchema = z
-  .object({
-    valueKind: z.enum(CONTRACT_TERM_VALUE_KINDS),
-    numberValue: z.number().finite().nullable().optional(),
-    currency: z
-      .string()
-      .trim()
-      .regex(/^[A-Za-z]{3}$/, "Use a 3-letter currency code")
-      .nullable()
-      .optional(),
-    textValue: z.string().max(10_000).nullable().optional(),
-    boolValue: z.boolean().nullable().optional(),
-    clauseRef: optionalText(200),
-    pageRef: optionalText(80),
-  })
+  .object(contractTermValueShape)
   .strict()
-  .superRefine((term, ctx) => {
-    const has = {
-      number: term.numberValue !== null && term.numberValue !== undefined,
-      text: term.textValue !== null && term.textValue !== undefined && term.textValue.trim() !== "",
-      bool: term.boolValue !== null && term.boolValue !== undefined,
-      currency: term.currency !== null && term.currency !== undefined,
-    };
-    const fail = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
-    switch (term.valueKind) {
-      case "number":
-        if (!has.number) fail("numberValue", "A number term needs numberValue");
-        if (has.text) fail("textValue", "A number term carries no text value");
-        if (has.bool) fail("boolValue", "A number term carries no bool value");
-        break;
-      case "text":
-        if (!has.text) fail("textValue", "A text term needs textValue");
-        if (has.number) fail("numberValue", "A text term carries no number value");
-        if (has.bool) fail("boolValue", "A text term carries no bool value");
-        if (has.currency) fail("currency", "A text term carries no currency");
-        break;
-      case "bool":
-        if (!has.bool) fail("boolValue", "A bool term needs boolValue");
-        if (has.number) fail("numberValue", "A bool term carries no number value");
-        if (has.text) fail("textValue", "A bool term carries no text value");
-        if (has.currency) fail("currency", "A bool term carries no currency");
-        break;
-      case "not_mentioned":
-      case "explicitly_none":
-        if (has.number) fail("numberValue", `A ${term.valueKind} term carries no value`);
-        if (has.text) fail("textValue", `A ${term.valueKind} term carries no value`);
-        if (has.bool) fail("boolValue", `A ${term.valueKind} term carries no value`);
-        if (has.currency) fail("currency", `A ${term.valueKind} term carries no currency`);
-        break;
-    }
-  });
+  .superRefine(refineContractTermValue);
 export type UpsertContractTerm = z.infer<typeof upsertContractTermSchema>;
+
+/** Comma separated list of contract statuses, e.g. `active,draft`. */
+const contractStatusesParam = z
+  .string()
+  .optional()
+  .transform((value, ctx) => {
+    if (value === undefined || value === "") return undefined;
+    const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+    const parsed = z.array(contractStatusSchema).safeParse(parts);
+    if (!parsed.success) {
+      ctx.addIssue({ code: "custom", message: "statuses must be a comma separated list of contract statuses" });
+      return z.NEVER;
+    }
+    return parsed.data;
+  });
 
 export const aggregateContractTermQuerySchema = z.object({
   type: contractTypeSchema.optional(),
   /** Comma separated. Default: every status except superseded (old versions never count twice). */
-  statuses: z
-    .string()
-    .optional()
-    .transform((value, ctx) => {
-      if (value === undefined || value === "") return undefined;
-      const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
-      const parsed = z.array(contractStatusSchema).safeParse(parts);
-      if (!parsed.success) {
-        ctx.addIssue({ code: "custom", message: "statuses must be a comma separated list of contract statuses" });
-        return z.NEVER;
-      }
-      return parsed.data;
-    }),
+  statuses: contractStatusesParam,
   partyOrganizationId: z.string().uuid().optional(),
+  /** true: add contract titles and a plain-words coverage summary (what the agent tool asks for). */
+  report: z.enum(["true", "false"]).optional(),
 });
 export type AggregateContractTermQuery = z.infer<typeof aggregateContractTermQuerySchema>;
 
@@ -333,4 +357,105 @@ export interface ContractTermAggregate {
   noTermRecorded: { count: number; contracts: ContractTermRef[] };
   /** A row says "number" but holds no usable number. Reported, never averaged. */
   malformed: { count: number; contracts: ContractTermRef[] };
+}
+
+// ---------------------------------------------------------------- agent tools (Legal Phase 4, DUR-4856)
+
+/**
+ * The target key a version-link confirmation must carry. An agent proposes
+ * "this contract is a newer version of that one" with a request_confirmation
+ * whose target is `{ type: "custom", key: contractVersionLinkConfirmationKey(...) }`;
+ * the server only accepts a card a board user accepted for exactly this pair.
+ */
+export function contractVersionLinkConfirmationKey(currentContractId: string, previousContractId: string): string {
+  return `contract-version-link:${currentContractId}:${previousContractId}`;
+}
+
+/** One term in the one-call intake: the term key plus exactly what upsertContractTermSchema allows. */
+export const registerContractTermSchema = z
+  .object({ key: contractTermKeySchema, ...contractTermValueShape })
+  .strict()
+  .superRefine(refineContractTermValue);
+export type RegisterContractTerm = z.infer<typeof registerContractTermSchema>;
+
+/**
+ * Intake in one atomic call: the contract, its parties, the terms the contract
+ * states (with clause / page references) and its deadlines. Either all of it is
+ * written or none of it is.
+ */
+export const registerContractObjectSchema = z
+  .object({
+    ...contractFields,
+    parties: z.array(createContractPartySchema).max(50).optional(),
+    terms: z.array(registerContractTermSchema).max(100).optional(),
+    deadlines: z.array(createContractDeadlineSchema).max(50).optional(),
+  })
+  .strict();
+
+export const registerContractSchema = registerContractObjectSchema.superRefine((value, ctx) => {
+  const seen = new Set<string>();
+  (value.terms ?? []).forEach((term, index) => {
+    if (seen.has(term.key)) {
+      ctx.addIssue({ code: "custom", path: ["terms", index, "key"], message: "Each term key may appear once" });
+    }
+    seen.add(term.key);
+  });
+});
+export type RegisterContract = z.infer<typeof registerContractSchema>;
+
+export const findContractsQuerySchema = z.object({
+  /** Words from the title, a party name or the summary. Every word counts toward the ranking. */
+  q: z.string().trim().min(1).max(200).optional(),
+  type: contractTypeSchema.optional(),
+  /** Part of a party name (or the name of the CRM organisation on the contract). */
+  party: z.string().trim().min(1).max(200).optional(),
+  /** Replaced versions are left out unless asked for. */
+  includeSuperseded: z.enum(["true", "false"]).optional(),
+  limit: z.coerce.number().int().min(1).max(25).optional(),
+});
+export type FindContractsQuery = z.infer<typeof findContractsQuerySchema>;
+
+export const searchContractTextQuerySchema = z.object({
+  q: z.string().trim().min(2).max(200),
+  type: contractTypeSchema.optional(),
+  /** Comma separated. Default: every status except superseded. */
+  statuses: contractStatusesParam,
+  limit: z.coerce.number().int().min(1).max(25).optional(),
+});
+export type SearchContractTextQuery = z.infer<typeof searchContractTextQuerySchema>;
+
+export const CONTRACT_RELATED_REASONS = ["same_parties_and_type", "named_in_contract_text"] as const;
+export type ContractRelatedReason = (typeof CONTRACT_RELATED_REASONS)[number];
+
+export interface RelatedContractCandidate {
+  id: string;
+  title: string;
+  type: ContractType;
+  status: ContractStatus;
+  versionNo: number;
+  effectiveDate: string | null;
+  expiryDate: string | null;
+  reasons: ContractRelatedReason[];
+}
+
+export interface RelatedContractsResult {
+  contractId: string;
+  /** True when this contract already has a previous version: nothing to link. */
+  alreadyHasPreviousVersion: boolean;
+  candidates: RelatedContractCandidate[];
+}
+
+export interface ContractFileRef {
+  assetId: string;
+  /** Root-relative API path; open it with the same login the API uses. */
+  contentPath: string;
+  filename: string | null;
+  contentType: string | null;
+}
+
+export interface ContractTermCoverageReport extends ContractTermAggregate {
+  /** contractId -> title for every contract listed in the aggregate. */
+  contractTitles: Record<string, string>;
+  /** The answer in plain words, with the counts that must be quoted with any average. */
+  coverageText: string;
 }
