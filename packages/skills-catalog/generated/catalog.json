@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-27T13:02:19.381Z",
+  "generatedAt": "2026-10-27T22:42:53.484Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -555,8 +555,8 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 10327,
-          "sha256": "52c349a07fbd725cc9c348d033d064b6d08e84605d75a27c948b042493ea0632"
+          "sizeBytes": 11251,
+          "sha256": "0ff66fed80c16b7806fa711fc27ab70700cac035435e4a15aa3519da41bdecae"
         },
         {
           "path": "assets/sfx/casino/card-fan-1.ogg",
@@ -2197,7 +2197,7 @@
           "sha256": "c97ea53d7c5df2a3dd64694a388c013a05c363ac7c2e4e0d956c18ad3bfaa5ee"
         }
       ],
-      "contentHash": "sha256:5342e079cbb63c98098e00abd8f42eb593e715250672956684d72a8bd5f23393"
+      "contentHash": "sha256:59f35cbba25ddb55e442e38a16d248cc80b8e0f440a631e5318a3a808582ed6b"
     },
     {
       "id": "paperclipai:optional:content:brag-video",
@@ -2419,6 +2419,43 @@
       "contentHash": "sha256:877579ca9c8a918450d867a590bb80135cfc02ecba15ea495f2205359eff0ff0"
     },
     {
+      "id": "paperclipai:optional:media:explainer-video",
+      "key": "paperclipai/optional/media/explainer-video",
+      "kind": "optional",
+      "category": "media",
+      "slug": "explainer-video",
+      "name": "explainer-video",
+      "description": "Make a short infographic, chart, title or explainer video drawn entirely by code (HTML, CSS and SVG) with Paperclip's render worker — brief, scenes, check, contact sheet, render, deliver. Use when a task asks for a video of numbers, a chart that moves, an animated title card or a step-by-step explainer. Never use an image or video model to draw figures.",
+      "path": "catalog/optional/media/explainer-video",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "content",
+        "marketing",
+        "designer",
+        "analyst"
+      ],
+      "requires": [],
+      "tags": [
+        "video",
+        "infographic",
+        "explainer",
+        "chart",
+        "media"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 6722,
+          "sha256": "a6e54d89a84f600c6e1a6658ae7b20b70d092d568fed705d10296c08a0c1e01a"
+        }
+      ],
+      "contentHash": "sha256:2a0ecf45e0c712569e42ca638c3b5cc4ebdab0e707770fc498165356ed72200e"
+    },
+    {
       "id": "paperclipai:optional:media:media-studio-generation",
       "key": "paperclipai/optional/media/media-studio-generation",
       "kind": "optional",
@@ -2449,11 +2486,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 8618,
-          "sha256": "2156abf27059ea95f4e44581c05755f96b287ea8f5f65817e2e567738c36201b"
+          "sizeBytes": 8726,
+          "sha256": "f419528d3a8a0891927dcbce844279dbe46c0bfd61fb6ba070f1075f737eefcd"
         }
       ],
-      "contentHash": "sha256:fc655030e6f4fb77bbb7a5a31753b48459d8fbbd6f816ce05b61f23440514ecd"
+      "contentHash": "sha256:18fbc08e4ee87cf13819c9382cb964b7ec79ae6849b144e4e7ef2fb36ce3f7b9"
     },
     {
       "id": "paperclipai:optional:operations:calendar-scheduling",

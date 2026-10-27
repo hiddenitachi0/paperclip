@@ -31,7 +31,7 @@ Use the `paperclip` skill for API mechanics (auth headers, run id header, postin
 
 - A launch video built from a project's code or website: use `paperclipai/optional/content/brag-video`.
 - A UI mock-up or wireframe: use a design/wireframe skill; generated pictures are not specs.
-- Charts or numbers: build the chart from data; never let an image model draw figures.
+- Charts or numbers: build the chart from data; never let an image model draw figures. For a chart, title or explainer as video, use `paperclipai/optional/media/explainer-video` (drawn by code).
 
 ## What you can call
 
