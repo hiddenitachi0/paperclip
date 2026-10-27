@@ -1,0 +1,275 @@
+import { describe, expect, it } from "vitest";
+import {
+  MEDIA_STARTER_LORAS,
+  MEDIA_STARTER_SETUPS,
+  checkMediaLoraFields,
+  checkMediaSetup,
+  createMediaLoraSchema,
+  createMediaSetupSchema,
+  createMediaSetupTrialSchema,
+  effectiveMediaLoraContentTag,
+  mediaModelCapability,
+  summarizeMediaSetupTrials,
+  type MediaLoraForCheck,
+  type MediaSetupForCheck,
+} from "./media-setups.js";
+
+function lora(overrides: Partial<MediaLoraForCheck> = {}): MediaLoraForCheck {
+  return {
+    id: overrides.id ?? "11111111-1111-4111-8111-111111111111",
+    provider: "sogni",
+    source: "catalog",
+    ref: "h3-better-motion",
+    name: "Better Motion",
+    family: "h3",
+    compatibleModelIds: ["minimax-h3-fl2va-fp8_flf2v", "minimax-h3-fl2va-fp8_i2v"],
+    contentTag: "sfw",
+    providerNsfw: false,
+    providerSexual: false,
+    strengthMin: 0,
+    strengthMax: 1.5,
+    triggerWords: [],
+    archivedAt: null,
+    ...overrides,
+  };
+}
+
+function setup(overrides: Partial<MediaSetupForCheck> = {}): MediaSetupForCheck {
+  return {
+    kind: "video",
+    provider: "sogni",
+    modelId: "minimax-h3-fl2va-fp8_flf2v",
+    mode: null,
+    editModelId: null,
+    loras: [],
+    params: { promptExpansion: false },
+    ...overrides,
+  };
+}
+
+function library(...rows: MediaLoraForCheck[]) {
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+describe("media setups: capability table", () => {
+  it("knows H3 takes LoRAs and reads the mode from the exact id", () => {
+    const cap = mediaModelCapability("sogni", "minimax-h3-fl2va-fp8_flf2v");
+    expect(cap).toMatchObject({ family: "h3", takesLoras: true, mode: "flf2v", kinds: ["video"], billing: "sogni-unlimited" });
+    expect(mediaModelCapability("sogni", "minimax-h3-ref2va-fp8_r2v").mode).toBe("r2v");
+  });
+
+  it("says Wan 3 takes no LoRA on Sogni or Fal", () => {
+    for (const [provider, id] of [
+      ["sogni", "wan3.0-video"],
+      ["fal", "alibaba/wan-3.0/image-to-video"],
+    ] as const) {
+      const cap = mediaModelCapability(provider, id);
+      expect(cap.family).toBe("wan3");
+      expect(cap.takesLoras).toBe(false);
+      expect(cap.noLoraReason).toMatch(/Wan 3 takes no LoRA/);
+    }
+    expect(mediaModelCapability("sogni", "wan3.0-video").billing).toBe("sogni-premium");
+  });
+
+  it("knows which Fal endpoints take LoRA links", () => {
+    expect(mediaModelCapability("fal", "fal-ai/wan-flf2v")).toMatchObject({ takesLoras: true, family: "wan21", mode: "flf2v", kinds: ["video"] });
+    expect(mediaModelCapability("fal", "minimax/h3/text-to-video/lora")).toMatchObject({ takesLoras: true, family: "h3", mode: "t2v" });
+    expect(mediaModelCapability("fal", "fal-ai/flux-lora")).toMatchObject({ takesLoras: true, kinds: ["image"] });
+    expect(mediaModelCapability("fal", "minimax/h3-max/image-to-video").takesLoras).toBe(false);
+    expect(mediaModelCapability("fal", "fal-ai/kling-video/v4/image-to-video").takesLoras).toBe(false);
+  });
+
+  it("tags mature models by id", () => {
+    expect(mediaModelCapability("sogni", "wan3.0-spicy-video").matureTags).toContain("spicy");
+    expect(mediaModelCapability("sogni", "dark_beast_krea2_fp8").matureTags).toContain("off-required");
+    expect(mediaModelCapability("sogni", "seedance-2-5-uncensored").matureTags).toContain("uncensored");
+    expect(mediaModelCapability("sogni", "krea2_turbo_fp8_scaled").matureTags).toEqual([]);
+  });
+});
+
+describe("media setups: checking a setup", () => {
+  it("accepts H3 with Better Motion at 0.6, as safe for work", () => {
+    const result = checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: 0.6 }] }), library(lora({ triggerWords: ["smooth"] })));
+    expect(result.problems).toEqual([]);
+    expect(result.contentRating).toBe("sfw");
+    expect(result.mode).toBe("flf2v");
+    expect(result.triggerWords).toEqual(["smooth"]);
+  });
+
+  it("refuses any LoRA on Wan 3", () => {
+    const result = checkMediaSetup(setup({ modelId: "wan3.0-video", loras: [{ loraId: lora().id, strength: 0.6 }] }), library(lora()));
+    expect(result.problems.join(" ")).toMatch(/Wan 3 takes no LoRA/);
+  });
+
+  it("refuses strengths outside the LoRA's range, such as a percentage", () => {
+    const result = checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: 35 }] }), library(lora()));
+    expect(result.problems.join(" ")).toMatch(/at most 1\.5 \(it is 35\).*multipliers, not percentages/);
+    const negative = checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: -0.1 }] }), library(lora()));
+    expect(negative.problems).toHaveLength(1);
+  });
+
+  it("keeps an imported Sogni LoRA above 0 and at most 1", () => {
+    const personal = lora({ source: "personal", ref: "personal-maja", name: "Maja", strengthMin: null, strengthMax: null, compatibleModelIds: [] });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: personal.id, strength: 0 }] }), library(personal)).problems).toHaveLength(1);
+    expect(checkMediaSetup(setup({ loras: [{ loraId: personal.id, strength: 1 }] }), library(personal)).problems).toEqual([]);
+  });
+
+  it("refuses a LoRA the exact model id does not take", () => {
+    const vhs = lora({ ref: "h3-vh5tape-vhs", name: "vh5tape", compatibleModelIds: ["minimax-h3-fl2va-fp8_flf2v"] });
+    const result = checkMediaSetup(setup({ modelId: "minimax-h3-fl2va-fp8_t2v", loras: [{ loraId: vhs.id, strength: 1 }] }), library(vhs));
+    expect(result.problems.join(" ")).toMatch(/does not work with the model "minimax-h3-fl2va-fp8_t2v"/);
+  });
+
+  it("refuses a LoRA from another service, a missing or archived one, and duplicates", () => {
+    const falLora = lora({ provider: "fal", source: "url", ref: "https://huggingface.co/x/y.safetensors", name: "Fal one" });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: falLora.id, strength: 0.6 }] }), library(falLora)).problems.join(" ")).toMatch(/Fal LoRA/);
+    expect(checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: 0.6 }] }), library()).problems.join(" ")).toMatch(/not in this company's LoRA library/);
+    expect(
+      checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: 0.6 }] }), library(lora({ archivedAt: new Date() }))).problems.join(" "),
+    ).toMatch(/not in this company's LoRA library/);
+    expect(
+      checkMediaSetup(setup({ loras: [{ loraId: lora().id, strength: 0.6 }, { loraId: lora().id, strength: 0.7 }] }), library(lora())).problems.join(" "),
+    ).toMatch(/twice/);
+  });
+
+  it("refuses a video setup outside Fal and Sogni, and a picture model in a video setup", () => {
+    expect(checkMediaSetup(setup({ provider: "higgsfield", modelId: "soul" }), library()).problems.join(" ")).toMatch(/only use Fal or Sogni/);
+    expect(checkMediaSetup(setup({ modelId: "krea2_turbo_fp8_scaled" }), library()).problems.join(" ")).toMatch(/Krea 2 makes image/);
+    expect(checkMediaSetup(setup({ kind: "image", provider: "higgsfield", modelId: "soul" }), library()).problems).toEqual([]);
+  });
+
+  it("raises the rating to mature for an unreviewed or mature part, and refuses a refused LoRA", () => {
+    const unreviewed = lora({ contentTag: "unreviewed" });
+    const result = checkMediaSetup(setup({ loras: [{ loraId: unreviewed.id, strength: 0.6 }] }), library(unreviewed));
+    expect(result.problems).toEqual([]);
+    expect(result.contentRating).toBe("mature");
+    expect(result.matureReasons.join(" ")).toMatch(/not been reviewed/);
+
+    const flagged = lora({ ref: "h3-vbvr-video-reasoning", name: "VBVR", contentTag: "sfw" });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: flagged.id, strength: 0.8 }] }), library(flagged)).contentRating).toBe("mature");
+
+    const refused = lora({ contentTag: "refused" });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: refused.id, strength: 0.6 }] }), library(refused)).problems.join(" ")).toMatch(/refused/);
+
+    expect(checkMediaSetup(setup({ modelId: "wan3.0-spicy-video" }), library()).contentRating).toBe("mature");
+  });
+
+  it("needs prompt expansion set explicitly", () => {
+    expect(checkMediaSetup(setup({ params: {} }), library()).problems.join(" ")).toMatch(/prompt expansion/);
+  });
+
+  it("accepts every starter setup with the starter LoRAs, all safe for work", () => {
+    const rows = MEDIA_STARTER_LORAS.map((starter, index) =>
+      lora({
+        id: `00000000-0000-4000-8000-00000000000${index}`,
+        ref: starter.ref,
+        name: starter.name,
+        compatibleModelIds: [...starter.compatibleModelIds],
+        contentTag: starter.contentTag,
+        strengthMin: starter.strengthMin,
+        strengthMax: starter.strengthMax,
+      }),
+    );
+    const byKey = new Map(MEDIA_STARTER_LORAS.map((starter, index) => [starter.key, rows[index]!.id]));
+    for (const starter of MEDIA_STARTER_SETUPS) {
+      const result = checkMediaSetup(
+        setup({
+          kind: starter.kind,
+          provider: starter.provider,
+          modelId: starter.modelId,
+          mode: starter.mode,
+          loras: starter.loras.map((pick) => ({ loraId: byKey.get(pick.starterLoraKey)!, strength: pick.strength })),
+          params: starter.params,
+        }),
+        library(...rows),
+      );
+      expect(result.problems, starter.name).toEqual([]);
+      expect(result.contentRating, starter.name).toBe("sfw");
+    }
+    expect(MEDIA_STARTER_SETUPS.map((s) => s.name)).toEqual(["Natural", "Natural face & speech", "Action", "Romantic / calm", "Stills (Krea 2)"]);
+    expect(MEDIA_STARTER_SETUPS.find((s) => s.key === "action")!.loras).toEqual([{ starterLoraKey: "sogni-h3-better-motion", strength: 0.8 }]);
+    expect(MEDIA_STARTER_SETUPS.find((s) => s.key === "romantic-calm")!.loras).toEqual([]);
+  });
+});
+
+describe("media setups: LoRA library rules", () => {
+  const base = {
+    provider: "sogni" as const,
+    source: "catalog" as const,
+    ref: "h3-better-motion",
+    name: "Better Motion",
+    contentTag: "sfw" as const,
+    providerNsfw: false,
+    providerSexual: false,
+    strengthMin: 0,
+    strengthMax: 1.5,
+    strengthDefault: 0.6,
+    recommendedMin: 0.4,
+    recommendedMax: 0.8,
+  };
+
+  it("never saves a filter-bypass LoRA", () => {
+    expect(checkMediaLoraFields({ ...base, ref: "krea2-filter-bypass-3", name: "Bypass" }).join(" ")).toMatch(/never be saved/);
+    expect(checkMediaLoraFields({ ...base, ref: "krea2-something", name: "Filter Bypass 4" }).join(" ")).toMatch(/never be saved/);
+    expect(effectiveMediaLoraContentTag({ ref: "krea2-filter-bypass-2", contentTag: "sfw" })).toBe("refused");
+  });
+
+  it("does not let a flagged or anatomy LoRA be tagged safe for work", () => {
+    expect(checkMediaLoraFields({ ...base, ref: "krea2-breast", name: "Breast" }).join(" ")).toMatch(/cannot be tagged safe for work/);
+    expect(checkMediaLoraFields({ ...base, providerNsfw: true }).join(" ")).toMatch(/cannot be tagged safe for work/);
+    expect(checkMediaLoraFields({ ...base, ref: "krea2-breast", name: "Breast", contentTag: "mature" })).toEqual([]);
+  });
+
+  it("keeps links on Fal and ids on Sogni, and checks the strength scale", () => {
+    expect(checkMediaLoraFields({ ...base, source: "url", ref: "https://huggingface.co/a/b.safetensors" }).join(" ")).toMatch(/A link only works on Fal/);
+    expect(checkMediaLoraFields({ ...base, provider: "fal" }).join(" ")).toMatch(/Fal takes LoRAs by link/);
+    expect(checkMediaLoraFields({ ...base, provider: "fal", source: "url", ref: "http://civitai.com/x" }).join(" ")).toMatch(/https/);
+    expect(checkMediaLoraFields({ ...base, provider: "fal", source: "url", ref: "https://u:p@civitai.com/x" }).join(" ")).toMatch(/https/);
+    expect(checkMediaLoraFields({ ...base, provider: "fal", source: "url", ref: "https://civitai.com/api/download/models/1" })).toEqual([]);
+    expect(checkMediaLoraFields({ ...base, strengthDefault: 2 }).join(" ")).toMatch(/above the highest/);
+  });
+});
+
+describe("media setups: request schemas", () => {
+  it("needs an explicit strength on every LoRA and an explicit prompt expansion", () => {
+    const loraId = "11111111-1111-4111-8111-111111111111";
+    expect(createMediaSetupSchema.safeParse({ kind: "video", name: "x", provider: "sogni", modelId: "m", params: {} }).success).toBe(false);
+    expect(
+      createMediaSetupSchema.safeParse({ kind: "video", name: "x", provider: "sogni", modelId: "m", params: { promptExpansion: false }, loras: [{ loraId }] }).success,
+    ).toBe(false);
+    const ok = createMediaSetupSchema.parse({ kind: "video", name: "x", provider: "sogni", modelId: "m", params: { promptExpansion: true }, loras: [{ loraId, strength: 0.6 }] });
+    expect(ok.status).toBe("draft");
+    expect(createMediaSetupSchema.safeParse({ kind: "video", name: "x", provider: "sogni", modelId: "m", params: { promptExpansion: true }, status: "archived" }).success).toBe(false);
+  });
+
+  it("defaults a LoRA to unreviewed at 0.6 and keeps scores between 1 and 5", () => {
+    const parsed = createMediaLoraSchema.parse({ provider: "sogni", source: "catalog", ref: "h3-better-motion", name: "Better Motion" });
+    expect(parsed).toMatchObject({ contentTag: "unreviewed", strengthDefault: 0.6, triggerWords: [] });
+    expect(createMediaSetupTrialSchema.safeParse({ scores: { naturalness: 6 } }).success).toBe(false);
+    expect(createMediaSetupTrialSchema.safeParse({ scores: { looks: 3 } }).success).toBe(false);
+    expect(createMediaSetupTrialSchema.parse({ scores: { naturalness: 4, movement: 5 } }).raterKind).toBe("human");
+  });
+});
+
+describe("media setups: register summary", () => {
+  it("averages people's and an AI judge's scores apart and computes the tendency", () => {
+    const summary = summarizeMediaSetupTrials(
+      [
+        { scores: { naturalness: 4, movement: 3 }, raterKind: "human", flaggedByCheck: false, flaggedByProvider: false, costCents: 40, secondsTaken: 90 },
+        { scores: { naturalness: 5 }, raterKind: "human", flaggedByCheck: true, flaggedByProvider: false, costCents: 60, secondsTaken: null },
+        { scores: { naturalness: 2 }, raterKind: "ai", flaggedByCheck: false, flaggedByProvider: false, costCents: null, secondsTaken: 30 },
+      ],
+      "sfw",
+    );
+    expect(summary.humanScores.naturalness).toBe(4.5);
+    expect(summary.humanScores.movement).toBe(3);
+    expect(summary.humanScores.faceContinuity).toBeNull();
+    expect(summary.aiScores.naturalness).toBe(2);
+    expect(summary.flaggedCount).toBe(1);
+    expect(summary.sfwTendency).toBe("leans_mature");
+    expect(summary.averageCostCents).toBe(50);
+    expect(summary.averageSeconds).toBe(60);
+    expect(summarizeMediaSetupTrials([], "mature").sfwTendency).toBe("mature");
+    expect(summarizeMediaSetupTrials([], "sfw").sfwTendency).toBe("sfw");
+  });
+});
