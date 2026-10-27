@@ -154,6 +154,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "helper.ts",
   // Franchise migration cutover routes (verify destination, mark as migrated, undo) are board-only and not yet in the public OpenAPI document.
   "company-migration.ts",
+  // Contract register routes (DUR-4852, Legal Phase 1) are confidential, board and Legal-agent only, and not yet in the public OpenAPI document.
+  "contracts.ts",
 ]);
 
 function createApp() {

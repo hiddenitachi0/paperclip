@@ -1125,6 +1125,11 @@ export const PERMISSION_KEYS = [
   // DEPLOY_APPROVAL_KEYS in server/src/services/agent-roles.ts).
   "deploys:request",
   "merges:request",
+  // DUR-4852: read/write access to the confidential contract register. Held
+  // by agents in the Legal Advisor position implicitly (see
+  // contractAccessForAgent in server/src/services/contracts.ts) and by any
+  // other agent only through an explicit grant. Never implies any other right.
+  "contracts:access",
   // DUR-4094: what an admin has switched on for one "Employee (light)"
   // member. Stored as ordinary principal_permission_grants rows
   // (principalType "user"), checked by assertLightAllowed -- never implies

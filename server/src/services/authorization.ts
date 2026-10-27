@@ -773,6 +773,7 @@ export function authorizationService(db: Db) {
 
     if (
       input.action === "company_scope:read" ||
+      input.action === "contracts:access" ||
       input.action === "runtime:manage" ||
       input.action === "secrets:read"
     ) {

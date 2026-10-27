@@ -1786,6 +1786,13 @@
       "when": 1792534219573,
       "tag": "0255_board_chat_authenticated",
       "breakpoints": true
+    },
+    {
+      "idx": 256,
+      "version": "7",
+      "when": 1792968525137,
+      "tag": "0256_legal_contract_register",
+      "breakpoints": true
     }
   ]
 }

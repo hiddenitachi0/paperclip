@@ -65,6 +65,7 @@ import { pipelineRoutes } from "./routes/pipelines.js";
 import { environmentRoutes } from "./routes/environments.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
+import { contractRoutes } from "./routes/contracts.js";
 import { crmRoutes } from "./routes/crm.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { createInProcessDispatcher } from "./services/board-chat-dispatch.js";
@@ -400,6 +401,7 @@ export async function createApp(
   api.use(executionWorkspaceRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
+  api.use(contractRoutes(db));
   api.use(crmRoutes(db));
   // Board chat on signed-in servers runs its tools as in-process requests into
   // this same app (no socket, no credential): see services/board-chat-dispatch.ts.
