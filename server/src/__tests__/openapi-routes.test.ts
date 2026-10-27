@@ -150,6 +150,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "security-review-settings.ts",
   // Brag launch-video routes (DUR-4520) are a new backend feature, off by default, and not yet in the public OpenAPI document.
   "brag.ts",
+  // Code-rendered video routes (Media Studio D14) are off until the render worker container is added; the explainer-video skill documents them for agents.
+  "code-renders.ts",
   // Ask Paperclip helper routes (helper overlay, Phase 1) are board-only and not yet in the public OpenAPI document.
   "helper.ts",
   // Franchise migration cutover routes (verify destination, mark as migrated, undo) are board-only and not yet in the public OpenAPI document.

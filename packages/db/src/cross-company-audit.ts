@@ -92,6 +92,10 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // Daily sweep that opens one reminder issue per contract deadline for the
   // deadline's own company Legal agent; routine per-tick mechanics.
   "heartbeat-scheduler:contractDeadlineReminders",
+  // Polls the render worker for code-rendered video jobs still in flight and
+  // saves each finished file into its own job's company; every job and file
+  // is recorded in code_render_jobs and the activity log.
+  "heartbeat-scheduler:codeRenders",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

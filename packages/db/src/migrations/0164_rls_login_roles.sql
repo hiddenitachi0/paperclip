@@ -166,6 +166,10 @@ DECLARE
     'cli_auth_challenges',
     'cloud_upstream_connections',
     'cloud_upstream_runs',
+    -- Media Studio code-rendered videos (D14). Created, granted on and
+    -- policed in 0258_code_render_jobs.sql; company-scoped, so it is in both
+    -- lists.
+    'code_render_jobs',
     'companies',
     'company_agent_roles',
     -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
@@ -565,6 +569,10 @@ DECLARE
     'budget_policies',
     'cloud_upstream_connections',
     'cloud_upstream_runs',
+    -- Media Studio code-rendered videos (D14). Created, granted on and
+    -- policed in 0258_code_render_jobs.sql; company-scoped, so it is in both
+    -- lists.
+    'code_render_jobs',
     'company_agent_roles',
     -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
     -- in 0228_company_cache_settings.sql; listed here so the login-role

@@ -50,6 +50,7 @@ import { qualityLoopRoutes } from "./routes/quality-loops.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
 import { bragRoutes } from "./routes/brag.js";
+import { codeRenderRoutes } from "./routes/code-renders.js";
 import { tradingRoutes } from "./routes/trading.js";
 import { cryptoWalletRoutes } from "./routes/crypto-wallets.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
@@ -381,6 +382,7 @@ export async function createApp(
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
   api.use(bragRoutes(db));
+  api.use(codeRenderRoutes(db));
   api.use(tradingRoutes(db));
   api.use(cryptoWalletRoutes(db));
   api.use(mcpOAuthRoutes(db));

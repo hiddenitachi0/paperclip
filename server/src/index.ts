@@ -121,6 +121,7 @@ import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
 import { bragOnDoneService } from "./services/brag-on-done.js";
+import { codeRenderService } from "./services/code-renders.js";
 import { contractDeadlineReminderService } from "./services/contract-deadline-reminders.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
@@ -1104,6 +1105,7 @@ export async function startServer(): Promise<StartedServer> {
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
     const escalationGrants = escalationGrantService(schedulerDb as any);
     const bragOnDone = bragOnDoneService(schedulerDb as any);
+    const codeRenders = codeRenderService(schedulerDb as any);
     const contractDeadlineReminders = contractDeadlineReminderService(schedulerDb as any, { heartbeat });
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
@@ -1732,6 +1734,32 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "video-storyline-stitch tick failed");
           }),
       );
+
+      // Media Studio code-drawn videos (D14): poll the render worker for jobs
+      // nobody is watching and save each finished file into its own job's
+      // company. Skipped entirely until the render worker overlay is
+      // deployed (no socket/token -> not configured).
+      if (codeRenders.configured) {
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.codeRenders, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: codeRenders",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:codeRenders",
+            },
+            () => codeRenders.tick(),
+          )
+            .then((result) => {
+              if (result.finished > 0 || result.failed > 0) {
+                logger.info({ ...result }, "code-renders tick");
+              }
+            })
+            .catch((err) => {
+              logger.error({ err }, "code-renders tick failed");
+            }),
+        );
+      }
 
       // DUR-4171: the trading agent's tick -- resolves any pending trade
       // approval cards, then runs the deterministic rule engine and risk
