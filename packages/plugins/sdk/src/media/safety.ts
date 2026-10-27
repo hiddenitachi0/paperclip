@@ -18,7 +18,7 @@ import type { SogniLoraInfo } from "./sogni-loras.js";
  */
 export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermark, logo";
 
-/** "sfw": strictest. "mature": an owner or admin allowed mature content; the always-refused list still applies. */
+/** "sfw": strictest. "mature": the owner allowed mature content; the always-refused list still applies. */
 export type ContentMode = "sfw" | "mature";
 
 export type DenyReason =
@@ -26,6 +26,7 @@ export type DenyReason =
   | "nsfw-flag"
   | "sexual-flag"
   | "anatomy-slider"
+  | "age-slider"
   | "mystic-x"
   | "mature-model"
   | "unreviewed";
@@ -59,11 +60,44 @@ export const ANATOMY_SLIDER_LORA_IDS: readonly string[] = ["krea2-breast", "krea
  */
 export const FLAGGED_LORA_IDS: readonly string[] = ["krea2-aberrant", "krea2-realism-engine", "h3-vbvr-video-reasoning"];
 
-// A future "filter-bypass-4" is refused too: id or name says filter bypass.
-// Any run of whitespace, punctuation or dash-like characters may separate the words.
-const FILTER_BYPASS = /filter[\s._\-\u2010-\u2015\u2212]*bypass/i;
+/** Age sliders ("Younger" <-> "Older"). Refused in every film: with an adult's likeness LoRA they can make a person look under-age. */
+export const AGE_SLIDER_LORA_IDS: readonly string[] = ["krea2-age"];
+
+// A future "filter-bypass-4" is refused too: id or name says filter bypass, in
+// either word order, with any run of whitespace, punctuation or dash-like
+// characters between the words. Matched on normalised text (see foldForMatch).
+const SEP = "[\\s._\\-\\u2010-\\u2015\\u2212]*";
+const FILTER_BYPASS = new RegExp(
+  `filter${SEP}by${SEP}pass|by${SEP}pass${SEP}(the${SEP})?filter|(^|[^a-z])(un|no)${SEP}filter|filter${SEP}(off|disabl|remov|break|evad)|jailbreak`,
+  "i",
+);
+// Age sliders by name, for a LoRA the snapshot has not seen. Whole words only.
+const AGE_WORDS = /(^|[^a-z])(age|aging|younger|older|young|youth|youthful|child|childlike|teen|teenager|loli|lolita|shota|underage)($|[^a-z])/i;
 // Mystic X, any host family (krea2-mystic-x, h3-mystic-xxx-v5, moss-mystic-x).
-const MYSTIC_X = /mystic[\s_-]*x/i;
+const MYSTIC_X = /mystic[\s._-]*x/i;
+
+// Look-alike letters used to slip past a name match (Cyrillic/Greek, digits for letters).
+const LOOKALIKES: Readonly<Record<string, string>> = {
+  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i", "\u0455": "s",
+  "\u03b1": "a", "\u03bf": "o", "\u03b9": "i", "\u03c1": "p", "\u03c5": "u", "\u03bd": "v",
+};
+const LEET: Readonly<Record<string, string>> = { "4": "a", "@": "a", "3": "e", "1": "i", "0": "o", "5": "s", "$": "s" };
+
+/**
+ * Text as the name rules should see it: NFKC-normalised, zero-width and other
+ * invisible characters removed, look-alike letters folded to ASCII. With
+ * `leet`, digits that stand in for letters (byp4ss) are folded too. Only used
+ * to match refusal rules, so folding too much only refuses more.
+ */
+export function foldForMatch(value: string | null | undefined, leet = false): string {
+  const text = (value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g, "")
+    .toLowerCase();
+  let out = "";
+  for (const ch of text) out += LOOKALIKES[ch] ?? (leet ? (LEET[ch] ?? ch) : ch);
+  return out;
+}
 
 /**
  * The LoRAs treated as reviewed: every public id in Sogni's catalog
@@ -135,7 +169,12 @@ export interface LoraPolicyInput {
   nsfw?: boolean;
   /** Sogni ui.sexual. */
   sexual?: boolean;
-  /** The account's own imported LoRA. These are not in Sogni's public catalog, so the "unreviewed" rule does not apply to them. */
+  /**
+   * The account's own imported LoRA. These are not in Sogni's public catalog, so
+   * the "unreviewed" rule does not apply to them. Honoured only when the id
+   * also starts with "personal-" (Sogni's id for imported LoRAs), so a caller
+   * cannot exempt a public catalog LoRA by setting the flag.
+   */
   personal?: boolean;
 }
 
@@ -148,11 +187,26 @@ function lc(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
 
-/** Refused in every film on every path, whatever the mode. */
+/**
+ * Refused in every film on every path, whatever the mode: the two known bypass
+ * ids, anything whose id or name says filter bypass, and any prompt-control
+ * LoRA that is not in the reviewed snapshot (the snapshot's only prompt-control
+ * LoRAs are the two bypass ids above).
+ */
 export function isFilterBypassLora(lora: Pick<LoraPolicyInput, "id" | "name" | "category">): boolean {
   const id = lc(lora.id);
   if (FILTER_BYPASS_LORA_IDS.includes(id)) return true;
-  return FILTER_BYPASS.test(lora.id) || FILTER_BYPASS.test(lora.name ?? "");
+  if (lc(lora.category) === "prompt-control" && !REVIEWED_LORA_IDS.has(lora.id)) return true;
+  for (const leet of [false, true]) {
+    if (FILTER_BYPASS.test(foldForMatch(lora.id, leet)) || FILTER_BYPASS.test(foldForMatch(lora.name, leet))) return true;
+  }
+  return false;
+}
+
+/** Refused in every film: the age slider, and any LoRA whose id or name says it changes age. */
+export function isAgeSliderLora(lora: Pick<LoraPolicyInput, "id" | "name">): boolean {
+  if (AGE_SLIDER_LORA_IDS.includes(lc(lora.id))) return true;
+  return AGE_WORDS.test(foldForMatch(lora.id)) || AGE_WORDS.test(foldForMatch(lora.name));
 }
 
 /**
@@ -164,6 +218,9 @@ export function evaluateLora(lora: LoraPolicyInput, mode: ContentMode): PolicyVe
   if (isFilterBypassLora(lora)) {
     return deny("filter-bypass", `The LoRA "${label}" switches off Sogni's safety filter and is never allowed.`, true);
   }
+  if (isAgeSliderLora(lora)) {
+    return deny("age-slider", `The LoRA "${label}" changes how old a person looks and is not allowed, because it could make a person look under-age.`, true);
+  }
   if (mode !== "sfw") return ALLOWED;
   if (lora.nsfw === true) return deny("nsfw-flag", `The LoRA "${label}" is marked not safe for work by Sogni, so it cannot be used in a safe-for-work film.`);
   if (lora.sexual === true) return deny("sexual-flag", `The LoRA "${label}" is marked sexual by Sogni, so it cannot be used in a safe-for-work film.`);
@@ -173,13 +230,14 @@ export function evaluateLora(lora: LoraPolicyInput, mode: ContentMode): PolicyVe
   if (ANATOMY_SLIDER_LORA_IDS.includes(lc(lora.id))) {
     return deny("anatomy-slider", `The LoRA "${label}" changes body anatomy and cannot be used in a safe-for-work film.`);
   }
-  if (MYSTIC_X.test(lora.id) || MYSTIC_X.test(lora.name ?? "")) {
+  if (MYSTIC_X.test(foldForMatch(lora.id)) || MYSTIC_X.test(foldForMatch(lora.name))) {
     return deny("mystic-x", `The LoRA "${label}" belongs to the Mystic X family and cannot be used in a safe-for-work film.`);
   }
-  if (!lora.personal && !REVIEWED_LORA_IDS.has(lora.id)) {
+  const own = lora.personal === true && lc(lora.id).startsWith("personal-");
+  if (!own && !REVIEWED_LORA_IDS.has(lora.id)) {
     return deny(
       "unreviewed",
-      `The LoRA "${label}" is new in Sogni's catalog and has not been reviewed yet, so it counts as mature. An owner or admin needs to review it first.`,
+      `The LoRA "${label}" is new in Sogni's catalog and has not been reviewed yet, so it counts as mature. New LoRAs are added to the reviewed list in a release; a review register comes later.`,
     );
   }
   return ALLOWED;
@@ -200,18 +258,20 @@ export interface ModelPolicyInput {
 // By id because Sogni leaves some of these untagged (wan3.0-spicy-video,
 // seedream-5-0-pro-uncensored). Sogni's own "uncensored" tag is NOT used on its
 // own: it sits on most models, including the default Z-Image Turbo.
-const DARK_BEAST = /dark[_-]?beast/i;
-const ID_UNCENSORED = /(^|[^a-z0-9])uncensored($|[^a-z0-9])/i;
-const ID_SPICY = /(^|[^a-z0-9])spicy($|[^a-z0-9])/i;
+const DARK_BEAST = /dark[\s_-]*beast/i;
+const ID_UNCENSORED = /uncensored/i;
+const ID_SPICY = /spicy/i;
+const ID_NSFW = /nsfw/i;
 // 10Eros (ltx23-22b-10eros-...) and its alias ltx23-eros.
-const ID_EROS = /(^|[^a-z0-9])(10)?eros($|[^a-z0-9])/i;
+// A digit may come right before it (ltx23Eros), a letter may not (zeros).
+const ID_EROS = /(^|[^a-z])(10)?eros($|[^a-z])/i;
 
 /** The content tags that apply to a model, from its id and from Sogni's "spicy"/"mature"/"off-required" tags. */
 export function modelContentTags(model: ModelPolicyInput): ContentTag[] {
   const out = new Set<ContentTag>();
-  const sogni = new Set((model.tags ?? []).map((t) => t.toLowerCase()));
+  const sogni = new Set((model.tags ?? []).map((t) => t.trim().toLowerCase()));
   if (DARK_BEAST.test(model.id) || sogni.has("off-required")) out.add("off-required");
-  if (sogni.has("mature") || ID_EROS.test(model.id)) out.add("mature");
+  if (sogni.has("mature") || ID_EROS.test(model.id) || ID_NSFW.test(model.id)) out.add("mature");
   if (sogni.has("spicy") || ID_SPICY.test(model.id)) out.add("spicy");
   if (ID_UNCENSORED.test(model.id)) out.add("uncensored");
   if (ID_EROS.test(model.id)) out.add("spicy");

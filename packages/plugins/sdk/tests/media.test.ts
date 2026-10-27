@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  AGE_SLIDER_LORA_IDS,
   ANATOMY_SLIDER_LORA_IDS,
   FILTER_BYPASS_LORA_IDS,
   FLAGGED_LORA_IDS,
@@ -11,6 +12,8 @@ import {
   classifyLoras,
   evaluateLora,
   evaluateModel,
+  foldForMatch,
+  isAgeSliderLora,
   loraPolicyInput,
   lorasForModel,
   modelContentTags,
@@ -50,6 +53,50 @@ describe("media: LoRA deny rules", () => {
   it("refuses a filter-bypass LoRA that is renamed or numbered later", () => {
     expect(evaluateLora({ id: "krea2-filter-bypass-4", category: "prompt-control" }, "mature").allowed).toBe(false);
     expect(evaluateLora({ id: "something-new", name: "Krea2FilterBypass 9vector" }, "mature").allowed).toBe(false);
+  });
+
+  it("refuses disguised or re-categorised bypass LoRAs in every mode (DUR-4894 review)", () => {
+    for (const name of ["Filter By-Pass 4", "filter by pass", "Bypass Filter", "Unfilter v2", "filter-byp4ss", "Krea2 Filter\u200bBypass", "F\u0456lter Bypass", "No-Filter vector"]) {
+      expect(evaluateLora({ id: "krea2-new-thing", name }, "mature")).toMatchObject({ allowed: false, reason: "filter-bypass", alwaysRefused: true });
+    }
+    expect(evaluateLora({ id: "krea2-new-unlock", name: "Unlock vector", category: "prompt-control" }, "mature")).toMatchObject({ allowed: false, reason: "filter-bypass", alwaysRefused: true });
+    expect(evaluateLora({ id: "personal-x", category: "prompt-control", personal: true }, "mature").allowed).toBe(false);
+  });
+
+  it("does not refuse ordinary names as bypass", () => {
+    for (const name of ["Detail filter pass", "Sunfilter tone", "Warm Light", "Canon Ultrareal"]) {
+      expect(evaluateLora({ id: "krea2-warm-light", name }, "mature").allowed).toBe(true);
+    }
+  });
+
+  it("folds invisible characters, look-alikes and compatibility forms before matching", () => {
+    expect(foldForMatch("Krea2 Filter\u200bBypass")).toBe("krea2 filterbypass");
+    expect(foldForMatch("F\u0456lter")).toBe("filter");
+    expect(foldForMatch("\uff26ilter")).toBe("filter");
+    expect(foldForMatch("byp4ss")).toBe("byp4ss");
+    expect(foldForMatch("byp4ss", true)).toBe("bypass");
+  });
+
+  it("refuses the age slider in every mode, and age-changing LoRAs by name", () => {
+    expect(AGE_SLIDER_LORA_IDS).toEqual(["krea2-age"]);
+    expect(REVIEWED_LORA_IDS.has("krea2-age")).toBe(true);
+    for (const mode of ["sfw", "mature"] as const) {
+      expect(evaluateLora({ id: "krea2-age", category: "character" }, mode)).toMatchObject({ allowed: false, reason: "age-slider", alwaysRefused: true });
+      expect(evaluateLora({ id: "krea2-new-slider", name: "Younger <-> Older", category: "character" }, mode)).toMatchObject({ allowed: false, reason: "age-slider" });
+      expect(evaluateLora({ id: "personal-1", name: "Teen look", personal: true }, mode)).toMatchObject({ allowed: false, reason: "age-slider" });
+    }
+  });
+
+  it("refuses no other reviewed LoRA as an age slider", () => {
+    for (const id of REVIEWED_LORA_IDS) {
+      expect(isAgeSliderLora({ id, name: `Name of ${id}` })).toBe(id === "krea2-age");
+    }
+  });
+
+  it("honours personal only for ids that start with personal-", () => {
+    expect(evaluateLora({ id: "krea2-new-unreviewed", personal: true }, "sfw")).toMatchObject({ allowed: false, reason: "unreviewed" });
+    expect(evaluateLora({ id: "personal-abc", personal: true }, "sfw").allowed).toBe(true);
+    expect(evaluateLora({ id: "personal-abc" }, "sfw")).toMatchObject({ allowed: false, reason: "unreviewed" });
   });
 
   it("refuses the three anatomy sliders in SFW and allows them in mature", () => {
@@ -155,6 +202,14 @@ describe("media: model content tags", () => {
     expect(evaluateModel({ id: "one_obsession_v22_fp16", tags: ["new", "spicy"] }, "sfw").allowed).toBe(false);
   });
 
+  it("catches run-together ids, spaces and padded tags (DUR-4894 review)", () => {
+    for (const id of ["seedance2uncensored", "wan3.0spicy-video", "ltx23Eros", "dark beast z", "some-nsfw-model"]) {
+      expect(evaluateModel({ id }, "sfw")).toMatchObject({ allowed: false, reason: "mature-model" });
+    }
+    expect(evaluateModel({ id: "x", tags: [" spicy "] }, "sfw").allowed).toBe(false);
+    expect(evaluateModel({ id: "zeros-model" }, "sfw").allowed).toBe(true);
+  });
+
   it("does not refuse the models Sogni merely tags 'uncensored' (that tag sits on the default Z-Image Turbo)", () => {
     for (const id of ["z_image_turbo_bf16", "z-turbo", "chroma1_hd_8bit", "krea-2-turbo", "gpt-image-2", "seedance-2-0", "ltx23-22b-fp8_t2v_distilled"]) {
       expect(evaluateModel({ id, tags: ["standard", "uncensored"] }, "sfw")).toMatchObject({ allowed: true });
@@ -204,6 +259,16 @@ describe("media: SogniLoraCatalogCache", () => {
     t += 2;
     await cache.get();
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for no redirect, passes an abort signal, and refuses an over-size body", async () => {
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(JSON.stringify(catalogBody([row("a")])), { status: 200, headers: { "content-length": String(6 * 1024 * 1024) } });
+    });
+    expect(await new SogniLoraCatalogCache({ fetch }).get()).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("keeps separate caches per instance", async () => {
