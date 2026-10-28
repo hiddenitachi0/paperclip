@@ -245,6 +245,20 @@ describe("storyboard pictures with cast", () => {
     expect(planCastStill({ ...basePlan, people: [maja], service: "sogni", safeContentFilter: false, pickedModel: "qwen" }).notes.join(" ")).toMatch(/made for Krea 2 models/);
     expect(planCastStill({ ...basePlan, people: [maja, person("bo", "Bo")], service: "sogni", safeContentFilter: false, pickedModel: "gpt-image-2" }).lora).toBeNull();
   });
+
+  it("DUR-4898: with the filter on, the person's LoRA is used only when Sogni's own flag for it says it does not need the filter off", () => {
+    const trained = [{ id: "t1", provider: "sogni-lora" as const, ref: "personal-maja", triggerWord: "majaberg_person", strength: 0.7, status: "ready" }];
+    const maja = person("maja", "Maja", { trainedIdentities: trained, loraBaseModel: "krea-2" });
+    const base = { ...basePlan, people: [maja], service: "sogni" as const, safeContentFilter: true };
+    // Flag says it is fine with the filter on.
+    expect(planCastStill({ ...base, loraNeedsFilterOff: () => false }).lora).toEqual({ id: "personal-maja", strength: 0.7, triggerWord: "majaberg_person" });
+    // Flag says it needs the filter off, or is unknown (the default): not used, and the reference pictures keep the person, which the note says.
+    for (const plan of [planCastStill({ ...base, loraNeedsFilterOff: () => true }), planCastStill(base)]) {
+      expect(plan.lora).toBeNull();
+      expect(plan.notes.join(" ")).toMatch(/only runs with its content filter off.*reference pictures still keep Maja the same/);
+      expect(plan.ids.length).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("video clips with cast", () => {

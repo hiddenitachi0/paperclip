@@ -1,4 +1,5 @@
 import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { readContentMode } from "@paperclipai/plugin-sdk/media";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, videoTransitionTakes, withCompanyScope } from "@paperclipai/db";
 import {
@@ -25,10 +26,12 @@ import {
   type UpdateVideoSceneInput,
   type UpdateVideoShotInput,
   type UpdateVideoStorylineInput,
+  type SetVideoStorylineContentRatingInput,
+  type VideoContentRating,
   type VideoStorylineProgress,
   videoQualityIssueSeverity,
 } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastIdentities } from "./storyline-cast.js";
@@ -95,6 +98,10 @@ export interface VideoStorylineSummary {
   /** Phase 2: the picture shape and how the film is put together. */
   aspect: string;
   exportSettings: VideoStorylineExportSettings;
+  /** DUR-4898: "sfw" (the default, strictest) or "mature" (set by the owner). Who and when are kept in contentRatingSetBy/At. */
+  contentRating: VideoContentRating;
+  contentRatingSetBy: string | null;
+  contentRatingSetAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -203,6 +210,9 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     musicVolumeDb: row.musicVolumeDb,
     aspect: row.aspect,
     exportSettings: readVideoExportSettings(row.exportSettings, row.aspect),
+    contentRating: readContentMode(row.contentRating),
+    contentRatingSetBy: row.contentRatingSetBy,
+    contentRatingSetAt: iso(row.contentRatingSetAt),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -611,6 +621,52 @@ export function videoStorylineService(db: Db) {
       details: { fields: Object.keys(input) },
     });
     return refreshed ?? toStorylineSummary(row);
+  }
+
+  /**
+   * DUR-4898: change a film's content rating. The route has already checked
+   * WHO is asking (owner for "mature", owner or admin for going back to
+   * "sfw"); this refuses an agent again, because a rating is a decision for a
+   * person, and requires the confirmation answer for "mature". Records actor
+   * and time on the row and in the activity log. Strictest-first: a film is
+   * "sfw" until this runs.
+   */
+  async function setContentRating(
+    companyId: string,
+    storylineId: string,
+    input: SetVideoStorylineContentRatingInput,
+    actor: VideoStorylineActor,
+  ): Promise<VideoStorylineSummary> {
+    if (actor.actorType !== "user" || actor.agentId) {
+      throw forbidden("An agent can't change what a film may show. The company's owner can do it from the film's header.");
+    }
+    if (input.contentRating === "mature" && input.confirmed !== true) {
+      throw unprocessable("Switching a film to mature needs a yes from you first: confirm that this film may show mature content.");
+    }
+    const now = new Date();
+    const changed = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      const from = readContentMode(locked.contentRating) as VideoContentRating;
+      if (from === input.contentRating) return { row: locked, from, changed: false };
+      const [row] = await tx
+        .update(videoStorylines)
+        .set({ contentRating: input.contentRating, contentRatingSetBy: actor.actorId, contentRatingSetAt: now, updatedAt: now })
+        .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)))
+        .returning();
+      if (!row) throw new Error("Video storyline rating update returned no row");
+      return { row, from, changed: true };
+    });
+    if (changed.changed) {
+      await logActivity(db, {
+        companyId,
+        ...activityActor(actor),
+        action: "video_storyline.content_rating_changed",
+        entityType: "video_storyline",
+        entityId: storylineId,
+        details: { from: changed.from, to: input.contentRating, setBy: actor.actorId, setAt: now.toISOString() },
+      });
+    }
+    return toStorylineSummary(changed.row);
   }
 
   /**
@@ -1342,6 +1398,7 @@ export function videoStorylineService(db: Db) {
     listShots,
     createStoryline,
     updateStoryline,
+    setContentRating,
     deleteStoryline,
     createScene,
     updateScene,

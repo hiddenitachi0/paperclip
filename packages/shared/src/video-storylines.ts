@@ -338,6 +338,23 @@ export const updateVideoStorylineSchema = z
   });
 export type UpdateVideoStorylineInput = z.infer<typeof updateVideoStorylineSchema>;
 
+/**
+ * DUR-4898: a film is safe for work ("sfw") unless its owner switched it to
+ * "mature". Not part of the create/update schemas on purpose (both are
+ * strict): the rating changes only through its own route, which checks who is
+ * asking, requires the plain confirmation for "mature", and logs actor and time.
+ */
+export const VIDEO_CONTENT_RATINGS = ["sfw", "mature"] as const;
+export type VideoContentRating = (typeof VIDEO_CONTENT_RATINGS)[number];
+export const setVideoStorylineContentRatingSchema = z
+  .object({
+    contentRating: z.enum(VIDEO_CONTENT_RATINGS),
+    /** The "yes, this film may be mature" answer of the confirmation dialog; required to switch TO mature. */
+    confirmed: z.boolean().optional(),
+  })
+  .strict();
+export type SetVideoStorylineContentRatingInput = z.infer<typeof setVideoStorylineContentRatingSchema>;
+
 const sceneFields = {
   title: z.string().trim().max(200).default(""),
   notes: z.string().trim().max(4000).nullable(),

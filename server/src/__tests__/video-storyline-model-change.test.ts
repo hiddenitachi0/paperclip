@@ -147,7 +147,7 @@ d("storyline model change", () => {
   const jobsOf = (shotId: string) => db.select().from(videoShotRenderJobs).where(eq(videoShotRenderJobs.shotId, shotId));
 
   /** A stand-in service that records what it was built and asked with. */
-  function recordingService(answer: { model: string; provider: "fal" | "sogni"; done?: boolean; meta?: Record<string, unknown>; onStart?: (startNumber: number) => Promise<void> }) {
+  function recordingService(answer: { model: string; provider: "fal" | "sogni"; done?: boolean; flagged?: boolean; meta?: Record<string, unknown>; onStart?: (startNumber: number) => Promise<void> }) {
     const built: Array<{ providerId: string; model: string | null }> = [];
     const started: Array<{ model?: string; durationSeconds?: number }> = [];
     const buildProvider = (providerId: string, _apiKey: string, model: string | null): Provider => {
@@ -160,7 +160,9 @@ d("storyline model change", () => {
           return { externalId: `wf-${started.length}`, model: answer.model, provider: answer.provider };
         },
         poll: async () =>
-          answer.done === false
+          answer.flagged
+            ? { status: "failed" as const, error: "Fal's own safety check flagged this clip.", flagged: true }
+            : answer.done === false
             ? { status: "running" as const }
             : { status: "done" as const, result: { contentType: "video/mp4", dataUrl: `data:video/mp4;base64,${Buffer.from("made").toString("base64")}`, ...(answer.meta ? { meta: answer.meta } : {}) } },
         cancel: async () => undefined,
@@ -280,6 +282,39 @@ d("storyline model change", () => {
     expect(done.status).toBe("done");
     // Priced as the Fal job it was (5 s x 50 cents), not as the film's new Sogni (5 s x 40).
     expect(done.actualCostCents).toBe(250);
+  });
+
+  it("DUR-4898 F1. a clip Fal's own check flagged fails the shot and is never chained, but its cost is recorded and counted", async () => {
+    const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16 });
+    const rec = recordingService({ model: KLING_16, provider: "fal", flagged: true });
+    const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+    await render.startRender(companyId, storylineId, ACTOR, {});
+    const before = (await storylineRow(storylineId)).spentCents;
+    await render.tick();
+
+    const shot = await shotRow(shotIds[0]!);
+    expect(shot).toMatchObject({ status: "failed", resultObjectKey: null });
+    const mine = falCostCalls.filter((c) => c.companyId === companyId);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ companyId, apiKey: "fal-key", model: KLING_16, billingCode: "video-storyline-shot", usage: { seconds: 5 } });
+    // Counted, never lowered: Fal billed the 5 s (50 cents a second) it threw away.
+    const after = await storylineRow(storylineId);
+    expect(after.spentCents).toBe(before + 250);
+    expect(after.status).toBe("paused");
+  });
+
+  it("DUR-4898 F1. a preview clip Fal's own check flagged is refused, but its cost is recorded and stays counted", async () => {
+    const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16 });
+    await videoStorylineSettingsService(db).setAdvancedEnabled(companyId, true);
+    const rec = recordingService({ model: KLING_16, provider: "fal", flagged: true });
+    const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+    const before = (await storylineRow(storylineId)).spentCents;
+    await expect(render.renderPreview(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("safety check flagged") });
+    const mine = falCostCalls.filter((c) => c.companyId === companyId);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ billingCode: "video-storyline-preview", model: KLING_16 });
+    // The preview's reserved cost was spent: it is not refunded.
+    expect((await storylineRow(storylineId)).spentCents).toBeGreaterThan(before);
   });
 
   it("(c) the same the other way: a Sogni job is not billed to Fal when the film moves to Fal", async () => {

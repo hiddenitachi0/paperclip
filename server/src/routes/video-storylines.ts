@@ -26,6 +26,7 @@ import {
   updateVideoShotSchema,
   updateVideoShotCastSchema,
   updateVideoStorylineCastSchema,
+  setVideoStorylineContentRatingSchema,
   updateVideoStorylineApprovalThresholdSchema,
   updateVideoStorylineSchema,
   updateVideoStorylineSettingsSchema,
@@ -58,8 +59,8 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
-import { HttpError, badRequest, notFound, unprocessable } from "../errors.js";
+import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin } from "./authz.js";
+import { HttpError, badRequest, forbidden, notFound, unprocessable } from "../errors.js";
 
 /** The largest clip the poster route reads into memory to cut a picture from. */
 const POSTER_MAX_CLIP_BYTES = 100 * 1024 * 1024;
@@ -820,6 +821,22 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       res.json(await storylines.updateStoryline(companyId, storylineId, req.body, actorOf(req)));
+    },
+  );
+
+  // DUR-4898: what the film may show. Owner only until the owner decides who else may (D1); agents are always refused.
+  router.put(
+    "/companies/:companyId/video-storylines/:storylineId/content-rating",
+    validate(setVideoStorylineContentRatingSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      if (req.actor.type === "agent") {
+        throw forbidden("An agent can't change what a film may show. The company's owner can do it from the film's header.");
+      }
+      if (req.body.contentRating === "mature") assertCompanyOwnerOrInstanceAdmin(req, companyId, "a film's content rating");
+      else assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "a film's content rating");
+      res.json(await storylines.setContentRating(companyId, req.params.storylineId as string, req.body, actorOf(req)));
     },
   );
 

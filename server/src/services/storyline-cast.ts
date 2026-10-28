@@ -17,9 +17,11 @@
 //     or its extra-slot model when more pictures are needed) unless the
 //     storyline picks an editing model; on Fal.ai, the identity's preferred
 //     Fal editing model or FLUX.2 pro edit;
-//   - the identity's Sogni LoRA only under the plugin's own rule: a personal
-//     LoRA needs Sogni's content filter off, which only a look an owner or
-//     admin saved that way can do, and only on a Krea 2 model.
+//   - the identity's Sogni LoRA only on a Krea 2 model, and only when Sogni's
+//     own flag for that LoRA allows it with the filter the picture has (DUR-4898:
+//     the filter is always on in a safe-for-work film, so a LoRA Sogni says
+//     needs the filter off, or whose flag is unknown, is left out and the
+//     reference pictures keep the person).
 //
 // Consent and age: an identity without both confirmations (likeness consent
 // and adult) is never read (normalizeCastIdentity returns null, the plugin's
@@ -315,8 +317,14 @@ export function planCastStill(input: {
   extraIds: readonly string[];
   /** The storyboard's own cap on pictures per still. */
   cap: number;
-  /** Sogni's content filter for this picture (off only through a look an owner/admin saved that way). */
+  /** Sogni's content filter for this picture: on in a safe-for-work film; off only through a look an owner/admin saved that way in a mature one. */
   safeContentFilter: boolean;
+  /**
+   * Sogni's own flag for one LoRA (ui.nsfw): true = it only runs with the
+   * content filter off. A LoRA whose flag is unknown counts as needing the
+   * filter off (the default), so it is only used when the filter is off too.
+   */
+  loraNeedsFilterOff?: (loraId: string) => boolean;
 }): CastStillPlan {
   const notes: string[] = [];
   const faces: Array<{ id: string; owner: string }> = [];
@@ -407,7 +415,7 @@ export function planCastStill(input: {
     notes.push(`${keptFaces.length} people are in this shot. Pictures with more than one saved person are harder for picture models; check that nobody's face got mixed up.`);
   }
 
-  // The identity's own Sogni LoRA: only for one person, on a Krea 2 model, with the content filter off.
+  // The identity's own Sogni LoRA: only for one person, on a Krea 2 model, and only when Sogni's flag for that LoRA allows it with the filter this picture has.
   let lora: CastStillPlan["lora"] = null;
   if (input.service === "sogni" && input.people.length > 0) {
     const person = input.people.find((p) => keptFaces.some((f) => f.owner === p.member.name));
@@ -419,8 +427,8 @@ export function planCastStill(input: {
       const modelId = (SOGNI_EDIT_CANONICAL[model] ?? model).toLowerCase();
       if (keptFaces.length > 1) {
         notes.push(`${person.member.name}'s LoRA was not used: with more than one person in the picture it would pull every face towards ${person.member.name}.`);
-      } else if (input.safeContentFilter) {
-        notes.push(`${person.member.name}'s LoRA was not used: Sogni only runs your own LoRAs with its content filter off, which only a look an owner or admin saved that way can do. The reference pictures still keep ${person.member.name} the same.`);
+      } else if (input.safeContentFilter && (input.loraNeedsFilterOff ?? (() => true))(trained.ref)) {
+        notes.push(`${person.member.name}'s LoRA was not used: Sogni says it only runs with its content filter off, and this picture keeps the filter on. The reference pictures still keep ${person.member.name} the same.`);
       } else if (!krea || !(modelId.startsWith("krea2") || modelId.startsWith("dark_beast_krea2"))) {
         notes.push(`${person.member.name}'s LoRA was not used: it is made for Krea 2 models, and this picture uses ${model}.`);
       } else {

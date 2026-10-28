@@ -3,3 +3,4 @@
 // Not for plugin UI bundles.
 export * from "./sogni-loras.js";
 export * from "./safety.js";
+export * from "./film-safety.js";

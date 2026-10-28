@@ -22,6 +22,7 @@ import {
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
+import { assertFilmModelAllowed, filmContentMode, filmVideoPrompt } from "./film-content-rules.js";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./video-provider-clients.js";
 import { FalVideoProvider, SOGNI_DEFAULT_VIDEO_MODEL, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, HttpError, unprocessable } from "../errors.js";
@@ -494,6 +495,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       );
     }
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    // DUR-4898: a safe-for-work film never renders with a mature/uncensored model (before any key is read or anything is sent).
+    const mode = filmContentMode(storyline);
+    assertFilmModelAllowed(model, mode);
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
     const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model, deadline.signal);
@@ -547,8 +551,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const input: MediaJobInput = {
       kind: "video",
-      // Camera notes go with the description (they used to be dropped).
-      prompt: shotVideoPrompt(storyline, shot),
+      // Camera notes go with the description (they used to be dropped), plus the "only these people" line once the cast is confirmed. A safe-for-work film adds "Fully clothed." and what to keep out (no video request has a negative field yet).
+      prompt: filmVideoPrompt(mode, shotVideoPrompt(storyline, shot)),
       // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
       promptRewrite: false,
       model: model ?? undefined,
@@ -1149,6 +1153,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     assertVideoCastConfirmed(storyline, [shot]);
 
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    // DUR-4898: same rating rules as a real render, checked before anything is reserved.
+    assertFilmModelAllowed(model, filmContentMode(storyline));
     // The shortest clip this model will actually make (1s for a model that
     // takes any length, 5s for Fal's Kling models, which refuse 1s).
     const previewDurationSeconds = videoRenderDurationSeconds(providerId, model, PREVIEW_DURATION_SECONDS);
@@ -1186,10 +1192,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     try {
       return await finishPreview(companyId, storyline, shot, providerId, model, previewDurationSeconds, previewCents, actor);
     } catch (err) {
-      await db
-        .update(videoStorylines)
-        .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${previewCents})`, updatedAt: nowOf() })
-        .where(eq(videoStorylines.id, storylineId));
+      // Fal billed a clip its own check threw away: that money was spent, so it stays counted (DUR-4898).
+      if (!(err as { billed?: boolean }).billed) {
+        await db
+          .update(videoStorylines)
+          .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${previewCents})`, updatedAt: nowOf() })
+          .where(eq(videoStorylines.id, storylineId));
+      }
       throw err;
     }
   }
@@ -1221,7 +1230,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: shotVideoPrompt(storyline, shot),
+      prompt: filmVideoPrompt(filmContentMode(storyline), shotVideoPrompt(storyline, shot)),
       promptRewrite: false,
       model: model ?? undefined,
       startImage,
@@ -1246,6 +1255,19 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw unprocessable("The preview did not finish in time. Try again in a moment.");
     }
     if (outcome.status === "failed") {
+      if (outcome.flagged && providerId === "fal") {
+        await recordFalCostEvent(db, safeFetch, {
+          companyId,
+          apiKey,
+          agentId: actor.agentId,
+          createdByUserId: actor.agentId ? null : actor.actorId,
+          model: handle.model,
+          usage: { seconds: previewDurationSeconds },
+          estimateCents: previewCents,
+          billingCode: "video-storyline-preview",
+        });
+        throw Object.assign(unprocessable(`Preview render failed: ${outcome.error}`), { billed: true });
+      }
       throw unprocessable(`Preview render failed: ${outcome.error}`);
     }
 
@@ -1442,11 +1464,59 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return held.reduce((sum, row) => sum + row.reservedCents, 0);
   }
 
-  async function onShotFailed(companyId: string, storylineId: string, shotId: string, jobId: string, errorMessage: string) {
-    await releaseShotReservation(companyId, storylineId, shotId);
+  async function onShotFailed(companyId: string, storylineId: string, shotId: string, jobId: string, errorMessage: string, opts: { keepCost?: boolean } = {}) {
+    // A result Fal billed but threw away (keepCost) has already been settled at its real cost: nothing to give back.
+    if (!opts.keepCost) await releaseShotReservation(companyId, storylineId, shotId);
     await db.update(videoShotRenderJobs).set({ status: "failed", error: errorMessage, completedAt: nowOf(), updatedAt: nowOf() }).where(eq(videoShotRenderJobs.id, jobId));
     await db.update(videoShots).set({ status: "failed", errorMessage, updatedAt: nowOf() }).where(eq(videoShots.id, shotId));
     await db.update(videoStorylines).set({ status: "paused", errorMessage: `A shot failed: ${errorMessage}. Re-render it to continue.`, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
+  }
+
+  /** The ledger code of the money held for this shot's paid step (an animated photo), when there is a hold. */
+  async function heldShotSpendCode(companyId: string, shotId: string): Promise<string | undefined> {
+    const [heldSpend] = await db
+      .select({ id: videoMediaSpend.id })
+      .from(videoMediaSpend)
+      .where(and(eq(videoMediaSpend.shotId, shotId), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")))
+      .orderBy(asc(videoMediaSpend.createdAt))
+      .limit(1);
+    return heldSpend ? storylineAnimateSpendCode(heldSpend.id) : undefined;
+  }
+
+  /**
+   * Fal's own check flagged a finished clip. The clip is thrown away (never stored, approved or chained), but Fal
+   * bills the request: record its real cost, settle any held money at it (as onShotDone does) and count it in the
+   * storyline's spentCents, instead of releasing to 0 (DUR-4898, security review F1).
+   */
+  async function settleFlaggedShotCost(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+    job: { provider: string; model: string },
+    fal: { apiKey: string },
+  ): Promise<void> {
+    const estimateForShot = estimateShotRenderCents({ providerId: job.provider, model: job.model }, [{ providerId: null, model: null, durationSeconds: shot.durationSeconds }]);
+    const recorded = await recordFalCostEvent(db, safeFetch, {
+      companyId,
+      apiKey: fal.apiKey,
+      agentId: storyline.createdByAgentId,
+      createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
+      model: job.model,
+      usage: { seconds: videoRenderDurationSeconds("fal", realVideoModel(job.model), shot.durationSeconds) },
+      estimateCents: estimateForShot.estimatedTotalCents,
+      billingCode: "video-storyline-shot",
+      settleBillingCode: await heldShotSpendCode(companyId, shot.id),
+    });
+    const costCents = recorded?.costCents ?? estimateForShot.estimatedTotalCents;
+    const alreadyHeld = await settleShotReservation(companyId, shot.id, costCents);
+    const delta = costCents - alreadyHeld;
+    if (delta !== 0) {
+      await db
+        .update(videoStorylines)
+        .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} + ${delta})`, updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storyline.id));
+    }
+    await db.update(videoShots).set({ actualCostCents: costCents, updatedAt: nowOf() }).where(eq(videoShots.id, shot.id));
   }
 
   async function onShotDone(
@@ -1474,13 +1544,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     let actualCostCents = estimateForShot.estimatedTotalCents;
     // An animated photo had its money held, with a ledger row the monthly limit
     // counts (DUR-4807): that row is settled to the real cost, never doubled.
-    const [heldSpend] = await db
-      .select({ id: videoMediaSpend.id })
-      .from(videoMediaSpend)
-      .where(and(eq(videoMediaSpend.shotId, shot.id), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")))
-      .orderBy(asc(videoMediaSpend.createdAt))
-      .limit(1);
-    const heldSpendCode = heldSpend ? storylineAnimateSpendCode(heldSpend.id) : undefined;
+    const heldSpendCode = await heldShotSpendCode(companyId, shot.id);
     // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
     if (target.providerId === "fal" && fal) {
       const recorded = await recordFalCostEvent(db, safeFetch, {
@@ -1729,7 +1793,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           continue;
         }
         if (outcome.status === "failed") {
-          await onShotFailed(job.companyId, job.storylineId, job.shotId, job.id, outcome.error);
+          // Fal's own check flagged the clip: thrown away, but Fal still bills it, so the cost is settled first.
+          if (outcome.flagged && job.provider === "fal") await settleFlaggedShotCost(job.companyId, storyline, shot, job, { apiKey });
+          await onShotFailed(job.companyId, job.storylineId, job.shotId, job.id, outcome.error, { keepCost: Boolean(outcome.flagged && job.provider === "fal") });
           failed += 1;
           continue;
         }
