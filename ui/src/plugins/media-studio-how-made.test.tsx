@@ -56,7 +56,7 @@ describe("HowWasThisMade", () => {
   let container: HTMLDivElement;
   let root: Root;
   let response: unknown;
-  const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+  const fetchMock = vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify(response), { status: 200 }));
 
   beforeEach(() => {
     container = document.createElement("div");
