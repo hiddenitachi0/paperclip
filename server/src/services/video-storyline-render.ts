@@ -7,7 +7,6 @@ import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
   VIDEO_RENDER_TICK_BATCH,
-  VIDEO_CLIP_MIN_MS,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
   readVideoStorylineCast,
@@ -22,7 +21,7 @@ import {
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./video-provider-clients.js";
-import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
+import { FalVideoProvider, SOGNI_DEFAULT_VIDEO_MODEL, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, HttpError, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
@@ -48,6 +47,10 @@ import {
   loadCastAgeRefusals,
   loadLinkedCastIdentities,
 } from "./storyline-cast.js";
+import { estimateShotRenderCents, loadMadeClipTargets, realVideoModel, resolveShotRenderTarget, shotClipTiming } from "./video-storyline-shot-target.js";
+
+// The provider/model resolution lives in video-storyline-shot-target.ts; re-exported for the strip and clip services.
+export { estimateShotRenderCents, resolveShotRenderTarget, shotClipTiming };
 
 /**
  * DUR-4127: render orchestration for a video storyline. Reuses the Fal/Sogni
@@ -81,6 +84,9 @@ const PREVIEW_POLL_TIMEOUT_MS = 90_000;
  * few reference uploads at 30 s each), so a start in progress is never cut.
  */
 export const STALLED_RENDER_GRACE_MS = 15 * 60_000;
+
+/** What a shot shows when it was left queued/rendering with no video service job behind it. */
+const SHOT_NEVER_STARTED_MESSAGE = "This shot never started on the video service. Nothing was charged for it. Try it again.";
 
 /** SSRF-guarded FetchImpl, reused for both provider API calls and downloading finished clips -- see safe-outbound-fetch.ts. */
 async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024): Promise<Response> {
@@ -148,69 +154,6 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
 
 type StorylineRow = typeof videoStorylines.$inferSelect;
 type ShotRow = typeof videoShots.$inferSelect;
-
-/**
- * Security review: the ONE provider/model resolution every render-cost
- * estimate and the actual render call share -- a shot's own provider/model
- * (set from the last real render job) wins over the storyline's. Before,
- * beginShotRender billed with the shot's values while the budget gates
- * estimated with the storyline's, so a shot re-rendered on a pricier model
- * could pass a budget check it should have failed.
- */
-export function resolveShotRenderTarget(
-  storyline: Pick<StorylineRow, "providerId" | "model">,
-  shot: Pick<ShotRow, "providerId" | "model">,
-): { providerId: VideoStorylineProvider; model: string | null } {
-  return {
-    providerId: (shot.providerId ?? storyline.providerId) as VideoStorylineProvider,
-    model: shot.model ?? storyline.model,
-  };
-}
-
-/**
- * Timeline editor: how long a clip plays in the film and how far its trim
- * handles reach (both in ms). An AI shot plays for the length its model
- * really makes (Kling 1.6/2.1 snap 7 s up to 10 s); once made, it can be
- * trimmed within that length (applied when the film is combined). Your own
- * video plays its trimmed part; a photo plays for its set length.
- */
-export function shotClipTiming(
-  storyline: Pick<StorylineRow, "providerId" | "model">,
-  shot: Pick<ShotRow, "clipKind" | "status" | "resultObjectKey" | "providerId" | "model" | "durationSeconds" | "sourceTrimInMs" | "sourceTrimOutMs">,
-  uploadDurationMs: number | null = null,
-): { playMs: number; sourceLengthMs: number | null; trimmed: boolean } {
-  if (shot.clipKind === "generated") {
-    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
-    const fullMs = videoRenderDurationSeconds(providerId, model, shot.durationSeconds) * 1000;
-    if (shot.status !== "done" || !shot.resultObjectKey) return { playMs: fullMs, sourceLengthMs: null, trimmed: false };
-    const inMs = Math.min(Math.max(0, shot.sourceTrimInMs ?? 0), fullMs);
-    const outMs = Math.min(fullMs, shot.sourceTrimOutMs ?? fullMs);
-    const trimmed = inMs > 0 || outMs < fullMs;
-    return { playMs: Math.max(VIDEO_CLIP_MIN_MS, outMs - inMs), sourceLengthMs: fullMs, trimmed };
-  }
-  if (shot.clipKind === "uploaded_video") {
-    const inMs = shot.sourceTrimInMs ?? 0;
-    const outMs = shot.sourceTrimOutMs ?? uploadDurationMs ?? inMs + shot.durationSeconds * 1000;
-    return { playMs: Math.max(VIDEO_CLIP_MIN_MS, outMs - inMs), sourceLengthMs: uploadDurationMs, trimmed: true };
-  }
-  return { playMs: shot.durationSeconds * 1000, sourceLengthMs: null, trimmed: false };
-}
-
-/** Render-cost estimate for a set of shots, each priced with resolveShotRenderTarget (shots on different providers/models are summed). */
-export function estimateShotRenderCents(
-  storyline: Pick<StorylineRow, "providerId" | "model">,
-  shots: ReadonlyArray<Pick<ShotRow, "providerId" | "model" | "durationSeconds">>,
-): { shotCount: number; totalSeconds: number; estimatedTotalCents: number } {
-  let totalSeconds = 0;
-  let estimatedTotalCents = 0;
-  for (const shot of shots) {
-    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
-    const one = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], providerId, { model });
-    totalSeconds += one.totalSeconds;
-    estimatedTotalCents += one.estimatedTotalCents;
-  }
-  return { shotCount: shots.length, totalSeconds, estimatedTotalCents };
-}
 
 function formatDollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -561,7 +504,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       });
       await db
         .update(videoShots)
-        .set({ status: "rendering", providerId: handle.provider, model: handle.model, attempt, errorMessage: null, updatedAt: nowOf() })
+        // The service and model that really ran are recorded on the job above, never on the shot:
+        // video_shots.provider_id/model is only a person's pin, so a later change of the film's model reaches this shot.
+        .set({ status: "rendering", attempt, errorMessage: null, updatedAt: nowOf() })
         .where(eq(videoShots.id, shot.id));
     } catch (err) {
       // The job started but could not be written down: stop it rather than leave it unfollowed.
@@ -653,7 +598,12 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       );
     }
 
-    const estimateResult = estimateShotRenderCents(storyline, renderableShots);
+    // Finished shots are priced at the model that made them, shots still to render at the target a render would use.
+    const madeTargets = await loadMadeClipTargets(db, renderableShots.filter((s) => s.status === "done").map((s) => s.id));
+    const estimateResult = estimateShotRenderCents(
+      storyline,
+      renderableShots.map((s) => ({ ...s, madeWith: madeTargets.get(s.id) ?? null })),
+    );
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
     const nothingToPayFor = renderableShots.every((s) => s.status === "done");
     if ((effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) && !nothingToPayFor) {
@@ -771,6 +721,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.getStoryline(companyId, storylineId);
   }
 
+  /** Older renders pinned the made-up name 'sogni-video' on the shot; a person never sets that. */
+  function hasAutomaticPin(shot: { model: string | null }): boolean {
+    return shot.model !== null && realVideoModel(shot.model) === null;
+  }
+
+  function withoutAutomaticPin<T extends { providerId: string | null; model: string | null }>(shot: T): T {
+    return hasAutomaticPin(shot) ? { ...shot, providerId: null, model: null } : shot;
+  }
+
   async function reRenderShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -802,7 +761,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     assertVideoCastConfirmed(storyline, [shot, ...chainShots].sort((x, y) => x.orderIndex - y.orderIndex));
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
-    const shotEstimate = estimateShotRenderCents(storyline, [shot]);
+    // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
+    // estimate and the render use the same target.
+    const shotEstimate = estimateShotRenderCents(storyline, [withoutAutomaticPin(shot)]);
     if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
@@ -820,6 +781,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!current) throw conflict("This shot was removed while the re-render was starting.");
       if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
       const lockedRefund = current.actualCostCents ?? 0;
+      // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
+      // pre-lock check), priced with the same clear rule the update below applies.
+      if (locked.budgetCapCents !== null) {
+        const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
+        const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedEstimate;
+        if (lockedTotal > locked.budgetCapCents) {
+          throw unprocessable(
+            `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
+          );
+        }
+      }
       await tx
         .update(videoShots)
         .set({
@@ -833,6 +805,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           actualCostCents: null,
           // A new clip: the old one's trim no longer applies.
           ...(current.clipKind === "generated" ? { sourceTrimInMs: null, sourceTrimOutMs: null } : {}),
+          // Older renders pinned the made-up name 'sogni-video' on the shot. A person never sets that (the pin
+          // API drops it), so it is an automatic pin: clear it so this render follows the film's model.
+          ...(hasAutomaticPin(current) ? { providerId: null, model: null } : {}),
           updatedAt: nowOf(),
         })
         .where(eq(videoShots.id, shotId));
@@ -1093,6 +1068,23 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .set({ status: "failed", errorMessage: "Cancelled by user.", updatedAt: nowOf() })
         .where(inArray(videoShots.id, runningShotIds));
     }
+    // A shot left queued/rendering with no job (the process died before its job started) is not covered by
+    // the jobs above and would keep "already rendering" on it after the cancel. Same grace period as the
+    // stalled-render sweep: a younger shot may be a start that is still in flight (a re-render queues the
+    // shot before its job row exists), and failing it here would make it restartable and paid for twice.
+    const strandedCutoff = new Date(nowOf().getTime() - STALLED_RENDER_GRACE_MS);
+    await db
+      .update(videoShots)
+      .set({ status: "failed", errorMessage: SHOT_NEVER_STARTED_MESSAGE, updatedAt: nowOf() })
+      .where(
+        and(
+          eq(videoShots.storylineId, storylineId),
+          eq(videoShots.clipKind, "generated"),
+          inArray(videoShots.status, ["queued", "rendering"]),
+          lt(videoShots.updatedAt, strandedCutoff),
+          sql`not exists (select 1 from ${videoShotRenderJobs} where ${videoShotRenderJobs.shotId} = ${videoShots.id} and ${videoShotRenderJobs.status} = 'running')`,
+        ),
+      );
 
     await db
       .update(videoStorylines)
@@ -1187,10 +1179,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     companyId: string,
     storyline: typeof videoStorylines.$inferSelect,
     shot: typeof videoShots.$inferSelect,
-    jobId: string,
+    job: { id: string; provider: string; model: string },
     result: { url?: string; dataUrl?: string; contentType: string; meta?: Record<string, unknown> },
-    fal: { apiKey: string; model: string } | null = null,
+    fal: { apiKey: string } | null = null,
   ) {
+    const jobId = job.id;
     const { buffer, contentType } = await downloadResultBytes(result);
     const stored = await getStorageService().putFile({
       companyId,
@@ -1199,8 +1192,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       contentType,
       body: buffer,
     });
-    const target = resolveShotRenderTarget(storyline, shot);
-    const estimateForShot = estimateShotRenderCents(storyline, [shot]);
+    // Billing reads the JOB, not the storyline or the shot: a paused storyline can still be edited
+    // (assertStorylineEditable), so a person may switch the film's provider while this job runs.
+    // The job holds what was really sent and started (and what beginShotRender's budget check priced).
+    const target = { providerId: job.provider as VideoStorylineProvider, model: realVideoModel(job.model) };
+    const estimateForShot = estimateShotRenderCents({ providerId: job.provider, model: job.model }, [{ providerId: null, model: null, durationSeconds: shot.durationSeconds }]);
     let actualCostCents = estimateForShot.estimatedTotalCents;
     // An animated photo had its money held, with a ledger row the monthly limit
     // counts (DUR-4807): that row is settled to the real cost, never doubled.
@@ -1218,7 +1214,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         apiKey: fal.apiKey,
         agentId: storyline.createdByAgentId,
         createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
-        model: fal.model,
+        model: job.model,
         usage: { seconds: videoRenderDurationSeconds("fal", target.model, shot.durationSeconds) },
         estimateCents: estimateForShot.estimatedTotalCents,
         billingCode: "video-storyline-shot",
@@ -1244,7 +1240,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
               billingCode: heldSpendCode,
               credits: sogniCredits,
               creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
-              model: target.model ?? "sogni-video",
+              model: target.model ?? SOGNI_DEFAULT_VIDEO_MODEL,
             }).catch((err) => {
               logger.error({ err, shotId: shot.id }, "video-storyline-render: could not settle the held Sogni cost");
               return true;
@@ -1255,7 +1251,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           agentId: storyline.createdByAgentId ?? null,
           credits: sogniCredits,
           creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
-          model: target.model ?? "sogni-video",
+          model: target.model ?? SOGNI_DEFAULT_VIDEO_MODEL,
           // Per-shot key so a retried tick after a crash does not write a second row.
           billingCode: `video_storyline_render:${shot.id}`,
           idempotent: true,
@@ -1367,7 +1363,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     for (const row of stalled) {
       await db
         .update(videoShots)
-        .set({ status: "failed", errorMessage: "This shot never started on the video service. Nothing was charged for it. Try it again.", updatedAt: nowOf() })
+        .set({ status: "failed", errorMessage: SHOT_NEVER_STARTED_MESSAGE, updatedAt: nowOf() })
         .where(and(eq(videoShots.storylineId, row.id), eq(videoShots.clipKind, "generated"), inArray(videoShots.status, ["queued", "rendering"])));
       await db
         .update(videoStorylines)
@@ -1377,6 +1373,25 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           updatedAt: nowOf(),
         })
         .where(and(eq(videoStorylines.id, row.id), eq(videoStorylines.status, "rendering")));
+    }
+    // A shot queued/rendering with no running job, on a film in ANY status (a draft or paused film whose
+    // process died between queuing the shot and starting its job), would block a new render for good: it
+    // reads "already rendering" with nothing behind it. Only shots untouched for the grace period, and
+    // never one with a running job.
+    const strandedShots = await db
+      .update(videoShots)
+      .set({ status: "failed", errorMessage: SHOT_NEVER_STARTED_MESSAGE, updatedAt: nowOf() })
+      .where(
+        and(
+          eq(videoShots.clipKind, "generated"),
+          inArray(videoShots.status, ["queued", "rendering"]),
+          lt(videoShots.updatedAt, cutoff),
+          sql`not exists (select 1 from ${videoShotRenderJobs} where ${videoShotRenderJobs.shotId} = ${videoShots.id} and ${videoShotRenderJobs.status} = 'running')`,
+        ),
+      )
+      .returning({ id: videoShots.id });
+    if (strandedShots.length > 0) {
+      logger.warn({ released: strandedShots.length }, "video-storyline-render: reset shots that were left queued/rendering with no job running");
     }
     return stalled.length;
   }
@@ -1430,7 +1445,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           failed += 1;
           continue;
         }
-        await onShotDone(job.companyId, storyline, shot, job.id, outcome.result, { apiKey, model: job.model });
+        await onShotDone(job.companyId, storyline, shot, job, outcome.result, { apiKey });
         advanced += 1;
       } catch (err) {
         logger.error({ err, jobId: job.id }, "video-storyline-render: tick could not advance a render job");

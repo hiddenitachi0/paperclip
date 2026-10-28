@@ -9,10 +9,10 @@ import {
   ACTION_ROOMS_PLACE,
   ACTION_ROOMS_SAVE,
   fileContentPath,
-  listCompanyPictures,
   pictureDataUrl,
   uploadPicture,
 } from "./anchor-helpers.js";
+import { FilesPictureList } from "./files-picture-list.js";
 
 // Rooms: a photo of a real room, named areas in it (zones) and product
 // pictures. "Place product" puts products into one zone and keeps the rest of
@@ -111,11 +111,7 @@ function BrushMask({ src, onDone, onCancel }: { src: string; onDone: (blob: Blob
 function PictureButton({ companyId, label, onPick, disabled }: { companyId: string; label: string; onPick: (fileId: string) => void; disabled?: boolean }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
-  const [pictures, setPictures] = useState<Array<{ fileId: string; title: string }> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (open && !pictures) listCompanyPictures(companyId).then(setPictures).catch((e) => setError(errText(e)));
-  }, [open, pictures, companyId]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={row}>
@@ -133,15 +129,7 @@ function PictureButton({ companyId, label, onPick, disabled }: { companyId: stri
         />
       </div>
       {error ? <div style={errorBox}>{error}</div> : null}
-      {open ? (
-        <div style={{ ...row, maxHeight: 200, overflowY: "auto" }}>
-          {(pictures ?? []).map((p) => (
-            <button key={p.fileId} type="button" style={{ padding: 0, border: "none", background: "none", cursor: "pointer" }} onClick={() => { onPick(p.fileId); setOpen(false); }}>
-              <img src={fileContentPath(p.fileId)} alt={p.title} style={{ ...thumb, width: 64, height: 64 }} />
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {open ? <FilesPictureList companyId={companyId} size={64} onPick={(fileId) => { onPick(fileId); setOpen(false); }} /> : null}
     </div>
   );
 }

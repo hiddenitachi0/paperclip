@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ShotCastConfirm,
   StorylineCastSection,
   castIdentityOptions,
   type CastIdentityOption,
@@ -97,6 +98,7 @@ describe("StorylineCastSection", () => {
           sceneNotes={opts.sceneNotes ?? []}
           editable={opts.editable ?? true}
           identities={IDENTITIES}
+          identitiesLoaded
           onSaved={onSaved}
         />,
       );
@@ -117,7 +119,7 @@ describe("StorylineCastSection", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Linking Maja to a saved person keeps Maja's face and body the same in every picture and every shot.");
     expect(container.querySelector('[data-testid="cast-member-c1"]')?.textContent).toContain("a woman in her 30s");
-    expect(container.querySelector('[data-testid="cast-picker-c1"]')?.textContent).toContain("Not linked");
+    expect(container.querySelector('[data-testid="cast-picker-c1"]')?.textContent).toContain("Link to a person");
   });
 
   it("links a character to a saved person picked from a list with thumbnails", async () => {
@@ -159,20 +161,169 @@ describe("StorylineCastSection", () => {
     expect(calls[1]!.body).toEqual({ members: [{ name: "Cy", nickname: null, description: null, identityId: null }] });
   });
 
-  it("shows who is in each shot from the names, and saves a person's own pick or goes back to the names", async () => {
+  it("shows each shot's suggested cast as chips and saves a change as the person's own pick", async () => {
     await draw({ ...CAST, members: [{ ...CAST.members[0]!, identityId: "id-maja" }, CAST.members[1]!] });
     const row1 = container.querySelector('[data-testid="shot-cast-row-sh1"]')!;
-    const boxes = [...row1.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
-    expect(boxes.map((b) => b.checked)).toEqual([true, false]);
-    expect(row1.textContent).toContain("found by name");
-    await click(boxes[1]!);
+    const chips = [...row1.querySelectorAll("button[aria-pressed]")] as HTMLButtonElement[];
+    expect(chips.map((b) => b.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
+    expect(row1.textContent).toContain("Suggested");
+    await click(chips[1]!);
     expect(calls[0]).toEqual({ url: `${BASE}/shots/sh1/cast`, method: "PUT", body: { castIds: ["c1", "c2"] } });
+  });
 
+  it("confirms the suggested cast for one shot", async () => {
+    await draw(CAST);
+    await click(container.querySelector('[data-testid="confirm-cast-sh1"]')!);
+    expect(calls).toEqual([{ url: `${BASE}/shots/sh1/cast`, method: "PUT", body: { castIds: ["c1"] } }]);
+    expect(container.textContent).toContain("Confirmed the cast for shot 1.");
+  });
+
+  it("confirms the suggested cast for all shots with one click when nothing is ticked yet (shotCast is empty)", async () => {
+    await draw(CAST);
+    expect(container.textContent).toContain("2 shots are still waiting for you to confirm.");
+    await click(container.querySelector('[data-testid="confirm-all-cast"]')!);
+    expect(calls).toEqual([
+      { url: `${BASE}/shots/sh1/cast`, method: "PUT", body: { castIds: ["c1"] } },
+      { url: `${BASE}/shots/sh2/cast`, method: "PUT", body: { castIds: ["c2"] } },
+    ]);
+    // The screen reloads once at the end, not after every shot.
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Confirmed the cast for 2 shots.");
+  });
+
+  it("only confirms the shots that are not confirmed yet, and shows when all are", async () => {
+    await draw({ ...CAST, shotCast: { sh1: ["c1"] } });
+    await click(container.querySelector('[data-testid="confirm-all-cast"]')!);
+    expect(calls.map((c) => c.url)).toEqual([`${BASE}/shots/sh2/cast`]);
+    await draw({ ...CAST, shotCast: { sh1: ["c1"], sh2: ["c2"] } });
+    expect(container.querySelector('[data-testid="confirm-all-cast"]')).toBeNull();
+    expect(container.querySelector('[data-testid="all-cast-confirmed"]')?.textContent).toContain("confirmed for every shot");
+  });
+
+  it("leaves shots with no name found out of the bulk confirm and says how many are left for you", async () => {
+    const cast: StorylineCast = {
+      members: [{ id: "c1", name: "Maja", nickname: null, description: null, identityId: null }],
+      shotCast: {},
+    };
+    await draw(cast);
+    // sh1 names Maja, sh2 ("Bo barks at the mailman") names nobody.
+    const all = container.querySelector('[data-testid="confirm-all-cast"]') as HTMLButtonElement;
+    expect(all.textContent).toBe("Confirm the 1 shot with a name found");
+    expect(container.textContent).toContain("1 shot with nobody named is left for you to check");
+    await click(all);
+    expect(calls).toEqual([{ url: `${BASE}/shots/sh1/cast`, method: "PUT", body: { castIds: ["c1"] } }]);
+    expect(container.textContent).toContain("Confirmed the cast for 1 shot. 1 shot with nobody named was left for you to check.");
+    // The per-shot button is still there for the no-name shot.
+    expect(container.querySelector('[data-testid="confirm-cast-sh2"]')?.textContent).toBe("Confirm nobody");
+  });
+
+  it("shows no bulk button when no shot has a name found", async () => {
+    await draw({ members: [{ id: "c1", name: "Zed", nickname: null, description: null, identityId: null }], shotCast: {} });
+    expect(container.querySelector('[data-testid="confirm-all-cast"]')).toBeNull();
+    expect(container.textContent).toContain("2 shots with nobody named are left for you to check");
+  });
+
+  it("goes back to the description for a confirmed shot", async () => {
     await draw({ ...CAST, shotCast: { sh2: [] } });
     const row2 = container.querySelector('[data-testid="shot-cast-row-sh2"]')!;
-    expect(([...row2.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[]).map((b) => b.checked)).toEqual([false, false]);
+    expect(([...row2.querySelectorAll("button[aria-pressed]")] as HTMLButtonElement[]).map((b) => b.getAttribute("aria-pressed"))).toEqual(["false", "false"]);
     await click(buttonNamed(row2 as HTMLElement, "Use the description"));
-    expect(calls[1]).toEqual({ url: `${BASE}/shots/sh2/cast`, method: "PUT", body: { castIds: null } });
+    expect(calls[0]).toEqual({ url: `${BASE}/shots/sh2/cast`, method: "PUT", body: { castIds: null } });
+  });
+
+  it("shows the server's refusal in plain words and says how far a bulk confirm got", async () => {
+    const refusal = "That character is not in this storyline's cast any more. Refresh the page and pick again.";
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n += 1;
+        return n === 1
+          ? new Response(JSON.stringify({ id: "s1" }), { status: 200, headers: { "content-type": "application/json" } })
+          : new Response(JSON.stringify({ error: refusal }), { status: 422, headers: { "content-type": "application/json" } });
+      }),
+    );
+    await draw(CAST);
+    await click(container.querySelector('[data-testid="confirm-all-cast"]')!);
+    const alert = container.querySelector('[data-testid="shot-cast-error"]')!;
+    expect(alert.textContent).toContain(refusal);
+    expect(alert.textContent).toContain("1 of 2 shots were confirmed before this stopped.");
+  });
+
+  describe("before the saved people are loaded", () => {
+    const LINKED: StorylineCast = {
+      members: [{ id: "c1", name: "Hero", nickname: null, description: null, identityId: "id-maja" }],
+      shotCast: {},
+    };
+    const ANNA_SHOTS = [{ id: "sh1", orderIndex: 0, prompt: "Anna opens the door", cameraNotes: null }];
+
+    async function drawConfirm(props: { identities: CastIdentityOption[]; identitiesLoaded: boolean; identityError?: string | null }) {
+      await act(async () => {
+        root.render(<ShotCastConfirm base={BASE} cast={LINKED} shots={ANNA_SHOTS} editable onSaved={onSaved} {...props} />);
+      });
+      await flush();
+    }
+
+    it("disables every way of confirming, sends nothing and hides the unlinked note while loading", async () => {
+      await drawConfirm({ identities: [], identitiesLoaded: false });
+      expect(container.textContent).toContain("Loading your saved people");
+      expect(container.querySelector('[data-testid="cast-unlinked-note"]')).toBeNull();
+      const buttons = [...container.querySelectorAll("button")] as HTMLButtonElement[];
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const b of buttons) expect(b.disabled).toBe(true);
+      await click(container.querySelector('[data-testid="confirm-cast-sh1"]')!);
+      expect(calls).toEqual([]);
+    });
+
+    it("shows the error inside the block and stays disabled when the saved people could not be loaded", async () => {
+      await drawConfirm({ identities: [], identitiesLoaded: false, identityError: "The saved people could not be loaded: offline" });
+      expect(container.querySelector('[data-testid="shot-cast-identity-error"]')?.textContent).toContain("The saved people could not be loaded: offline");
+      expect(container.querySelector('[data-testid="cast-unlinked-note"]')).toBeNull();
+      for (const b of [...container.querySelectorAll("button")] as HTMLButtonElement[]) expect(b.disabled).toBe(true);
+      expect(calls).toEqual([]);
+    });
+
+    it("suggests the linked character once the saved people have loaded", async () => {
+      await drawConfirm({ identities: [{ id: "id-maja", name: "Anna", nickname: null, thumbFileId: null, hasFace: false, hasSogniLora: false }], identitiesLoaded: true });
+      await click(container.querySelector('[data-testid="confirm-all-cast"]')!);
+      expect(calls).toEqual([{ url: `${BASE}/shots/sh1/cast`, method: "PUT", body: { castIds: ["c1"] } }]);
+    });
+  });
+
+  it("holds member edits while the shot block is saving", async () => {
+    let release: (() => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return new Response(JSON.stringify({ id: "s1" }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    await draw(CAST);
+    await act(async () => {
+      (container.querySelector('[data-testid="confirm-cast-sh1"]') as HTMLElement).click();
+    });
+    expect((buttonNamed(container.querySelector('[data-testid="cast-member-c1"]') as HTMLElement, "Remove")).disabled).toBe(true);
+    expect((container.querySelector('[data-testid="cast-picker-c1"]') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      release?.();
+    });
+    await flush();
+    expect((buttonNamed(container.querySelector('[data-testid="cast-member-c1"]') as HTMLElement, "Remove")).disabled).toBe(false);
+  });
+
+  it("tells people about characters without a linked person", async () => {
+    const onLinkPerson = vi.fn();
+    await act(async () => {
+      root.render(<ShotCastConfirm base={BASE} cast={CAST} shots={SHOTS} identities={IDENTITIES} identitiesLoaded editable onSaved={onSaved} onLinkPerson={onLinkPerson} />);
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cast-unlinked-note"]')?.textContent).toContain("Maja, Bo are not linked to a person");
+    await click(buttonNamed(container, "Link to a person"));
+    expect(onLinkPerson).toHaveBeenCalledTimes(1);
   });
 
   it("warns plainly when a shot has two saved people, and when a saved person has no face picture", async () => {

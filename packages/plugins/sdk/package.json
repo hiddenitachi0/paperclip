@@ -26,6 +26,10 @@
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
     },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js"
+    },
     "./ui": {
       "types": "./dist/ui/index.d.ts",
       "import": "./dist/ui/index.js"
@@ -68,6 +72,10 @@
       "./types": {
         "types": "./dist/types.d.ts",
         "import": "./dist/types.js"
+      },
+      "./media": {
+        "types": "./dist/media/index.d.ts",
+        "import": "./dist/media/index.js"
       },
       "./ui": {
         "types": "./dist/ui/index.d.ts",
