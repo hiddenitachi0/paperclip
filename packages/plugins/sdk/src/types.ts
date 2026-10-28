@@ -1883,7 +1883,9 @@ export interface PluginModelsClient {
  * `resolve` checks the setup on the host against the company's own LoRA rows
  * and returns exactly what a run sends (provider refs, explicit strengths,
  * params), with `usable: false` and plain-language `problems` when it cannot
- * be used.
+ * be used. Params only ever hold the host's allowed settings (prompt
+ * expansion, seed, steps, ...), never a provider safety switch: the filter
+ * follows the film's content rating, not the setup.
  */
 export interface PluginMediaLibraryClient {
   listSetups(companyId: string, options?: { kind?: "image" | "video"; approvedOnly?: boolean }): Promise<PluginMediaSetup[]>;

@@ -9,7 +9,10 @@ import {
   createMediaSetupTrialSchema,
   effectiveMediaLoraContentTag,
   mediaModelCapability,
+  mediaSetupParamProblems,
+  pickMediaSetupParams,
   summarizeMediaSetupTrials,
+  updateMediaSetupSchema,
   type MediaLoraForCheck,
   type MediaSetupForCheck,
 } from "./media-setups.js";
@@ -256,6 +259,48 @@ describe("media setups: request schemas", () => {
     expect(createMediaSetupTrialSchema.safeParse({ scores: { naturalness: 6 } }).success).toBe(false);
     expect(createMediaSetupTrialSchema.safeParse({ scores: { looks: 3 } }).success).toBe(false);
     expect(createMediaSetupTrialSchema.parse({ scores: { naturalness: 4, movement: 5 } }).raterKind).toBe("human");
+  });
+});
+
+describe("media setups: params never touch a provider's safety filter", () => {
+  const base = { kind: "video", name: "x", provider: "fal", modelId: "fal-ai/wan-flf2v" } as const;
+  const messages = (result: { success: boolean; error?: { issues: Array<{ message: string }> } }) =>
+    (result.error?.issues ?? []).map((issue) => issue.message).join(" ");
+
+  it("refuses safety, filter and tolerance switches with a plain reason", () => {
+    const fal = createMediaSetupSchema.safeParse({ ...base, params: { promptExpansion: false, enable_safety_checker: false, safety_tolerance: "6" } });
+    expect(fal.success).toBe(false);
+    expect(messages(fal)).toMatch(/"enable_safety_checker" would change the service's safety filter/);
+    expect(messages(fal)).toMatch(/"safety_tolerance" would change the service's safety filter/);
+    for (const key of ["disableNSFWFilter", "enable_output_safety_checker", "safetyChecker", "content-moderation", "uncensored"]) {
+      const result = createMediaSetupSchema.safeParse({ ...base, provider: "sogni", modelId: "krea2_turbo_fp8_scaled", kind: "image", params: { promptExpansion: false, [key]: true } });
+      expect(result.success, key).toBe(false);
+      expect(messages(result), key).toMatch(/safety filter/);
+    }
+    // Patching params alone is checked the same way.
+    expect(updateMediaSetupSchema.safeParse({ params: { promptExpansion: false, disableNSFWFilter: true } }).success).toBe(false);
+  });
+
+  it("allows only the listed settings, each with a value that fits", () => {
+    const unknown = createMediaSetupSchema.safeParse({ ...base, params: { promptExpansion: false, loraScale: 2 } });
+    expect(unknown.success).toBe(false);
+    expect(messages(unknown)).toMatch(/"loraScale" is not a setting a setup can carry/);
+    expect(createMediaSetupSchema.safeParse({ ...base, params: { promptExpansion: false, steps: 0 } }).success).toBe(false);
+    expect(createMediaSetupSchema.safeParse({ ...base, params: { promptExpansion: false, aspectRatio: "wide" } }).success).toBe(false);
+    expect(createMediaSetupSchema.safeParse({ ...base, params: [] }).success).toBe(false);
+    const ok = createMediaSetupSchema.parse({
+      ...base,
+      params: { promptExpansion: true, seed: 42, steps: 30, guidance: 3.5, aspectRatio: "16:9", negativePrompt: "blurry", durationSeconds: 5, fps: 24, resolution: "720p", sampler: null },
+    });
+    expect(ok.params).toMatchObject({ promptExpansion: true, seed: 42, aspectRatio: "16:9" });
+  });
+
+  it("flags a stored safety switch as a problem and never passes it on", () => {
+    const stored = { promptExpansion: false, disableNSFWFilter: true, seed: 7 };
+    const result = checkMediaSetup(setup({ provider: "sogni", kind: "image", modelId: "krea2_turbo_fp8_scaled", params: stored }), library());
+    expect(result.problems.join(" ")).toMatch(/"disableNSFWFilter" would change the service's safety filter/);
+    expect(mediaSetupParamProblems({ promptExpansion: false, seed: 7 })).toEqual([]);
+    expect(pickMediaSetupParams(stored)).toEqual({ promptExpansion: false, seed: 7 });
   });
 });
 

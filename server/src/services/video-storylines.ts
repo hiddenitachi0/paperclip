@@ -261,8 +261,12 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
 // "cancelled" is editable too: cancelling stops spending, it must not leave the storyline stuck forever.
 const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed", "cancelled"]);
 
+export function isStorylineEditable(row: Pick<StorylineRow, "status">): boolean {
+  return EDITABLE_STORYLINE_STATUSES.has(row.status);
+}
+
 export function assertStorylineEditable(row: StorylineRow) {
-  if (!EDITABLE_STORYLINE_STATUSES.has(row.status)) {
+  if (!isStorylineEditable(row)) {
     throw conflict(
       `This storyline is ${row.status.replace(/_/g, " ")} and cannot be edited right now. Pause or wait for it to finish first.`,
     );

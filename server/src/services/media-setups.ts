@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { mediaLoras, mediaModelSetups, mediaModelSetupTrials, mediaProjectDefaults, personas, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import {
@@ -12,6 +12,7 @@ import {
   effectiveMediaLoraContentTag,
   inferMediaLoraFamily,
   mediaLoraContentFloor,
+  pickMediaSetupParams,
   summarizeMediaSetupTrials,
   type CreateMediaLoraInput,
   type CreateMediaSetupInput,
@@ -43,7 +44,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
-import { assertStorylineEditable, lockStorylineRow, videoStorylineService } from "./video-storylines.js";
+import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoStorylineService, type ScopedTx } from "./video-storylines.js";
 
 /**
  * Media Studio film studio, Phase 1: the LoRA library, saved model setups,
@@ -62,6 +63,11 @@ import { assertStorylineEditable, lockStorylineRow, videoStorylineService } from
  * starter LoRAs, once (deleting them later does not bring them back). The
  * claim is media_project_defaults.setups_seeded_at, set in the same
  * transaction as the inserts, so two first requests at once seed only once.
+ *
+ * Storylines copy a picked setup's provider and model (the sync rule, see
+ * setStorylineSetups). Changing a setup's kind, provider or model updates
+ * those copies in the same transaction (syncStorylinesToSetup). Both paths
+ * lock the setup row before the storyline rows, so they never deadlock.
  */
 
 export interface MediaSetupsActor {
@@ -74,6 +80,18 @@ export interface MediaSetupsActor {
 export interface MediaSetupsReader {
   agent: boolean;
 }
+
+/** What happened to one storyline when the setup it uses changed. */
+interface StorylineSetupSync {
+  storylineId: string;
+  slot: "image" | "video";
+  /** copied: it now runs the setup's new provider and model. unlinked: it keeps its model, shown as custom. */
+  outcome: "copied" | "unlinked";
+  reason: string | null;
+}
+
+/** video_storylines.provider_id and picture_settings.providerId take only these. */
+const STORYLINE_PROVIDERS: readonly string[] = ["fal", "sogni"];
 
 type LoraRow = typeof mediaLoras.$inferSelect;
 type SetupRow = typeof mediaModelSetups.$inferSelect;
@@ -375,7 +393,8 @@ export function mediaSetupsService(db: Db) {
           contentTag: lora ? effectiveMediaLoraContentTag(lora) : null,
         };
       }),
-      params: row.params ?? {},
+      // Only the allowed settings, ever; a stored key outside the list shows in `problems`.
+      params: pickMediaSetupParams(row.params ?? {}),
       // Computed now, so a LoRA reviewed or refused after the setup was saved shows at once.
       contentRating: check.contentRating,
       matureReasons: check.matureReasons,
@@ -467,7 +486,8 @@ export function mediaSetupsService(db: Db) {
         return lora ? [{ loraId: lora.id, ref: lora.ref, source: lora.source, name: lora.name ?? lora.ref, strength: pick.strength, triggerWords: lora.triggerWords }] : [];
       }),
       triggerWords: check.triggerWords,
-      params: row.params ?? {},
+      // Only the allowed settings reach a run: never a provider safety switch (plan 2.10).
+      params: pickMediaSetupParams(row.params ?? {}),
       contentRating: check.contentRating,
       billing: check.billing,
       usable: problems.length === 0,
@@ -583,31 +603,46 @@ export function mediaSetupsService(db: Db) {
           : input.status === "draft"
             ? { status: input.status, approvedByUserId: null, approvedAt: null }
             : { status: input.status };
-    const [row] = await db
-      .update(mediaModelSetups)
-      .set({
-        ...(input.kind !== undefined ? { kind: input.kind } : {}),
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(input.provider !== undefined ? { provider: input.provider } : {}),
-        ...(input.family !== undefined ? { family: input.family } : recipeChanged ? { family: check.family } : {}),
-        ...(recipeChanged ? { mode: check.mode } : {}),
-        ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
-        ...(input.editModelId !== undefined ? { editModelId: input.editModelId } : {}),
-        ...(input.loras !== undefined ? { loras: input.loras } : {}),
-        ...(input.params !== undefined ? { params: input.params } : {}),
-        ...(input.tags !== undefined ? { tags: input.tags } : {}),
-        ...(input.favorite !== undefined ? { favorite: input.favorite } : {}),
-        ...(input.notes !== undefined ? { notes: input.notes } : {}),
-        ...statusFields,
-        contentRating: check.contentRating,
-        ...(check.contentRating === "mature" && existing.contentRating !== "mature" ? { matureEnabledByUserId: userId } : {}),
-        ...(check.contentRating === "sfw" ? { matureEnabledByUserId: null } : {}),
-        updatedAt: now,
-      })
-      .where(and(eq(mediaModelSetups.id, setupId), eq(mediaModelSetups.companyId, companyId)))
-      .returning();
-    if (!row) throw notFound(SETUP_NOT_FOUND);
+    // Storylines copy a setup's kind (which slot), provider and model. When
+    // one of those is sent, the storylines that use the setup follow in the
+    // same transaction, so none keeps rendering the old model under the
+    // setup's name. The sync compares each storyline's copy with the row as
+    // written here (not with `existing`, read before the lock), so two edits
+    // of the same setup at once still leave every copy matching the setup.
+    // Mode, LoRAs and params are not copied.
+    const copyFieldSent = input.kind !== undefined || input.provider !== undefined || input.modelId !== undefined;
+    const { row, synced } = await withCompanyScope(db, companyId, async (tx) => {
+      const [updated] = await tx
+        .update(mediaModelSetups)
+        .set({
+          ...(input.kind !== undefined ? { kind: input.kind } : {}),
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.provider !== undefined ? { provider: input.provider } : {}),
+          ...(input.family !== undefined ? { family: input.family } : recipeChanged ? { family: check.family } : {}),
+          ...(recipeChanged ? { mode: check.mode } : {}),
+          ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
+          ...(input.editModelId !== undefined ? { editModelId: input.editModelId } : {}),
+          ...(input.loras !== undefined ? { loras: input.loras } : {}),
+          ...(input.params !== undefined ? { params: input.params } : {}),
+          ...(input.tags !== undefined ? { tags: input.tags } : {}),
+          ...(input.favorite !== undefined ? { favorite: input.favorite } : {}),
+          ...(input.notes !== undefined ? { notes: input.notes } : {}),
+          ...statusFields,
+          contentRating: check.contentRating,
+          ...(check.contentRating === "mature" && existing.contentRating !== "mature" ? { matureEnabledByUserId: userId } : {}),
+          ...(check.contentRating === "sfw" ? { matureEnabledByUserId: null } : {}),
+          updatedAt: now,
+        })
+        .where(and(eq(mediaModelSetups.id, setupId), eq(mediaModelSetups.companyId, companyId)))
+        .returning();
+      if (!updated) throw notFound(SETUP_NOT_FOUND);
+      return { row: updated, synced: copyFieldSent ? await syncStorylinesToSetup(tx, companyId, updated) : [] };
+    });
+    // A different video model changes what each clip costs, so the cached estimate follows.
+    for (const sync of synced) {
+      if (sync.slot === "video" && sync.outcome === "copied") await storylines.recomputeEstimate(companyId, sync.storylineId);
+    }
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -616,9 +651,109 @@ export function mediaSetupsService(db: Db) {
       action: input.status && input.status !== existing.status ? `media.setup_${input.status}` : "media.setup_updated",
       entityType: "media_model_setup",
       entityId: setupId,
-      details: { fields: Object.keys(input), status: row.status, contentRating: row.contentRating },
+      details: {
+        fields: Object.keys(input),
+        status: row.status,
+        contentRating: row.contentRating,
+        ...(synced.length > 0
+          ? {
+              storylinesFollowed: synced.filter((s) => s.outcome === "copied").map((s) => s.storylineId),
+              storylinesUnlinked: synced.filter((s) => s.outcome === "unlinked").map((s) => s.storylineId),
+            }
+          : {}),
+      },
     });
+    for (const sync of synced) {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: sync.outcome === "copied" ? "video_storyline.setup_followed" : "video_storyline.setup_unlinked",
+        entityType: "video_storyline",
+        entityId: sync.storylineId,
+        details: {
+          setupId,
+          slot: sync.slot,
+          ...(sync.outcome === "copied" ? { providerId: row.provider, model: row.modelId } : { reason: sync.reason }),
+        },
+      });
+    }
     return getSetup(companyId, setupId, { agent: false });
+  }
+
+  /**
+   * The sync rule after a setup's kind, provider or model was edited (inside
+   * updateSetup's transaction, with the setup row already updated and so
+   * locked). Each storyline slot that uses the setup and whose copy no
+   * longer matches it either:
+   *   - gets the new provider and model copied, when it can be edited now
+   *     and the setup still fits its slot; or
+   *   - loses the pick and keeps the model it has, shown as "custom (not
+   *     from a setup)": a storyline that is rendering, stitching or done
+   *     keeps what it is being made with, and a setup that no longer fits
+   *     the slot (another kind, or pictures on a service storylines cannot
+   *     use) cannot be its source.
+   * A slot whose copy already matches is left alone, so running it again
+   * changes nothing.
+   */
+  async function syncStorylinesToSetup(tx: ScopedTx, companyId: string, setup: SetupRow): Promise<StorylineSetupSync[]> {
+    const users = await tx
+      .select({
+        id: videoStorylines.id,
+        status: videoStorylines.status,
+        imageSetupId: videoStorylines.imageSetupId,
+        videoSetupId: videoStorylines.videoSetupId,
+        providerId: videoStorylines.providerId,
+        model: videoStorylines.model,
+        pictureSettings: videoStorylines.pictureSettings,
+      })
+      .from(videoStorylines)
+      .where(and(eq(videoStorylines.companyId, companyId), or(eq(videoStorylines.imageSetupId, setup.id), eq(videoStorylines.videoSetupId, setup.id))))
+      .orderBy(asc(videoStorylines.id))
+      .for("update");
+    const out: StorylineSetupSync[] = [];
+    const now = new Date();
+    for (const storyline of users) {
+      const picture = (storyline.pictureSettings ?? {}) as { providerId?: unknown; model?: unknown };
+      const videoStale =
+        storyline.videoSetupId === setup.id &&
+        !(setup.kind === "video" && storyline.providerId === setup.provider && storyline.model === setup.modelId);
+      const imageStale =
+        storyline.imageSetupId === setup.id &&
+        !(setup.kind === "image" && picture.providerId === setup.provider && picture.model === setup.modelId);
+      if (!videoStale && !imageStale) continue;
+      const editable = isStorylineEditable(storyline);
+      const busy = editable ? null : `The storyline is ${storyline.status.replace(/_/g, " ")}, so it keeps the model it is made with.`;
+      const providerFits = STORYLINE_PROVIDERS.includes(setup.provider);
+      const videoReason =
+        busy ?? (setup.kind !== "video" ? "The setup is no longer a video setup." : !providerFits ? "Storyline clips are made with Fal or Sogni only." : null);
+      const imageReason =
+        busy ??
+        (setup.kind !== "image"
+          ? "The setup is no longer a picture setup."
+          : !providerFits
+            ? `A storyline's pictures are made with Fal or Sogni; the setup now uses ${setup.provider}.`
+            : null);
+      if (videoStale) out.push({ storylineId: storyline.id, slot: "video", outcome: videoReason ? "unlinked" : "copied", reason: videoReason });
+      if (imageStale) out.push({ storylineId: storyline.id, slot: "image", outcome: imageReason ? "unlinked" : "copied", reason: imageReason });
+      await tx
+        .update(videoStorylines)
+        .set({
+          ...(videoStale ? (videoReason ? { videoSetupId: null } : { providerId: setup.provider, model: setup.modelId }) : {}),
+          ...(imageStale
+            ? imageReason
+              ? { imageSetupId: null }
+              : {
+                  pictureSettings: sql`(coalesce(${videoStorylines.pictureSettings}, '{}'::jsonb) - 'providerId' - 'model') || ${JSON.stringify({ providerId: setup.provider, model: setup.modelId })}::jsonb`,
+                }
+            : {}),
+          // A rendering storyline's updated_at is its stall clock (releaseStalledRenders); leave it.
+          ...(editable ? { updatedAt: now } : {}),
+        })
+        .where(and(eq(videoStorylines.id, storyline.id), eq(videoStorylines.companyId, companyId)));
+    }
+    return out;
   }
 
   async function deleteSetup(companyId: string, setupId: string, actor: MediaSetupsActor): Promise<void> {
@@ -906,6 +1041,8 @@ export function mediaSetupsService(db: Db) {
    * video_storylines.provider_id/model (video) and picture_settings
    * providerId/model (pictures): a derived cache for the older code paths.
    * null clears the pick and leaves the copied provider/model as they are.
+   * A later change to the setup's kind, provider or model is carried to the
+   * storyline by updateSetup (syncStorylinesToSetup).
    */
   async function setStorylineSetups(companyId: string, storylineId: string, input: SetStorylineMediaSetupsInput, actor: MediaSetupsActor, reader: MediaSetupsReader) {
     if (!UUID_RE.test(storylineId)) throw notFound("Video storyline not found");
@@ -923,6 +1060,24 @@ export function mediaSetupsService(db: Db) {
       throw unprocessable(`"${image.name}" uses ${image.provider}; a storyline's pictures are made with Fal or Sogni. Pick a Fal or Sogni picture setup.`);
     }
     await withCompanyScope(db, companyId, async (tx) => {
+      // Lock order: the setup rows first, then the storyline, the same as
+      // updateSetup. A setup whose kind, provider, model or status changed
+      // since the checks above is refused rather than copied stale.
+      const picked = [image, video].filter((setup): setup is SetupRow => Boolean(setup));
+      if (picked.length > 0) {
+        const current = await tx
+          .select()
+          .from(mediaModelSetups)
+          .where(and(eq(mediaModelSetups.companyId, companyId), inArray(mediaModelSetups.id, picked.map((setup) => setup.id))))
+          .orderBy(asc(mediaModelSetups.id))
+          .for("share");
+        for (const setup of picked) {
+          const now = current.find((row) => row.id === setup.id);
+          if (!now || now.kind !== setup.kind || now.provider !== setup.provider || now.modelId !== setup.modelId || now.status !== setup.status) {
+            throw conflict(`"${setup.name}" was changed while it was being picked. Check it and pick it again.`);
+          }
+        }
+      }
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStorylineEditable(locked);
       await tx

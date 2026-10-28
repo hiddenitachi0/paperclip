@@ -19,6 +19,8 @@ import { z } from "zod";
  *     when the strength is left out.
  *   - Filter-bypass LoRAs are refused everywhere; a mature or not yet reviewed
  *     part raises the setup's content rating to mature.
+ *   - Params come from an allow-list (MEDIA_SETUP_PARAM_KEYS): a setup never
+ *     carries a provider safety switch, so it can never turn a filter off.
  *   - A video setup may only use Fal or Sogni (the storyline CHECKs).
  *
  * The content rules mirror the deny rules of the Media Studio safety module
@@ -403,6 +405,96 @@ export function inferMediaLoraFamily(lora: { provider: MediaLoraProvider; source
   return null;
 }
 
+// ─── Setup params ────────────────────────────────────────────────────────────
+
+/**
+ * The settings a setup may carry, and nothing else. An allow-list, so a setup
+ * can never reach a provider's safety switches (Fal `enable_safety_checker`,
+ * `safety_tolerance`, Sogni's NSFW filter, ...): the filter follows the
+ * film's content rating at run time, never a setup (plan 2.10, "provider
+ * filters stay intact"). null = the service's own default. A later card that
+ * maps another provider field adds it here, on purpose.
+ */
+export type MediaSetupParams = {
+  /** May the service rewrite the prompt? Always explicit. */
+  promptExpansion: boolean;
+  negativePrompt?: string | null;
+  seed?: number | null;
+  steps?: number | null;
+  guidance?: number | null;
+  aspectRatio?: string | null;
+  resolution?: string | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  durationSeconds?: number | null;
+  sampler?: string | null;
+  scheduler?: string | null;
+};
+export type MediaSetupParamKey = keyof MediaSetupParams;
+
+function wholeNumber(min: number, max: number) {
+  return (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
+function numberBetween(min: number, max: number, minExclusive = false) {
+  return (value: unknown) => typeof value === "number" && Number.isFinite(value) && (minExclusive ? value > min : value >= min) && value <= max;
+}
+function shortText(max: number) {
+  return (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= max;
+}
+
+const MEDIA_SETUP_PARAM_RULES: Record<MediaSetupParamKey, { expects: string; fits: (value: unknown) => boolean }> = {
+  promptExpansion: { expects: "on or off (true or false)", fits: (value) => typeof value === "boolean" },
+  negativePrompt: { expects: "text of at most 500 characters", fits: (value) => typeof value === "string" && value.length <= 500 },
+  seed: { expects: "a whole number from 0 to 4294967295", fits: wholeNumber(0, 4_294_967_295) },
+  steps: { expects: "a whole number from 1 to 200", fits: wholeNumber(1, 200) },
+  guidance: { expects: "a number from 0 to 50", fits: numberBetween(0, 50) },
+  aspectRatio: { expects: 'a ratio such as "16:9", or "auto"', fits: (value) => typeof value === "string" && /^(\d{1,2}:\d{1,2}|auto)$/.test(value) },
+  resolution: { expects: 'a size such as "720p" (at most 20 characters)', fits: shortText(20) },
+  width: { expects: "a whole number of pixels from 64 to 8192", fits: wholeNumber(64, 8192) },
+  height: { expects: "a whole number of pixels from 64 to 8192", fits: wholeNumber(64, 8192) },
+  fps: { expects: "a whole number from 1 to 120", fits: wholeNumber(1, 120) },
+  durationSeconds: { expects: "a number of seconds above 0 and at most 600", fits: numberBetween(0, 600, true) },
+  sampler: { expects: "a name of at most 60 characters", fits: shortText(60) },
+  scheduler: { expects: "a name of at most 60 characters", fits: shortText(60) },
+};
+export const MEDIA_SETUP_PARAM_KEYS = Object.keys(MEDIA_SETUP_PARAM_RULES) as MediaSetupParamKey[];
+
+/** Words that mark a provider safety switch, so the refusal can say so plainly. */
+const SAFETY_PARAM_WORDS = ["safe", "sfw", "filter", "toleran", "moderat", "censor", "checker", "bypass", "explicit", "adult", "mature", "spicy", "guard"];
+
+export function isMediaSetupParamKey(key: string): key is MediaSetupParamKey {
+  return Object.prototype.hasOwnProperty.call(MEDIA_SETUP_PARAM_RULES, key);
+}
+
+/** Problems with a setup's params; empty when every key is allowed and every value fits. */
+export function mediaSetupParamProblems(params: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  if (typeof params.promptExpansion !== "boolean") {
+    problems.push("Say whether the service may rewrite the prompt (prompt expansion on or off).");
+  }
+  for (const [key, value] of Object.entries(params)) {
+    if (!isMediaSetupParamKey(key)) {
+      const squashed = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      problems.push(
+        SAFETY_PARAM_WORDS.some((word) => squashed.includes(word))
+          ? `The setting "${key}" would change the service's safety filter. A setup can never do that: the film's content rating decides the filter. Remove it.`
+          : `"${key}" is not a setting a setup can carry. A setup can set: ${MEDIA_SETUP_PARAM_KEYS.join(", ")}.`,
+      );
+      continue;
+    }
+    if (key === "promptExpansion" || value === null) continue;
+    const rule = MEDIA_SETUP_PARAM_RULES[key];
+    if (!rule.fits(value)) problems.push(`The setting "${key}" must be ${rule.expects}.`);
+  }
+  return problems;
+}
+
+/** Only the allowed settings of stored params (a row written outside the API keeps nothing else). */
+export function pickMediaSetupParams(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(params).filter(([key]) => isMediaSetupParamKey(key)));
+}
+
 // ─── Checking a LoRA and a setup ─────────────────────────────────────────────
 
 /** The fields of a saved LoRA a setup check needs. */
@@ -514,9 +606,7 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
   if (setup.mode && cap.mode && setup.mode !== cap.mode) {
     problems.push(`The model "${setup.modelId}" runs as ${cap.mode}, not ${setup.mode}. Pick the model id for ${setup.mode}, or change the mode.`);
   }
-  if (typeof setup.params.promptExpansion !== "boolean") {
-    problems.push("Say whether the service may rewrite the prompt (prompt expansion on or off).");
-  }
+  problems.push(...mediaSetupParamProblems(setup.params));
 
   if (cap.matureTags.length > 0) matureReasons.push(`The model "${setup.modelId}" is made for mature pictures (${cap.matureTags.join(", ")}).`);
   if (setup.editModelId) {
@@ -922,11 +1012,15 @@ export const mediaSetupLoraPickSchema = z
   })
   .strict();
 
+/** A register try's free-form record of what was tried; never sent to a provider. */
 const paramValue = z.union([z.string().max(500), z.number().finite(), z.boolean(), z.null()]);
+/** Only the allowed settings, each value checked (see MEDIA_SETUP_PARAM_KEYS); anything else is refused, never dropped. */
 export const mediaSetupParamsSchema = z
-  .object({ promptExpansion: z.boolean({ required_error: "Say whether the service may rewrite the prompt (promptExpansion true or false)." }) })
-  .catchall(paramValue)
-  .refine((params) => Object.keys(params).length <= 30, "A setup has at most 30 params.");
+  .record(z.unknown())
+  .superRefine((params, ctx) => {
+    for (const message of mediaSetupParamProblems(params)) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  })
+  .transform((params) => params as MediaSetupParams);
 
 const setupFields = {
   kind: z.enum(MEDIA_SETUP_KINDS),

@@ -268,6 +268,48 @@ d("media setup register routes", () => {
     });
   });
 
+  describe("setup params", () => {
+    it("refuses a param that would switch a provider's safety filter, and never passes a stored one on", async () => {
+      const companyId = await seedCompany();
+      const app = appFor({ board: [companyId] });
+      const unsafe = await request(app)
+        .post(`/api/companies/${companyId}/media/setups`)
+        .send({
+          kind: "video",
+          name: "Unsafe",
+          provider: "fal",
+          modelId: "fal-ai/wan-flf2v",
+          params: { promptExpansion: false, enable_safety_checker: false, safety_tolerance: "6" },
+        });
+      expect(unsafe.status).toBe(400);
+      expect(JSON.stringify(unsafe.body.details)).toMatch(/would change the service's safety filter/);
+
+      const stills = await setupByName(app, companyId, "Stills (Krea 2)");
+      const patched = await request(app)
+        .patch(`/api/companies/${companyId}/media/setups/${stills.id}`)
+        .send({ params: { promptExpansion: false, disableNSFWFilter: true } });
+      expect(patched.status).toBe(400);
+      const check = await request(app)
+        .post(`/api/companies/${companyId}/media/setups/check`)
+        .send({ kind: "image", name: "x", provider: "sogni", modelId: "krea2_turbo_fp8_scaled", params: { promptExpansion: false, nsfw: true } });
+      expect(check.status).toBe(400);
+
+      // A row written outside the API: shown as a problem, not usable, and the switch never reaches a run.
+      await db
+        .update(mediaModelSetups)
+        .set({ params: { promptExpansion: false, disableNSFWFilter: true, seed: 7 }, status: "approved" })
+        .where(eq(mediaModelSetups.id, stills.id));
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      const resolved = await request(agent).get(`/api/companies/${companyId}/media/setups/${stills.id}/resolve`);
+      expect(resolved.status).toBe(200);
+      expect(resolved.body).toMatchObject({ usable: false, contentRating: "sfw" });
+      expect(resolved.body.params).toEqual({ promptExpansion: false, seed: 7 });
+      expect(resolved.body.problems.join(" ")).toMatch(/"disableNSFWFilter" would change the service's safety filter/);
+      const view = await request(app).get(`/api/companies/${companyId}/media/setups/${stills.id}`);
+      expect(view.body.params).toEqual({ promptExpansion: false, seed: 7 });
+    });
+  });
+
   describe("LoRA library", () => {
     it("saves Fal links, never saves a filter-bypass LoRA, and will not delete a LoRA a setup uses", async () => {
       const companyId = await seedCompany();
@@ -501,6 +543,75 @@ d("media setup register routes", () => {
       expect(after).toMatchObject({ videoSetupId: null, providerId: "sogni" });
       const [defaults] = await db.select().from(mediaProjectDefaults).where(eq(mediaProjectDefaults.companyId, companyId));
       expect(defaults!.defaultVideoSetupId).toBeNull();
+    });
+
+    it("carries a changed setup's provider and model to the storylines that use it, and unlinks the ones it cannot", async () => {
+      const companyId = await seedCompany();
+      await videoStorylineSettingsService(db).setEnabled(companyId, true);
+      const owner = appFor({ board: [companyId] });
+      const natural = await setupByName(owner, companyId, "Natural");
+      const stills = await setupByName(owner, companyId, "Stills (Krea 2)");
+      const [draft] = await db.insert(videoStorylines).values({ companyId, title: "Draft", providerId: "fal", pictureSettings: { lookId: "look-1" } }).returning();
+      const [busy] = await db.insert(videoStorylines).values({ companyId, title: "Busy", providerId: "fal" }).returning();
+      for (const storyline of [draft!, busy!]) {
+        const picked = await request(owner)
+          .put(`/api/companies/${companyId}/media/storylines/${storyline.id}/setups`)
+          .send({ videoSetupId: natural.id, imageSetupId: stills.id });
+        expect(picked.status).toBe(200);
+      }
+      // The second one starts rendering; the first carries an estimate the sync must refresh.
+      await db.update(videoStorylines).set({ status: "rendering" }).where(eq(videoStorylines.id, busy!.id));
+      await db.update(videoStorylines).set({ estimatedTotalCents: 999 }).where(eq(videoStorylines.id, draft!.id));
+      const read = async (id: string) => (await db.select().from(videoStorylines).where(eq(videoStorylines.id, id)))[0]!;
+      const busyBefore = await read(busy!.id);
+
+      // A note or a LoRA strength is not copied: the storylines stay as they are.
+      expect((await request(owner).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send({ notes: "calm" })).status).toBe(200);
+      expect((await read(draft!.id)).estimatedTotalCents).toBe(999);
+
+      // Natural moves to Fal Wan 2.1: the draft follows (new estimate), the rendering one keeps its model and is unlinked.
+      const moved = await request(owner)
+        .patch(`/api/companies/${companyId}/media/setups/${natural.id}`)
+        .send({ provider: "fal", modelId: "fal-ai/wan-flf2v", mode: null, loras: [] });
+      expect(moved.status).toBe(200);
+      expect(await read(draft!.id)).toMatchObject({ providerId: "fal", model: "fal-ai/wan-flf2v", videoSetupId: natural.id, imageSetupId: stills.id, estimatedTotalCents: 0 });
+      const busyAfter = await read(busy!.id);
+      expect(busyAfter).toMatchObject({ status: "rendering", providerId: "sogni", model: "minimax-h3-fl2va-fp8_flf2v", videoSetupId: null, imageSetupId: stills.id });
+      // Its updated_at is the stall clock of a render: untouched.
+      expect(busyAfter.updatedAt.getTime()).toBe(busyBefore.updatedAt.getTime());
+
+      // Sending the same model again changes nothing. A copy that drifted from
+      // the setup (what two edits of the setup at once could leave) is brought
+      // back by the next edit that sends the model, compared with the stored setup.
+      expect((await request(owner).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send({ modelId: "fal-ai/wan-flf2v" })).status).toBe(200);
+      await db.update(videoStorylines).set({ model: "fal-ai/wan-i2v" }).where(eq(videoStorylines.id, draft!.id));
+      const again = await request(owner).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send({ modelId: "fal-ai/wan-flf2v" });
+      expect(again.status).toBe(200);
+      expect(await read(draft!.id)).toMatchObject({ providerId: "fal", model: "fal-ai/wan-flf2v", videoSetupId: natural.id });
+
+      // Stills moves to Higgsfield, which storyline pictures cannot use: unlinked, the copied picture model stays.
+      const higgs = await request(owner).patch(`/api/companies/${companyId}/media/setups/${stills.id}`).send({ provider: "higgsfield", modelId: "soul", mode: null });
+      expect(higgs.status).toBe(200);
+      expect(await read(draft!.id)).toMatchObject({
+        imageSetupId: null,
+        pictureSettings: { providerId: "sogni", model: "krea2_turbo_fp8_scaled", lookId: "look-1" },
+      });
+
+      // Natural becomes a picture setup: it can no longer be the draft's video setup.
+      const kind = await request(owner).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send({ kind: "image", modelId: "fal-ai/flux-lora", mode: null });
+      expect(kind.status).toBe(200);
+      expect(await read(draft!.id)).toMatchObject({ videoSetupId: null, providerId: "fal", model: "fal-ai/wan-flf2v" });
+
+      const logs = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+      const forStoryline = (id: string, action: string) => logs.filter((log) => log.entityId === id && log.action === action);
+      // The move and the drift repair; the re-sent same model logged nothing.
+      expect(forStoryline(draft!.id, "video_storyline.setup_followed")).toHaveLength(2);
+      expect(forStoryline(draft!.id, "video_storyline.setup_unlinked")).toHaveLength(2);
+      expect(forStoryline(busy!.id, "video_storyline.setup_unlinked")).toHaveLength(2);
+      const movedLog = logs.find(
+        (log) => log.entityId === natural.id && ((log.details as Record<string, unknown>)?.storylinesUnlinked as string[] | undefined)?.includes(busy!.id),
+      );
+      expect(movedLog?.details).toMatchObject({ storylinesFollowed: [draft!.id], storylinesUnlinked: [busy!.id] });
     });
 
     it("needs video storylines switched on and refuses another company's storyline", async () => {
