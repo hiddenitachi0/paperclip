@@ -53,7 +53,7 @@ const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skipping storyline timeline v3 tests: ${support.reason ?? "unsupported environment"}`);
 
-const { videoStorylineRenderService, STALLED_RENDER_GRACE_MS } = await import("../services/video-storyline-render.ts");
+const { videoStorylineRenderService, STALLED_RENDER_GRACE_MS, SHOT_START_DEADLINE_MS } = await import("../services/video-storyline-render.ts");
 const { videoStorylineSettingsService } = await import("../services/video-storyline-settings.ts");
 const { videoStorylineService } = await import("../services/video-storylines.ts");
 const { videoStorylineClipsService } = await import("../services/video-storyline-clips.ts");
@@ -306,6 +306,122 @@ d("storyline timeline v3", () => {
         expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
         await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 409 });
         expect(stub.starts).toBe(0);
+      });
+
+      describe("a start that outlives its deadline (DUR-4944)", () => {
+        const runningJobs = async (storylineId: string) =>
+          (await db.select().from(videoShotRenderJobs).where(and(eq(videoShotRenderJobs.storylineId, storylineId), eq(videoShotRenderJobs.status, "running")))).length;
+
+        it("the deadline is well inside the grace period", () => {
+          expect(SHOT_START_DEADLINE_MS).toBeLessThan(STALLED_RENDER_GRACE_MS);
+        });
+
+        it("a slow start swept as stalled, then re-rendered, is stopped when it finally answers: one paid job, not two", async () => {
+          const film = await seed({ shots: 1 });
+          await markMade(film.shotIds[0]!, film.companyId);
+          await db.update(videoStorylines).set({ status: "ready_to_stitch", spentCents: 40 }).where(eq(videoStorylines.id, film.storylineId));
+          let clock = new Date();
+          const cancelled: string[] = [];
+          let releaseFirst!: () => void;
+          const firstMayAnswer = new Promise<void>((resolve) => (releaseFirst = resolve));
+          const stub = stubProvider(async (n) => {
+            if (n === 1) await firstMayAnswer;
+            return { externalId: `wf-${n}`, model: "ltx25", provider: "sogni" };
+          });
+          stub.provider.cancel = async (handle) => {
+            cancelled.push(handle.externalId);
+          };
+          const render = videoStorylineRenderService(db, { now: () => clock, buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+
+          // The first re-render is accepted and its start hangs...
+          const first = render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          const firstOutcome = first.then(() => "started", (err: unknown) => err);
+          await vi.waitFor(() => expect(stub.starts).toBe(1));
+          // ...past the grace period, so the sweep fails the shot and a second re-render is accepted and starts.
+          clock = new Date(clock.getTime() + STALLED_RENDER_GRACE_MS + 60_000);
+          await render.releaseStalledRenders();
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+          await render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          expect(stub.starts).toBe(2);
+
+          // The first start answers late: its job is stopped and never written down.
+          releaseFirst();
+          expect(await firstOutcome).toMatchObject({ message: expect.stringContaining("took too long to start") });
+          expect(cancelled).toEqual(["wf-1"]);
+          expect(await runningJobs(film.storylineId)).toBe(1);
+          const jobs = await db.select().from(videoShotRenderJobs).where(eq(videoShotRenderJobs.shotId, film.shotIds[0]!));
+          expect(jobs.map((j) => j.externalId)).toEqual(["wf-2"]);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("rendering");
+        });
+
+        it("a shot that took too long to get ready never reaches the paid start call", async () => {
+          const film = await seed({ shots: 1 });
+          let clock = new Date();
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          const render = videoStorylineRenderService(db, {
+            now: () => clock,
+            buildProvider: () => stub.provider,
+            resolveApiKey: async () => {
+              // Preparing the shot (downloads, frame grab, pictures) ate the whole deadline.
+              clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+              return "key";
+            },
+          });
+          await expect(render.startRender(film.companyId, film.storylineId, ACTOR, {})).rejects.toMatchObject({ message: expect.stringContaining("took too long to get ready") });
+          expect(stub.starts).toBe(0);
+          expect(await runningJobs(film.storylineId)).toBe(0);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+        });
+
+        it("a re-rendered shot (already queued by the caller) that ran out of time is put back to failed, never left queued, and nothing is sent", async () => {
+          const film = await seed({ shots: 1 });
+          await markMade(film.shotIds[0]!, film.companyId);
+          await db.update(videoStorylines).set({ status: "ready_to_stitch", spentCents: 40 }).where(eq(videoStorylines.id, film.storylineId));
+          let clock = new Date();
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          const render = videoStorylineRenderService(db, {
+            now: () => clock,
+            buildProvider: () => stub.provider,
+            resolveApiKey: async () => {
+              clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+              return "key";
+            },
+          });
+          await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ message: expect.stringContaining("took too long to get ready") });
+          expect(stub.starts).toBe(0);
+          expect(await runningJobs(film.storylineId)).toBe(0);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+          // Nothing is left to lock the film out: a fresh re-render is accepted and starts exactly once.
+          const fresh = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+          await fresh.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          expect(stub.starts).toBe(1);
+        });
+
+        it("a shot claimed by the start itself and then stopped by the deadline is put back (failed, not queued) with no paid call", async () => {
+          const film = await seed({ shots: 1 });
+          let clock = new Date();
+          let preparing = true;
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          // The deadline passes inside the claim write itself: the first clock read after the key lookup jumps the clock.
+          const render = videoStorylineRenderService(db, {
+            now: () => {
+              const read = clock;
+              if (!preparing) clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+              return read;
+            },
+            buildProvider: () => stub.provider,
+            resolveApiKey: async () => {
+              preparing = false;
+              return "key";
+            },
+          });
+          await expect(render.startRender(film.companyId, film.storylineId, ACTOR, {})).rejects.toMatchObject({ message: expect.stringContaining("took too long to get ready") });
+          expect(stub.starts).toBe(0);
+          expect(await runningJobs(film.storylineId)).toBe(0);
+          const shot = await shotRow(film.shotIds[0]!);
+          expect(shot.status).toBe("failed");
+          expect(shot.errorMessage).toContain("took too long to get ready");
+        });
       });
     });
   });

@@ -82,32 +82,46 @@ const PREVIEW_POLL_TIMEOUT_MS = 90_000;
  * few reference uploads at 30 s each), so a start in progress is never cut.
  */
 export const STALLED_RENDER_GRACE_MS = 15 * 60_000;
+/**
+ * Everything beginShotRender does, from its first read up to and including the
+ * video service's start call, must finish inside this. It is well under
+ * STALLED_RENDER_GRACE_MS on purpose: a start that outlives the grace could be
+ * swept as stalled (and the shot re-rendered and paid for again) while it was
+ * still about to create its own paid job (DUR-4944).
+ */
+export const SHOT_START_DEADLINE_MS = 10 * 60_000;
 
 /** What a shot shows when it was left queued/rendering with no video service job behind it. */
 const SHOT_NEVER_STARTED_MESSAGE = "This shot never started on the video service. Nothing was charged for it. Try it again.";
 
 /** SSRF-guarded FetchImpl, reused for both provider API calls and downloading finished clips -- see safe-outbound-fetch.ts. */
-async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024): Promise<Response> {
+async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024, outerSignal?: AbortSignal): Promise<Response> {
   const target = await validateAndResolveFetchUrl(url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), init?.method === "GET" || !init?.method ? CLIP_DOWNLOAD_TIMEOUT_MS : RENDER_API_FETCH_TIMEOUT_MS);
+  // The caller's own deadline (a shot start's, see SHOT_START_DEADLINE_MS) cuts the request short as well.
+  const onOuterAbort = () => controller.abort();
+  if (outerSignal?.aborted) controller.abort();
+  outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes });
     return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
+    outerSignal?.removeEventListener("abort", onOuterAbort);
   }
 }
 
 /** Storyline strip: AI transitions use the same guarded fetch and provider clients as shot renders. */
 export { safeFetch as storylineSafeFetch };
 
-export function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null): MediaJobProvider {
+export function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null, signal?: AbortSignal): MediaJobProvider {
+  const fetchImpl: typeof safeFetch = signal ? (url, init, maxResponseBytes) => safeFetch(url, init, maxResponseBytes, signal) : safeFetch;
   if (providerId === "fal") {
-    return new FalVideoProvider(apiKey, safeFetch, model ?? undefined);
+    return new FalVideoProvider(apiKey, fetchImpl, model ?? undefined);
   }
   // Uploads go to Sogni's storage as real multipart bytes through the same pinned fetch (see sogniStorageFetch).
-  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: sogniStorageFetch(safeFetch), defaultModel: model ?? undefined });
+  return new SogniVideoProvider({ apiKey, apiFetch: fetchImpl, transferFetch: sogniStorageFetch(fetchImpl), defaultModel: model ?? undefined });
 }
 
 async function dataUriFromObject(companyId: string, provider: string, objectKey: string, contentType: string): Promise<string> {
@@ -236,7 +250,7 @@ export class ShotClaimLostError extends HttpError {
 export interface VideoStorylineRenderDeps {
   now?: () => Date;
   /** Test seam: the provider client for a shot render (production builds the real Fal/Sogni client). */
-  buildProvider?: (providerId: VideoStorylineProvider, apiKey: string, model: string | null) => MediaJobProvider;
+  buildProvider?: (providerId: VideoStorylineProvider, apiKey: string, model: string | null, signal?: AbortSignal) => MediaJobProvider;
   /** Test seam: the API key lookup (production reads the company's / instance's secret). */
   resolveApiKey?: (companyId: string, providerId: VideoStorylineProvider) => Promise<string>;
 }
@@ -413,6 +427,30 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     actorId: string,
     opts: { companyKeyOnly?: boolean; alreadyQueued?: boolean } = {},
   ) {
+    // DUR-4944: one deadline for the whole start. The timer cuts the video service's requests short; the injected
+    // clock is checked too, so a start that finishes late is stopped even if no request was running when it passed.
+    const controller = new AbortController();
+    const startedAtMs = nowOf().getTime();
+    const deadline = {
+      signal: controller.signal,
+      passed: () => controller.signal.aborted || nowOf().getTime() - startedAtMs > SHOT_START_DEADLINE_MS,
+    };
+    const timer = setTimeout(() => controller.abort(), SHOT_START_DEADLINE_MS);
+    try {
+      await beginShotRenderWithinDeadline(companyId, storyline, shot, actorId, opts, deadline);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function beginShotRenderWithinDeadline(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+    actorId: string,
+    opts: { companyKeyOnly?: boolean; alreadyQueued?: boolean },
+    deadline: { signal: AbortSignal; passed: () => boolean },
+  ) {
     if (shot.clipKind !== "generated") {
       throw unprocessable(`Clip ${shot.orderIndex + 1} is your own video or photo; it is prepared on the server, never rendered by an AI service.`);
     }
@@ -424,7 +462,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
-    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
+    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model, deadline.signal);
     const systemActor = { actorType: "user" as const, actorId };
 
     // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
@@ -506,6 +544,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         throw new ShotClaimLostError(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
       }
     }
+    // DUR-4944: out of time before anything was sent, so no paid call is made. This runs after the claim on purpose:
+    // the shot is already ours (queued), and this error sends it to the caller's recordShotStartFailure, which moves a
+    // queued shot to "failed" with this reason -- never left stuck in "queued". Checked before the claim, a deadline
+    // passing during the claim write would slip through to provider.start.
+    if (deadline.passed()) {
+      throw new RenderStartError(
+        `Shot ${shotNumber} took too long to get ready, so it was not sent to ${PROVIDER_LABEL[providerId]}. Nothing was charged for it. Try it again.`,
+        undefined,
+        false,
+      );
+    }
     let handle: MediaJobHandle;
     try {
       handle = await provider.start(input);
@@ -513,6 +562,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       // The service never confirmed a job, so nothing was charged.
       logger.warn({ err, shotId: shot.id, providerId }, "video-storyline-render: the video service did not start a shot");
       throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false);
+    }
+    // The job exists, but this start outlived its deadline: the shot may already have been swept as stalled and
+    // started again, and writing this job down would run (and pay for) the shot twice. Stop it instead.
+    if (deadline.passed()) {
+      logger.error({ shotId: shot.id, externalId: handle.externalId, providerId }, "video-storyline-render: a shot start finished after its deadline; stopping the late job");
+      await provider.cancel(handle).catch((err) => logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: could not stop a late shot start"));
+      throw new RenderStartError(
+        `Shot ${shotNumber} took too long to start on ${PROVIDER_LABEL[providerId]}, so it was stopped. If you see a charge for it, tell your admin. Try it again.`,
+        undefined,
+        true,
+      );
     }
     const attempt = shot.attempt + 1;
     try {
