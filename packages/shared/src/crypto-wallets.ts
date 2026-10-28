@@ -41,9 +41,19 @@ export interface CryptoChainInfo {
   testnetLabel: string;
   /** Where to get free test coins, shown with the funding instructions. */
   testnetFaucetHint: string;
+  /** Extra plain-language cautions about getting test coins, one per line. */
+  testnetFaucetNotes: readonly string[];
   /** One plain sentence about what an agent can do with this wallet. */
   whatAgentsCanDo: string;
 }
+
+/** When the faucet hints below were last checked by a person. Update it whenever the hints change. */
+export const CRYPTO_FAUCET_HINTS_AS_OF = "27 Oct 2026";
+export const CRYPTO_FAUCET_HINTS_CHANGE_NOTE = "Faucets change often.";
+
+/** Shown next to every test-network address and payment link. */
+export const CRYPTO_TESTNET_SEND_WARNING = "Do not send real coins here. They cannot be recovered.";
+export const CRYPTO_TESTNET_ONLY_LABEL = "TEST NETWORK ONLY";
 
 export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
   bitcoin: {
@@ -52,7 +62,11 @@ export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
     asset: "BTC",
     decimals: 8,
     testnetLabel: "Bitcoin test network (testnet4)",
-    testnetFaucetHint: "Search for a \"testnet4 faucet\" to get free test bitcoin. Test bitcoin has no value.",
+    testnetFaucetHint:
+      "Get free test bitcoin from the coinfaucet.eu testnet4 faucet. It takes about an hour for the coins to be confirmed, and they can be spent only once confirmed.",
+    testnetFaucetNotes: [
+      "Signet is a different Bitcoin test network. Its faucet is signetfaucet.com (backup: alt.signetfaucet.com). Signet coins do not show up in this wallet.",
+    ],
     whatAgentsCanDo: "Send bitcoin to addresses on this wallet's allowed list, for example to pay for something.",
   },
   ethereum: {
@@ -61,7 +75,12 @@ export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
     asset: "ETH",
     decimals: 18,
     testnetLabel: "Ethereum test network (Sepolia)",
-    testnetFaucetHint: "Search for a \"Sepolia faucet\" to get free test ether. Test ether has no value.",
+    testnetFaucetHint:
+      "Get free test ether from the pk910 proof-of-work faucet, or from Google Cloud's Web3 faucet (it needs a Google sign-in and may ask for real ETH).",
+    testnetFaucetNotes: [
+      "Claiming to your own wallet and then forwarding the coins only works if that wallet holds real ETH.",
+      "Never use a faucet that needs real ETH on this address.",
+    ],
     whatAgentsCanDo: "Send ether to addresses on this wallet's allowed list, for example to pay for something.",
   },
   solana: {
@@ -70,7 +89,9 @@ export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
     asset: "SOL",
     decimals: 9,
     testnetLabel: "Solana test network (devnet)",
-    testnetFaucetHint: "Use faucet.solana.com (choose devnet) to get free test SOL. Test SOL has no value.",
+    testnetFaucetHint:
+      "Claim free test SOL by hand at faucet.solana.com (choose devnet). The faucet forbids AI agents, so a person must do it.",
+    testnetFaucetNotes: [],
     whatAgentsCanDo: "Send SOL to addresses on this wallet's allowed list, for example to pay for something.",
   },
   hyperliquid: {
@@ -79,11 +100,37 @@ export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
     asset: "USDC",
     decimals: 6,
     testnetLabel: "Hyperliquid test exchange",
-    testnetFaucetHint: "Use the faucet on app.hyperliquid-testnet.xyz to get free test USDC. Test USDC has no value.",
+    testnetFaucetHint:
+      "The Hyperliquid test faucet needs a real-money deposit from the same address, and so would your own account there. We do not use it, because of the no-real-money rule.",
+    testnetFaucetNotes: [],
     whatAgentsCanDo:
       "Place trades on the Hyperliquid exchange (leverage capped, 1x by default) and withdraw USDC only to addresses on the allowed list.",
   },
 };
+
+/**
+ * A payment link that names the network, so a wallet app cannot mistake a
+ * test address for a real one. Ethereum uses the chain id (…@11155111 for
+ * Sepolia); Bitcoin test links carry a visible "TEST NETWORK ONLY" label.
+ * null where no standard link exists (Solana, Hyperliquid).
+ */
+export function cryptoPaymentLink(chain: CryptoChain, network: CryptoNetwork, address: string): string | null {
+  switch (chain) {
+    case "ethereum":
+      return `ethereum:${address}@${EVM_CHAIN_IDS[network]}`;
+    case "bitcoin":
+      return network === "mainnet"
+        ? `bitcoin:${address}`
+        : `bitcoin:${address}?label=${encodeURIComponent(CRYPTO_TESTNET_ONLY_LABEL)}`;
+    case "solana":
+    case "hyperliquid":
+      return null;
+    default: {
+      const exhaustive: never = chain;
+      return exhaustive;
+    }
+  }
+}
 
 export function cryptoNetworkLabel(chain: CryptoChain, network: CryptoNetwork): string {
   return network === "mainnet" ? `${CRYPTO_CHAIN_INFO[chain].label} main network (real money)` : CRYPTO_CHAIN_INFO[chain].testnetLabel;
