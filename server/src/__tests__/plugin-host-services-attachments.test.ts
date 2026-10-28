@@ -10,7 +10,10 @@ import {
   heartbeatRuns,
   issueAttachments,
   issues,
+  pluginCompanySettings,
+  plugins,
 } from "@paperclipai/db";
+import { MEDIA_STUDIO_PLUGIN_KEY } from "@paperclipai/shared";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { openLaneAPluginRun } from "../services/lane-a-plugin-runs.js";
 import type { StorageService } from "../storage/types.js";
@@ -18,6 +21,22 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+/**
+ * D18 security review F3: ffprobe stands in as a mock here (the real check has
+ * its own tests in large-video-storage.test.ts). The first bytes are still
+ * sniffed for real; then "ffprobe" answers what the test says.
+ */
+const probe = vi.hoisted(() => ({ isVideo: true }));
+vi.mock("../services/video-ffmpeg.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/video-ffmpeg.js")>();
+  const { readFile } = await import("node:fs/promises");
+  return {
+    ...actual,
+    verifyVideoFile: async (filePath: string) =>
+      actual.sniffVideoContainer((await readFile(filePath)).subarray(0, 16)) !== null && probe.isVideo,
+  };
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -73,6 +92,8 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(agents);
+    await db.delete(pluginCompanySettings);
+    await db.delete(plugins);
     await db.delete(companies);
   });
 
@@ -265,6 +286,59 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
       }),
     ).rejects.toThrow(/exceeds/);
   });
+  describe("D18: large videos Media Studio attaches to a task (security review F1-F3)", () => {
+    const previousOptIn = process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+    const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom", "latin1"), Buffer.alloc(64, 1)]);
+
+    afterEach(() => {
+      probe.isVideo = true;
+      if (previousOptIn === undefined) delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+      else process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = previousOptIn;
+    });
+
+    async function installMediaStudio(companyId: string) {
+      const [plugin] = await db
+        .insert(plugins)
+        .values({ pluginKey: MEDIA_STUDIO_PLUGIN_KEY, packageName: "@paperclipai/plugin-media-studio", version: "1.0.0", manifestJson: {} as never, status: "ready" })
+        .returning();
+      await db.insert(pluginCompanySettings).values({ companyId, pluginId: plugin!.id, enabled: true, settingsJson: {} });
+    }
+
+    function attachVideo(input: { companyId: string; issueId: string; runId: string }, storage = createStorageServiceStub()) {
+      const services = buildHostServices(db, randomUUID(), MEDIA_STUDIO_PLUGIN_KEY, createEventBusStub(), undefined, { storage });
+      return services.issues.createAttachment({ ...input, contentBase64: mp4.toString("base64"), contentType: "video/mp4", filename: "video-fal-1.mp4" });
+    }
+
+    it("F1: a company without Media Studio keeps its ordinary limit for videos, even when the operator opted in", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      const { companyId, issueId, runId } = await seed({ attachmentMaxBytes: 16 });
+      const storage = createStorageServiceStub();
+      await expect(attachVideo({ companyId, issueId, runId }, storage)).rejects.toThrow("Attachment exceeds 16 bytes");
+      expect(storage.putFile).not.toHaveBeenCalled();
+    });
+
+    it("F1: without the operator's opt-in, Media Studio's own video keeps the ordinary limit", async () => {
+      delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+      const { companyId, issueId, runId } = await seed({ attachmentMaxBytes: 16 });
+      await installMediaStudio(companyId);
+      await expect(attachVideo({ companyId, issueId, runId })).rejects.toThrow("Attachment exceeds 16 bytes");
+    });
+
+    it("keeps a real video where both allow it, where the media storage limit counts it; F3: refuses one ffprobe does not see as a video", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      const { companyId, issueId, runId } = await seed({ attachmentMaxBytes: 16 });
+      await installMediaStudio(companyId);
+      const storage = createStorageServiceStub();
+      const attachment = await attachVideo({ companyId, issueId, runId }, storage);
+      expect(attachment.byteSize).toBe(mp4.length);
+      expect(storage.putFile).toHaveBeenCalledWith(expect.objectContaining({ companyId, namespace: `large-videos/issues/${issueId}` }));
+
+      probe.isVideo = false;
+      await expect(attachVideo({ companyId, issueId, runId })).rejects.toThrow("not an MP4, MOV or WebM video");
+      expect(await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issueId))).toHaveLength(1);
+    });
+  });
+
   // ─── Quick agents (Lane A): no checkout, so a narrower rule ─────────────
 
   function quickAgentRun(input: { agentId: string; companyId: string; message: string }) {

@@ -55,6 +55,13 @@ vi.mock("../storage/index.ts", () => ({
         originalFilename: input.originalFilename,
       };
     },
+    // D18: finished films are streamed in from a file on disk.
+    putFileFromPath: async (input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; filePath: string }) => {
+      const body = await (await import("node:fs/promises")).readFile(input.filePath);
+      const objectKey = `${input.companyId}/${input.namespace}/${Math.random().toString(36).slice(2)}-${input.originalFilename ?? "file"}`;
+      storedObjects.set(objectKey, { body, contentType: input.contentType });
+      return { provider: "local_disk", objectKey, contentType: input.contentType, byteSize: body.byteLength, sha256: "test", originalFilename: input.originalFilename };
+    },
     getObject: async (_companyId: string, objectKey: string) => {
       const found = storedObjects.get(objectKey);
       if (!found) throw new Error(`no such object ${objectKey}`);

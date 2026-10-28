@@ -1,5 +1,6 @@
-import { createReadStream, promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import type { StorageProvider, GetObjectResult, HeadObjectResult } from "./types.js";
 import { notFound, badRequest } from "../errors.js";
 
@@ -47,8 +48,18 @@ export function createLocalDiskStorageProvider(baseDir: string): StorageProvider
       await fs.mkdir(dir, { recursive: true });
 
       const tempPath = `${targetPath}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await fs.writeFile(tempPath, input.body);
-      await fs.rename(tempPath, targetPath);
+      try {
+        if (Buffer.isBuffer(input.body)) {
+          await fs.writeFile(tempPath, input.body);
+        } else {
+          // D18: large files (finished films, big video uploads) are streamed to disk, never buffered.
+          await pipeline(input.body, createWriteStream(tempPath));
+        }
+        await fs.rename(tempPath, targetPath);
+      } catch (err) {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        throw err;
+      }
     },
 
     async getObject(input): Promise<GetObjectResult> {

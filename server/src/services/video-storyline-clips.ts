@@ -1,3 +1,7 @@
+import { createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, desc, eq, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
 import sharp from "sharp";
@@ -35,7 +39,9 @@ import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { runMediaJob } from "./media-job-queue.js";
-import { processUploadedVideo, renderStillClip, prepareTrimmedClip, sniffAudioContainer, UploadProcessingError } from "./video-ffmpeg.js";
+import { lockCompanyMediaStorage } from "./media-storage-quota.js";
+import { mediaWorkDir } from "./media-video-limits.js";
+import { processUploadedVideoFile, renderStillClip, prepareTrimmedClip, sniffAudioContainer, UploadProcessingError } from "./video-ffmpeg.js";
 import {
   companyMonthlyMediaSpendCents,
   companyStorageUsedBytes,
@@ -78,10 +84,24 @@ const CLEANUP_EVERY_MS = 60 * 60_000;
 const CLEANUP_BATCH = 200;
 
 export interface IncomingFile {
-  buffer: Buffer;
+  /** The file in memory (photos and music; small files). */
+  buffer?: Buffer;
+  /**
+   * D18: a video kept on the server's disk while it is stored (it may be up
+   * to the company's video limit, 2 GB by default) -- streamed into storage,
+   * never read into memory. The caller removes it afterwards.
+   */
+  path?: string;
   originalName: string | null;
   contentType: string;
   size: number;
+}
+
+/** An incoming file's bytes in memory: only for kinds that are small by their own limits (photos, music). */
+async function incomingBytes(file: IncomingFile): Promise<Buffer> {
+  if (file.buffer) return file.buffer;
+  if (file.path) return readFile(file.path);
+  throw unprocessable("The upload could not be read. Try again.");
 }
 
 function dollars(cents: number): string {
@@ -176,6 +196,12 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     return streamToBuffer(object.stream);
   }
 
+  /** D18: a stored file streamed straight to a work file (a raw upload may be up to 2 GB), never read into memory. */
+  async function downloadTo(companyId: string, objectKey: string, filePath: string): Promise<void> {
+    const object = await getStorageService().getObject(companyId, objectKey);
+    await pipeline(object.stream, createWriteStream(filePath));
+  }
+
   async function deleteObjects(companyId: string, keys: Array<string | null | undefined>): Promise<void> {
     const storage = getStorageService();
     for (const key of keys) {
@@ -226,10 +252,11 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const stored: string[] = [];
     let values: Partial<typeof videoUploads.$inferInsert>;
     if (kind === "photo") {
+      const photoBytes = await incomingBytes(file);
       const processed = await runMediaJob("upload photo", async () => {
         try {
           // rotate() applies the phone's orientation; metadata (GPS, camera) is not kept.
-          const base = sharp(file.buffer, { failOn: "error" }).rotate();
+          const base = sharp(photoBytes, { failOn: "error" }).rotate();
           const working = await base.clone().resize(PHOTO_MAX_EDGE, PHOTO_MAX_EDGE, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 90 }).toBuffer({ resolveWithObject: true });
           const preview = await sharp(working.data).resize(PHOTO_PREVIEW_EDGE, PHOTO_PREVIEW_EDGE, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 75 }).toBuffer();
           return { working, preview };
@@ -255,7 +282,11 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
         height: processed.working.info.height,
       };
     } else {
-      const raw = await storage.putFile({ companyId, namespace, originalFilename: "raw-upload", contentType: file.contentType || "application/octet-stream", body: file.buffer });
+      // D18: a long video goes from its spool file on disk straight into storage.
+      const rawInput = { companyId, namespace, originalFilename: "raw-upload", contentType: file.contentType || "application/octet-stream" };
+      const raw = file.path
+        ? await storage.putFileFromPath({ ...rawInput, filePath: file.path, maxBytes })
+        : await storage.putFile({ ...rawInput, body: await incomingBytes(file) });
       stored.push(raw.objectKey);
       values = { status: "processing", rawObjectKey: raw.objectKey, rawByteSize: raw.byteSize };
     }
@@ -263,7 +294,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     let row: UploadRow;
     try {
       row = await withCompanyScope(db, companyId, async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
+        await lockCompanyMediaStorage(tx, companyId);
         const usedBytes = await companyStorageUsedBytes(tx, companyId);
         if (usedBytes + incoming > limits.storageQuotaBytes) {
           throw new HttpError(
@@ -349,15 +380,20 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     for (const upload of pending) {
       const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, upload.storylineId));
       const limits = await footage.getSettings(upload.companyId);
+      // D18: the raw upload (up to the company's video limit) is worked on from disk, never read into memory.
+      let workDir: string | null = null;
       try {
-        const raw = await download(upload.companyId, upload.rawObjectKey!);
+        workDir = await mkdtemp(join(await mediaWorkDir(), "paperclip-upload-"));
+        const dir = workDir;
+        const rawPath = join(dir, "raw.video");
+        await downloadTo(upload.companyId, upload.rawObjectKey!, rawPath);
         const fps = readVideoExportSettings(storyline?.exportSettings ?? {}, storyline?.aspect ?? "16:9").fps;
-        const result = await runMediaJob(`upload ${upload.id}`, () => processUploadedVideo(raw, { fps, maxSeconds: limits.maxVideoSeconds }));
+        const result = await runMediaJob(`upload ${upload.id}`, () => processUploadedVideoFile(rawPath, { fps, maxSeconds: limits.maxVideoSeconds }, dir));
         const storage = getStorageService();
         const namespace = `video-storylines/${upload.storylineId}/uploads`;
-        const working = await storage.putFile({ companyId: upload.companyId, namespace, originalFilename: "video.mp4", contentType: "video/mp4", body: result.working });
-        const preview = await storage.putFile({ companyId: upload.companyId, namespace, originalFilename: "video-preview.mp4", contentType: "video/mp4", body: result.preview });
-        const poster = await storage.putFile({ companyId: upload.companyId, namespace, originalFilename: "video-poster.jpg", contentType: "image/jpeg", body: result.poster });
+        const working = await storage.putFileFromPath({ companyId: upload.companyId, namespace, originalFilename: "video.mp4", contentType: "video/mp4", filePath: result.workingPath });
+        const preview = await storage.putFileFromPath({ companyId: upload.companyId, namespace, originalFilename: "video-preview.mp4", contentType: "video/mp4", filePath: result.previewPath });
+        const poster = await storage.putFileFromPath({ companyId: upload.companyId, namespace, originalFilename: "video-poster.jpg", contentType: "image/jpeg", filePath: result.posterPath });
         await db
           .update(videoUploads)
           .set({
@@ -395,6 +431,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
         await db.update(videoUploads).set({ status: "failed", error: message, rawObjectKey: null, rawByteSize: 0, updatedAt: nowOf() }).where(eq(videoUploads.id, upload.id));
         await deleteObjects(upload.companyId, [upload.rawObjectKey]);
         failed += 1;
+      } finally {
+        if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
       }
     }
     return { processed, failed };
@@ -934,13 +972,14 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const type = file.contentType.toLowerCase().split(";")[0]!.trim();
     if (!type.startsWith("audio/")) throw new HttpError(415, "That is not a sound file. Upload an MP3, WAV, M4A or similar.");
     if (file.size > MUSIC_MAX_BYTES) throw new HttpError(413, `Music files can be up to ${mb(MUSIC_MAX_BYTES)}.`);
+    const musicBytes = await incomingBytes(file);
     // The real type from its first bytes, not the name (security review DUR-4745).
-    if (!sniffAudioContainer(file.buffer)) throw new HttpError(415, "That file is not a sound file this server can use. Upload an MP3, WAV, M4A, Ogg or FLAC file.");
+    if (!sniffAudioContainer(musicBytes)) throw new HttpError(415, "That file is not a sound file this server can use. Upload an MP3, WAV, M4A, Ogg or FLAC file.");
     const quota = (await footage.getSettings(companyId)).storageQuotaBytes;
-    const stored = await getStorageService().putFile({ companyId, namespace: STORYLINE_MUSIC_NAMESPACE, originalFilename: file.originalName ?? "music", contentType: type, body: file.buffer });
+    const stored = await getStorageService().putFile({ companyId, namespace: STORYLINE_MUSIC_NAMESPACE, originalFilename: file.originalName ?? "music", contentType: type, body: musicBytes });
     const row = await withCompanyScope(db, companyId, async (tx) => {
       // Music counts in the same storage limit as photos and videos, under the same lock.
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
+      await lockCompanyMediaStorage(tx, companyId);
       const used = await companyStorageUsedBytes(tx, companyId);
       if (used + stored.byteSize > quota) {
         throw new HttpError(413, `This company's uploads would take ${gb(used + stored.byteSize)}, over its ${gb(quota)} storage limit. Remove files you no longer use, or ask an owner or admin to raise the limit.`);

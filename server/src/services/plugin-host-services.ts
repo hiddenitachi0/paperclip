@@ -37,6 +37,7 @@ import {
 import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
+import { mediaLibraryHostService } from "./media-library-host.js";
 import { pluginImageAnalysisService, type ImageAnalysisCaller, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
@@ -88,9 +89,12 @@ import { sanitizeRecord } from "../redaction.js";
 import { getStorageService } from "../storage/index.js";
 import {
   isAllowedContentType,
+  maxBytesForContentType,
   normalizeContentType,
-  normalizeIssueAttachmentMaxBytes,
 } from "../attachment-types.js";
+import { tryTakeUploadSlot, UPLOAD_SLOTS_BUSY_MESSAGE } from "./company-upload-slots.js";
+import { assertRoomForLargeVideo, largeVideoNamespace } from "./media-storage-quota.js";
+import { companyFileLimits, isLargeVideoUpload, verifyVideoBuffer, type CompanyFileLimits } from "./media-video-limits.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -296,6 +300,38 @@ const PLUGIN_FILE_READ_MAX_BYTES = 10 * 1024 * 1024;
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+/**
+ * D18: a file over the company's ordinary limit got through only because it
+ * is labelled a video that Media Studio saved, for a company where large
+ * videos are allowed (companyFileLimits, security review F1). Before it is
+ * stored it takes one of the company's upload slots (F2), must really be a
+ * video -- its first bytes and ffprobe (F3) -- and must fit the company's
+ * media storage limit (F2). Returns null for an ordinary file; otherwise the
+ * quota its row is checked against and the slot to give back once saved.
+ */
+async function prepareLargeVideoSave(
+  db: Db,
+  companyId: string,
+  buffer: Buffer,
+  limits: CompanyFileLimits,
+): Promise<{ quotaBytes: number; releaseSlot: () => void } | null> {
+  if (!isLargeVideoUpload(buffer.length, limits)) return null;
+  const releaseSlot = tryTakeUploadSlot(companyId);
+  if (!releaseSlot) throw new Error(UPLOAD_SLOTS_BUSY_MESSAGE);
+  try {
+    if (!(await verifyVideoBuffer(buffer))) {
+      throw new Error("This file is too large for this company unless it is a video, and it is not an MP4, MOV or WebM video.");
+    }
+    // A large video without a quota cannot happen (companyFileLimits sets both); refuse it rather than leave it uncounted.
+    const quotaBytes = limits.storageQuotaBytes ?? 0;
+    await assertRoomForLargeVideo(db, companyId, buffer.length, quotaBytes, { lock: false });
+    return { quotaBytes, releaseSlot };
+  } catch (err) {
+    releaseSlot();
+    throw err;
+  }
 }
 
 type CompanyFileRow = {
@@ -2165,30 +2201,43 @@ export function buildHostServices(
           throw new Error("Attachment is empty");
         }
 
+        // D18: only Media Studio's own videos may go past the ordinary limit, and only where companyFileLimits allows it.
         const company = await companies.getById(companyId);
-        const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        const limits = await companyFileLimits(db, companyId, company, { kind: "plugin", pluginKey });
+        const attachmentMaxBytes = maxBytesForContentType(contentType, limits);
         if (buffer.length > attachmentMaxBytes) {
           throw new Error(`Attachment exceeds ${attachmentMaxBytes} bytes`);
         }
+        const large = await prepareLargeVideoSave(db, companyId, buffer, limits);
 
-        const stored = await getStorage().putFile({
-          companyId,
-          namespace: `issues/${issue.id}`,
-          originalFilename: params.filename ?? null,
-          contentType,
-          body: buffer,
-        });
-
-        const attachment = await issues.createAttachment({
-          issueId: issue.id,
-          provider: stored.provider,
-          objectKey: stored.objectKey,
-          contentType: stored.contentType,
-          byteSize: stored.byteSize,
-          sha256: stored.sha256,
-          originalFilename: stored.originalFilename,
-          createdByAgentId: params.authorAgentId ?? null,
-        });
+        let attachment: Awaited<ReturnType<typeof issues.createAttachment>>;
+        try {
+          const stored = await getStorage().putFile({
+            companyId,
+            namespace: large ? largeVideoNamespace(`issues/${issue.id}`) : `issues/${issue.id}`,
+            originalFilename: params.filename ?? null,
+            contentType,
+            body: buffer,
+          });
+          try {
+            attachment = await issues.createAttachment({
+              issueId: issue.id,
+              provider: stored.provider,
+              objectKey: stored.objectKey,
+              contentType: stored.contentType,
+              byteSize: stored.byteSize,
+              sha256: stored.sha256,
+              originalFilename: stored.originalFilename,
+              createdByAgentId: params.authorAgentId ?? null,
+              largeVideoQuotaBytes: large?.quotaBytes ?? null,
+            });
+          } catch (err) {
+            if (large) await getStorage().deleteObject(companyId, stored.objectKey).catch(() => undefined);
+            throw err;
+          }
+        } finally {
+          large?.releaseSlot();
+        }
 
         await logPluginActivity({
           companyId,
@@ -2883,6 +2932,10 @@ export function buildHostServices(
       },
     },
 
+    // Media Studio film studio Phase 1: read-only setups, LoRAs and project
+    // defaults, rows of the requested company only (media-library-host.ts).
+    mediaLibrary: mediaLibraryHostService(db, ensureCompanyId),
+
     personas: {
       async reserveDailyGeneration(params) {
         const companyId = ensureCompanyId(params.companyId);
@@ -2958,29 +3011,44 @@ export function buildHostServices(
         if (buffer.length <= 0) {
           throw new Error("The file is empty");
         }
+        // D18: a video Media Studio made may be up to the company's video limit, only where
+        // companyFileLimits allows it (security review F1); other files keep the attachment limit.
         const company = await companies.getById(companyId);
-        const maxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        const limits = await companyFileLimits(db, companyId, company, { kind: "plugin", pluginKey });
+        const maxBytes = maxBytesForContentType(contentType, limits);
         if (buffer.length > maxBytes) {
           throw new Error(`The file is larger than this company allows (${maxBytes} bytes)`);
         }
+        const large = await prepareLargeVideoSave(db, companyId, buffer, limits);
 
-        const stored = await getStorage().putFile({
-          companyId,
-          namespace: "files",
-          originalFilename: params.filename ?? null,
-          contentType,
-          body: buffer,
-        });
-        const file = await issues.createCompanyFile({
-          companyId,
-          provider: stored.provider,
-          objectKey: stored.objectKey,
-          contentType: stored.contentType,
-          byteSize: stored.byteSize,
-          sha256: stored.sha256,
-          originalFilename: stored.originalFilename,
-          createdByAgentId: authorAgentId,
-        });
+        let file: Awaited<ReturnType<typeof issues.createCompanyFile>>;
+        try {
+          const stored = await getStorage().putFile({
+            companyId,
+            namespace: large ? largeVideoNamespace("files") : "files",
+            originalFilename: params.filename ?? null,
+            contentType,
+            body: buffer,
+          });
+          try {
+            file = await issues.createCompanyFile({
+              companyId,
+              provider: stored.provider,
+              objectKey: stored.objectKey,
+              contentType: stored.contentType,
+              byteSize: stored.byteSize,
+              sha256: stored.sha256,
+              originalFilename: stored.originalFilename,
+              createdByAgentId: authorAgentId,
+              largeVideoQuotaBytes: large?.quotaBytes ?? null,
+            });
+          } catch (err) {
+            if (large) await getStorage().deleteObject(companyId, stored.objectKey).catch(() => undefined);
+            throw err;
+          }
+        } finally {
+          large?.releaseSlot();
+        }
 
         await logPluginActivity({
           companyId,

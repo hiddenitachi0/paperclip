@@ -133,6 +133,43 @@ d("GET /companies/:companyId/video-storylines/:storylineId/final/content", () =>
     expect(res.headers["content-disposition"]).toContain('filename="My Film.mp4"');
     expect(Buffer.compare(res.body as Buffer, body)).toBe(0);
     expect(mockGetObject).toHaveBeenCalledWith(companyId, "video-storylines/fake-key.mp4");
+    expect(res.headers["accept-ranges"]).toBe("bytes");
+  });
+
+  it("D18: serves byte ranges of a long film (206 / 416) and offers a download name", async () => {
+    const companyId = await seedEnabledCompany();
+    const storyline = await videoStorylineService(db).createStoryline(
+      companyId,
+      { title: "Lang film på norsk", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [] },
+      ACTOR,
+    );
+    const body = Buffer.from("0123456789abcdefghij");
+    await db
+      .update(videoStorylines)
+      .set({ status: "done", finalProvider: "local_disk", finalObjectKey: "video-storylines/long.mp4", finalContentType: "video/mp4", finalByteSize: body.byteLength })
+      .where(eq(videoStorylines.id, storyline.id));
+    const url = `/api/companies/${companyId}/video-storylines/${storyline.id}/final/content`;
+
+    mockGetObject.mockClear();
+    mockGetObject.mockResolvedValueOnce({ stream: Readable.from(body.subarray(10, 20)), contentType: "video/mp4", contentLength: 10 });
+    const partial = await request(app).get(`${url}?download=1`).set("Range", "bytes=10-");
+    expect(partial.status).toBe(206);
+    expect(partial.headers["content-range"]).toBe(`bytes 10-19/${body.byteLength}`);
+    expect(partial.headers["content-length"]).toBe("10");
+    expect(Buffer.compare(partial.body as Buffer, body.subarray(10, 20))).toBe(0);
+    expect(partial.headers["content-disposition"]).toBe(`attachment; filename="Lang film p_ norsk.mp4"; filename*=UTF-8''Lang%20film%20p%C3%A5%20norsk.mp4`);
+    expect(mockGetObject).toHaveBeenCalledWith(companyId, "video-storylines/long.mp4", { range: { start: 10, end: 19 } });
+
+    mockGetObject.mockClear();
+    const refused = await request(app).get(url).set("Range", "bytes=99-");
+    expect(refused.status).toBe(416);
+    expect(mockGetObject).not.toHaveBeenCalled();
+
+    // Another company's id never reaches storage.
+    const other = await seedEnabledCompany();
+    const foreign = await request(app).get(`/api/companies/${other}/video-storylines/${storyline.id}/final/content`).set("Range", "bytes=0-1");
+    expect(foreign.status).toBe(404);
+    expect(mockGetObject).not.toHaveBeenCalled();
   });
 
   describe("GET .../shots/:shotId/still/content (DUR-4425)", () => {
