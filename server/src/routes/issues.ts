@@ -1081,6 +1081,28 @@ function isAssigneeSelfCommentOnTerminalIssue(input: {
   return input.actorId === input.assigneeAgentId;
 }
 
+// A task an agent made for a person ("please answer this") is assigned to that
+// person, so nobody has an agent assignee to wake when they reply. When the
+// assigned person comments on their own task, hand the answer back to the agent
+// that created it. Tasks a person created themselves are left alone.
+function resolveAgentToWakeForAssigneeUserComment(input: {
+  issue: {
+    status: string | null | undefined;
+    assigneeAgentId: string | null | undefined;
+    assigneeUserId: string | null | undefined;
+    createdByAgentId: string | null | undefined;
+  };
+  actorType: "agent" | "user";
+  actorId: string;
+}): string | null {
+  if (input.actorType !== "user") return null;
+  if (input.issue.assigneeAgentId) return null;
+  if (!input.issue.assigneeUserId || input.issue.assigneeUserId !== input.actorId) return null;
+  if (!input.issue.createdByAgentId) return null;
+  if (isClosedIssueStatus(input.issue.status)) return null;
+  return input.issue.createdByAgentId;
+}
+
 function queueResolvedInteractionContinuationWakeup(input: {
   heartbeat: ReturnType<typeof heartbeatService>;
   issue: { id: string; assigneeAgentId: string | null; status: string };
@@ -8129,6 +8151,34 @@ export function issueRoutes(
           });
         }
 
+        const creatorAgentToWake = resolveAgentToWakeForAssigneeUserComment({
+          issue: issue,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+        });
+        if (creatorAgentToWake) {
+          addWakeup(creatorAgentToWake, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_commented",
+            payload: {
+              issueId: id,
+              commentId: comment.id,
+              mutation: "comment",
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: id,
+              taskId: id,
+              commentId: comment.id,
+              wakeCommentId: comment.id,
+              source: "issue.comment.assignee_user",
+              wakeReason: "issue_commented",
+            },
+          });
+        }
+
         let mentionedIds: string[] = [];
         try {
           mentionedIds = await rawSvc.findMentionedAgents(issue.companyId, commentBody);
@@ -9785,6 +9835,34 @@ export function issueRoutes(
             },
           });
         }
+      }
+
+      const creatorAgentToWake = resolveAgentToWakeForAssigneeUserComment({
+        issue: currentIssue,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+      });
+      if (creatorAgentToWake) {
+        addWakeup(creatorAgentToWake, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_commented",
+          payload: {
+            issueId: currentIssue.id,
+            commentId: comment.id,
+            mutation: "comment",
+          },
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: currentIssue.id,
+            taskId: currentIssue.id,
+            commentId: comment.id,
+            wakeCommentId: comment.id,
+            source: "issue.comment.assignee_user",
+            wakeReason: "issue_commented",
+          },
+        });
       }
 
       let mentionedIds: string[] = [];

@@ -11,6 +11,7 @@ vi.setConfig({ testTimeout: 20_000 });
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const PREVIOUS_AGENT_ID = "22222222-2222-4222-8222-222222222222";
 const MENTIONED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
+const CREATOR_AGENT_ID = "44444444-4444-4444-8444-444444444444";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -594,5 +595,131 @@ describe("issue update comment wakeups", () => {
         }),
       }),
     );
+  });
+  describe("a person answering a task an agent made for them", () => {
+    function agentMadeTask(overrides: Record<string, unknown> = {}) {
+      return makeIssue({
+        assigneeAgentId: null,
+        assigneeUserId: "local-board",
+        createdByUserId: null,
+        createdByAgentId: CREATOR_AGENT_ID,
+        status: "todo",
+        ...overrides,
+      });
+    }
+
+    it("wakes the creating agent when the assigned person comments", async () => {
+      const existing = agentMadeTask();
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.addComment.mockResolvedValue({
+        id: "comment-answer",
+        issueId: existing.id,
+        companyId: existing.companyId,
+        body: "Use the blue one.",
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/issues/${existing.id}/comments`)
+        .send({ body: "Use the blue one." });
+
+      expect(res.status).toBe(201);
+      await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        CREATOR_AGENT_ID,
+        expect.objectContaining({
+          reason: "issue_commented",
+          payload: expect.objectContaining({ issueId: existing.id, commentId: "comment-answer" }),
+          contextSnapshot: expect.objectContaining({
+            issueId: existing.id,
+            wakeCommentId: "comment-answer",
+            wakeReason: "issue_commented",
+            source: "issue.comment.assignee_user",
+          }),
+        }),
+      );
+    });
+
+    it("also wakes the creating agent when the comment arrives with an issue update", async () => {
+      const existing = agentMadeTask();
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.update.mockResolvedValue({ ...existing });
+      mockIssueService.addComment.mockResolvedValue({
+        id: "comment-answer-patch",
+        issueId: existing.id,
+        companyId: existing.companyId,
+        body: "Use the blue one.",
+      });
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${existing.id}`)
+        .send({ comment: "Use the blue one." });
+
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        CREATOR_AGENT_ID,
+        expect.objectContaining({
+          reason: "issue_commented",
+          payload: expect.objectContaining({ issueId: existing.id, commentId: "comment-answer-patch" }),
+        }),
+      );
+    });
+
+    it("leaves a task the person created themselves alone", async () => {
+      const existing = agentMadeTask({ createdByAgentId: null, createdByUserId: "local-board" });
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.addComment.mockResolvedValue({
+        id: "comment-own-task",
+        issueId: existing.id,
+        companyId: existing.companyId,
+        body: "Note to self.",
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/issues/${existing.id}/comments`)
+        .send({ body: "Note to self." });
+
+      expect(res.status).toBe(201);
+      await vi.waitFor(() => expect(mockIssueService.findMentionedAgents).toHaveBeenCalled());
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("does not wake the creating agent when someone else is the assigned person", async () => {
+      const existing = agentMadeTask({ assigneeUserId: "someone-else" });
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.addComment.mockResolvedValue({
+        id: "comment-not-assignee",
+        issueId: existing.id,
+        companyId: existing.companyId,
+        body: "Chiming in.",
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/issues/${existing.id}/comments`)
+        .send({ body: "Chiming in." });
+
+      expect(res.status).toBe(201);
+      await vi.waitFor(() => expect(mockIssueService.findMentionedAgents).toHaveBeenCalled());
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("does not wake anyone once the task is finished", async () => {
+      const existing = agentMadeTask({ status: "done" });
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.addComment.mockResolvedValue({
+        id: "comment-after-done",
+        issueId: existing.id,
+        companyId: existing.companyId,
+        body: "Thanks.",
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/issues/${existing.id}/comments`)
+        .send({ body: "Thanks." });
+
+      expect(res.status).toBe(201);
+      await vi.waitFor(() => expect(mockIssueService.findMentionedAgents).toHaveBeenCalled());
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
   });
 });
