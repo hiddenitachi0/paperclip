@@ -2585,7 +2585,13 @@ const plugin = definePlugin({
       return withEditSpend("inpaint", context, raw, async (reservationId) => {
         try {
           const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
-          const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+          let result: GenerationResult;
+          try {
+            result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+          } catch (err) {
+            if (isFalFlaggedError(err)) await settleFalEditSpend(context.companyId as string, reservationId, err.model, err.usage);
+            throw err;
+          }
           const { contentBase64: editedBase64 } = await toAttachmentBytes(ctx, result);
           const composited = await compositeMaskedEdit({
             original: bytesFromDataUrl(imageDataUrl, "The picture"),
@@ -2595,6 +2601,8 @@ const plugin = definePlugin({
           await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_FILL_MODEL, { images: 1 });
           return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
         } catch (err) {
+          // Kept as it is: withEditSpend leaves a flagged picture's (already settled) reservation alone.
+          if (isFalFlaggedError(err)) throw err;
           throw new Error(errorText(err));
         }
       });
