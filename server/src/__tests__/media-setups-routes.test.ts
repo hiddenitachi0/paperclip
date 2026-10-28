@@ -352,6 +352,89 @@ d("media setup register routes", () => {
       expect((list.body.loras as Array<{ id: string }>).map((l) => l.id)).not.toContain(link.body.id);
     });
 
+    it("refuses a Sogni ref that is a link or carries a \"?\" or \"#\", so no key reaches agents through an id", async () => {
+      const companyId = await seedCompany();
+      const app = appFor({ board: [companyId] });
+      for (const ref of ["https://example.com/l.safetensors?token=sekret", "my-lora?token=sekret", "my-lora#sekret"]) {
+        const res = await request(app).post(`/api/companies/${companyId}/media/loras`).send({ provider: "sogni", source: "catalog", ref, name: "Keyed" });
+        expect(res.status, ref).toBe(422);
+        expect(res.body.error).toMatch(/saved by its id/);
+        expect(JSON.stringify(res.body)).not.toContain("sekret");
+      }
+      const ok = await request(app).post(`/api/companies/${companyId}/media/loras`).send({ provider: "sogni", source: "personal", ref: "my-lora-id", name: "Mine" });
+      expect(ok.status).toBe(201);
+      // A stored Sogni row with a key (written before this rule) cannot be edited and is cut down for agents.
+      await db.update(mediaLoras).set({ ref: "my-lora-id?token=sekret" }).where(eq(mediaLoras.id, ok.body.id));
+      const edit = await request(app).patch(`/api/companies/${companyId}/media/loras/${ok.body.id}`).send({ notes: "x" });
+      expect(edit.status).toBe(422);
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      const seen = await request(agent).get(`/api/companies/${companyId}/media/loras`);
+      expect(JSON.stringify(seen.body)).not.toContain("sekret");
+    });
+
+    it("moves approved setups back to draft when a LoRA's trigger words or tag change, but not for a rename or an unrelated LoRA", async () => {
+      const companyId = await seedCompany();
+      const ownerId = randomUUID();
+      const adminId = randomUUID();
+      const owner = appFor({ board: [companyId], role: "owner", userId: ownerId });
+      const admin = appFor({ board: [companyId], role: "admin", userId: adminId });
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      const mk = async (ref: string, name: string, extra: Record<string, unknown>) => {
+        const res = await request(owner).post(`/api/companies/${companyId}/media/loras`).send({ provider: "fal", source: "url", ref, name, family: "wan21", ...extra });
+        expect(res.status).toBe(201);
+        return res.body as { id: string };
+      };
+      const used = await mk("https://huggingface.co/acme/used/resolve/main/u.safetensors", "Used", { triggerWords: ["one"], contentTag: "mature" });
+      const other = await mk("https://huggingface.co/acme/other/resolve/main/o.safetensors", "Other", { contentTag: "sfw" });
+      const mkSetup = async (name: string, loraId: string) => {
+        const res = await request(owner)
+          .post(`/api/companies/${companyId}/media/setups`)
+          .send({ kind: "video", name, provider: "fal", modelId: "fal-ai/wan-flf2v", loras: [{ loraId, strength: 1 }], params: { promptExpansion: false } });
+        expect(res.status).toBe(201);
+        return res.body as { id: string };
+      };
+      const setup = await mkSetup("Uses Used", used.id);
+      const bystander = await mkSetup("Uses Other", other.id);
+      const approve = async () => {
+        for (const id of [setup.id, bystander.id]) {
+          const res = await request(owner).patch(`/api/companies/${companyId}/media/setups/${id}`).send({ status: "approved" });
+          expect(res.body).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+        }
+      };
+      const statusOf = async (id: string) => (await request(owner).get(`/api/companies/${companyId}/media/setups/${id}`)).body as Record<string, any>;
+      const patchLora = (id: string, body: Record<string, unknown>) => request(admin).patch(`/api/companies/${companyId}/media/loras/${id}`).send(body);
+      await approve();
+
+      // Not what /resolve returns: a new name, notes or strength range keep every approval.
+      expect((await patchLora(used.id, { name: "Used (renamed)", notes: "calm", recommendedMin: 0.5, recommendedMax: 0.9 })).status).toBe(200);
+      expect(await statusOf(setup.id)).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+      // The same trigger words and tag sent back: still approved.
+      expect((await patchLora(used.id, { triggerWords: ["one"], contentTag: "mature" })).status).toBe(200);
+      expect(await statusOf(setup.id)).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+
+      // New trigger words: back to draft, nobody's approval, hidden from agents; the other setup is untouched.
+      expect((await patchLora(used.id, { triggerWords: ["one", "two"] })).status).toBe(200);
+      expect(await statusOf(setup.id)).toMatchObject({ status: "draft", approvedByUserId: null, approvedAt: null, triggerWords: ["one", "two"] });
+      expect(await statusOf(bystander.id)).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+      expect((await request(agent).get(`/api/companies/${companyId}/media/setups/${setup.id}`)).status).toBe(404);
+      const logs = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityId, setup.id)));
+      const returned = logs.find((log) => (log.details as Record<string, unknown> | null)?.returnedToDraft === true);
+      expect(returned).toMatchObject({ action: "media.setup_updated", actorId: adminId });
+      expect(returned!.details).toMatchObject({ status: "draft", loraChanged: used.id, previousApprovedByUserId: ownerId });
+
+      // Re-tagging mature -> safe for work cannot leave the setup approved and now rated safe for work.
+      expect((await request(owner).patch(`/api/companies/${companyId}/media/setups/${setup.id}`).send({ status: "approved" })).body).toMatchObject({ status: "approved", contentRating: "mature" });
+      const retag = await patchLora(used.id, { contentTag: "sfw" });
+      expect(retag.status).toBe(200);
+      expect(await statusOf(setup.id)).toMatchObject({ status: "draft", approvedByUserId: null, contentRating: "sfw" });
+
+      // A draft stays a draft, and archiving alone changes no approval.
+      expect((await patchLora(used.id, { triggerWords: ["three"] })).status).toBe(200);
+      expect((await statusOf(setup.id)).status).toBe("draft");
+      expect((await patchLora(other.id, { archived: true })).status).toBe(200);
+      expect(await statusOf(bystander.id)).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+    });
+
     it("uses the safety module: never saves the age slider, unfilter or jailbreak LoRAs, and a row written outside the API stays unusable", async () => {
       const companyId = await seedCompany();
       const app = appFor({ board: [companyId] });

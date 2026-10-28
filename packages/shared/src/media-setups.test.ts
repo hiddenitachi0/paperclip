@@ -284,6 +284,17 @@ describe("media setups: LoRA links never carry a key", () => {
     }
   });
 
+  it("refuses a Sogni ref that is a link or has a \"?\" or \"#\" part, so no key rides in an id agents see", () => {
+    for (const ref of ["https://example.com/l?token=abc", "h3-better-motion?token=abc", "h3-better-motion#abc", "ftp://example.com/abc", "https://example.com/plain"]) {
+      for (const source of ["catalog", "personal"] as const) {
+        const problems = checkMediaLoraFields({ ...fal, provider: "sogni", source, ref, name: "Sogni" });
+        expect(problems.join(" "), `${source} ${ref}`).toMatch(/saved by its id/);
+        expect(problems.join(" "), ref).not.toMatch(/abc/);
+      }
+    }
+    expect(checkMediaLoraFields({ ...fal, provider: "sogni", source: "personal", ref: "my-lora-id_12", name: "Sogni" })).toEqual([]);
+  });
+
   it("keeps links whose query string holds no key", () => {
     for (const ref of [
       "https://civitai.com/api/download/models/123?type=Model&format=SafeTensor",
@@ -306,6 +317,9 @@ describe("media setups: LoRA links never carry a key", () => {
     expect(mediaLoraRefForAgents({ source: "url", ref: "https://user@huggingface.co/a/b.safetensors#x" })).toBe("https://huggingface.co/a/b.safetensors");
     expect(mediaLoraRefForAgents({ source: "url", ref: "not a link?token=x" })).toBe("not a link");
     expect(mediaLoraRefForAgents({ source: "catalog", ref: "h3-better-motion" })).toBe("h3-better-motion");
+    // A Sogni ref saved before ids with a link or "?" were refused is cut down for agents too.
+    expect(mediaLoraRefForAgents({ source: "catalog", ref: "h3-better-motion?token=abc" })).toBe("h3-better-motion");
+    expect(mediaLoraRefForAgents({ source: "personal", ref: "https://user:pw@example.com/l?token=abc" })).toBe("https://example.com/l");
   });
 });
 
