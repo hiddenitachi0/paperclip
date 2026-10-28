@@ -167,7 +167,7 @@ DECLARE
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     -- Media Studio code-rendered videos (D14). Created, granted on and
-    -- policed in 0258_code_render_jobs.sql; company-scoped, so it is in both
+    -- policed in 0260_code_render_jobs.sql; company-scoped, so it is in both
     -- lists.
     'code_render_jobs',
     'companies',
@@ -570,7 +570,7 @@ DECLARE
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     -- Media Studio code-rendered videos (D14). Created, granted on and
-    -- policed in 0258_code_render_jobs.sql; company-scoped, so it is in both
+    -- policed in 0260_code_render_jobs.sql; company-scoped, so it is in both
     -- lists.
     'code_render_jobs',
     'company_agent_roles',

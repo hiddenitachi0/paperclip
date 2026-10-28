@@ -342,7 +342,7 @@ after the Security Reviewer gate.
 |---|---|---|
 | `docker/render-worker/**` (Dockerfile, standalone `package.json` + `package-lock.json`, `src/`, `test/`, licences, README) | The worker; not a pnpm workspace package, so the monorepo lockfile is untouched | **New files** |
 | `docker/docker-compose.render-worker.yml` | Overlay: worker (`network_mode: none`, read-only, non-root, limits, `init: true`) + socket volume on `server` | **New file** |
-| `packages/db/src/schema/code_render_jobs.ts`, `migrations/0258_code_render_jobs.sql` (+ snapshot, journal) | `code_render_jobs` (company-scoped, RLS) | **New files** |
+| `packages/db/src/schema/code_render_jobs.ts`, `migrations/0260_code_render_jobs.sql` (+ snapshot, journal) | `code_render_jobs` (company-scoped, RLS) | **New files** |
 | `packages/db/src/schema/index.ts` | Export | Additive 1-line |
 | `packages/db/src/migrations/0164_rls_login_roles.sql` | `code_render_jobs` added to both arrays | Additive |
 | `packages/db/src/cross-company-audit.ts` | `heartbeat-scheduler:codeRenders` in the routine-bypass list | Additive 1-line |

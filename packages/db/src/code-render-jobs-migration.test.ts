@@ -8,7 +8,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * Migration 0258_code_render_jobs (Media Studio D14) applies on the
+ * Migration 0260_code_render_jobs (Media Studio D14) applies on the
  * embedded-Postgres path (every migration, in journal order), creates the
  * company-scoped code_render_jobs table with row-level security, keeps the
  * job history when a task, agent or saved file goes away, is safe to run
@@ -18,10 +18,10 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {
-  console.warn(`Skipping migration 0258 test: ${support.reason ?? "unsupported environment"}`);
+  console.warn(`Skipping migration 0260 test: ${support.reason ?? "unsupported environment"}`);
 }
 
-const MIGRATION_TAG = "0258_code_render_jobs";
+const MIGRATION_TAG = "0260_code_render_jobs";
 const MIGRATION_PATH = fileURLToPath(new URL(`./migrations/${MIGRATION_TAG}.sql`, import.meta.url));
 
 type Row = Record<string, unknown>;
@@ -40,7 +40,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
   let companyB = "";
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0258-code-renders-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0260-code-renders-");
     db = createDb(tempDb.connectionString);
     companyA = randomUUID();
     companyB = randomUUID();

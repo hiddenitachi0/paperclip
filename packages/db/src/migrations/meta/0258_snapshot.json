@@ -1,5 +1,5 @@
 {
-  "id": "bd251b94-6fd0-486f-a977-88d7a72b2a35",
+  "id": "939d9ee0-ebd9-4f12-aaa7-a5d4c60d2a7f",
   "prevId": "e3b6d9b1-8531-4f20-a9ae-9c257cdee973",
   "version": "7",
   "dialect": "postgresql",
@@ -5707,295 +5707,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.code_render_jobs": {
-      "name": "code_render_jobs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'queued'"
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "issue_id": {
-          "name": "issue_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_job_id": {
-          "name": "worker_job_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "requested_seconds": {
-          "name": "requested_seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "video_ms": {
-          "name": "video_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_pct": {
-          "name": "progress_pct",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "options": {
-          "name": "options",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "result_file_id": {
-          "name": "result_file_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "result_content_type": {
-          "name": "result_content_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "result_bytes": {
-          "name": "result_bytes",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "passed": {
-          "name": "passed",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "report": {
-          "name": "report",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by_agent_id": {
-          "name": "created_by_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by_user_id": {
-          "name": "created_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "code_render_jobs_company_created_idx": {
-          "name": "code_render_jobs_company_created_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "code_render_jobs_company_status_idx": {
-          "name": "code_render_jobs_company_status_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "code_render_jobs_agent_created_idx": {
-          "name": "code_render_jobs_agent_created_idx",
-          "columns": [
-            {
-              "expression": "created_by_agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "code_render_jobs_status_idx": {
-          "name": "code_render_jobs_status_idx",
-          "columns": [
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "code_render_jobs_company_id_companies_id_fk": {
-          "name": "code_render_jobs_company_id_companies_id_fk",
-          "tableFrom": "code_render_jobs",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "code_render_jobs_issue_id_issues_id_fk": {
-          "name": "code_render_jobs_issue_id_issues_id_fk",
-          "tableFrom": "code_render_jobs",
-          "tableTo": "issues",
-          "columnsFrom": [
-            "issue_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "code_render_jobs_result_file_id_issue_attachments_id_fk": {
-          "name": "code_render_jobs_result_file_id_issue_attachments_id_fk",
-          "tableFrom": "code_render_jobs",
-          "tableTo": "issue_attachments",
-          "columnsFrom": [
-            "result_file_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "code_render_jobs_created_by_agent_id_agents_id_fk": {
-          "name": "code_render_jobs_created_by_agent_id_agents_id_fk",
-          "tableFrom": "code_render_jobs",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "created_by_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -45114,6 +44825,25 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "content_rating": {
+          "name": "content_rating",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'sfw'"
+        },
+        "content_rating_set_by": {
+          "name": "content_rating_set_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "content_rating_set_at": {
+          "name": "content_rating_set_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -45295,6 +45025,10 @@
         "video_storylines_music_source_exclusive_check": {
           "name": "video_storylines_music_source_exclusive_check",
           "value": "\"video_storylines\".\"music_asset_id\" IS NULL OR \"video_storylines\".\"music_source_key\" IS NULL"
+        },
+        "video_storylines_content_rating_check": {
+          "name": "video_storylines_content_rating_check",
+          "value": "\"video_storylines\".\"content_rating\" IN ('sfw', 'mature')"
         }
       },
       "isRLSEnabled": false

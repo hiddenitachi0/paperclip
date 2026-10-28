@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
-import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
+import { CAST_IDENTITIES_ACTION, EMPTY_CAST, ShotCastConfirm, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { StoryWriterSection } from "./story-writer-panel.js";
@@ -444,7 +444,7 @@ export function trainedFor(identity: LookIdentity | undefined, service: "sogni" 
 
 const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni", higgsfield: "Higgsfield" };
 
-type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number; defaults?: Record<string, string> };
+type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number; defaults?: Record<string, string>; note?: string | null };
 
 export type LookAgent = { id: string; name: string; title: string | null };
 type LookDefaultsResponse = { agents?: LookAgent[]; defaults?: Record<string, string>; canManage?: boolean };
@@ -1746,6 +1746,16 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const [maxRefs, setMaxRefs] = useState(4);
   const [draft, setDraft] = useState<LookDraft | null>(null);
   const [images, setImages] = useState<CompanyImage[] | null>(null);
+  const [imagesCursor, setImagesCursor] = useState<string | null>(null);
+  const [imagesBusy, setImagesBusy] = useState(false);
+  const [imageSearch, setImageSearch] = useState("");
+  // The search words the list on screen was made with (the box may hold newer, unsent words).
+  const [imageQuery, setImageQuery] = useState("");
+  // Picked pictures the server confirmed are gone from Files.
+  const [missingRefs, setMissingRefs] = useState<ReadonlySet<string>>(() => new Set());
+  // Picked pictures whose preview did not load, though they may still be in Files.
+  const [unshownRefs, setUnshownRefs] = useState<ReadonlySet<string>>(() => new Set());
+  const [saveNote, setSaveNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sogniModels, setSogniModels] = useState<SogniModelsResponse | null>(null);
@@ -1852,32 +1862,93 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     };
   }, [wantsSogni, draftModel, listSogniLoras]);
 
-  const loadImages = useCallback(async () => {
-    if (!companyId || images) return;
-    try {
-      const res = await hostFetchJson<{ artifacts?: Array<{ title: string; contentPath: string | null; mediaKind: string }> }>(
-        `/api/companies/${companyId}/artifacts?kind=image&limit=100`,
-      );
-      const found: CompanyImage[] = [];
-      for (const artifact of res.artifacts ?? []) {
-        const match = artifact.contentPath ? ATTACHMENT_PATH.exec(artifact.contentPath) : null;
-        if (!match || found.some((img) => img.fileId === match[1])) continue;
-        found.push({ fileId: match[1], title: artifact.title, src: artifact.contentPath! });
+  // One page of the company's pictures (newest first). Search words narrow the
+  // list by file name; "Load more" adds the next page.
+  const loadImages = useCallback(
+    async (opts?: { search?: string; cursor?: string | null }) => {
+      if (!companyId) return;
+      const search = (opts?.search ?? "").trim();
+      const cursor = opts?.cursor ?? null;
+      setImagesBusy(true);
+      try {
+        const query = new URLSearchParams({ kind: "image", limit: "100" });
+        if (search) {
+          query.set("q", search);
+          query.set("qScope", "filename");
+        }
+        if (cursor) query.set("cursor", cursor);
+        const res = await hostFetchJson<{
+          artifacts?: Array<{ title: string; contentPath: string | null; mediaKind: string }>;
+          nextCursor?: string | null;
+        }>(`/api/companies/${companyId}/artifacts?${query.toString()}`);
+        const found: CompanyImage[] = [];
+        for (const artifact of res.artifacts ?? []) {
+          const match = artifact.contentPath ? ATTACHMENT_PATH.exec(artifact.contentPath) : null;
+          if (!match || found.some((img) => img.fileId === match[1])) continue;
+          found.push({ fileId: match[1], title: artifact.title, src: artifact.contentPath! });
+        }
+        setImages((prev) => {
+          if (!cursor || !prev) return found;
+          const have = new Set(prev.map((img) => img.fileId));
+          return [...prev, ...found.filter((img) => !have.has(img.fileId))];
+        });
+        setImagesCursor(res.nextCursor ?? null);
+        // The words and the list on screen move together, so "Load more" never mixes two searches.
+        setImageQuery(search);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setImages((prev) => prev ?? []);
+      } finally {
+        setImagesBusy(false);
       }
-      setImages(found);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setImages([]);
-    }
-  }, [companyId, images]);
+    },
+    [companyId],
+  );
 
   const startEdit = (look: Look | null) => {
     setError(null);
     setPromptPreview(null);
     setPreviewError(null);
+    setSaveNote(null);
     setDraft(look ? lookToDraft(look) : { ...EMPTY_DRAFT });
     setSheetOpen(Boolean(look?.sheet && Object.keys(look.sheet).length > 0));
-    void loadImages();
+    setMissingRefs(new Set());
+    setUnshownRefs(new Set());
+    if (images === null) void loadImages();
+  };
+
+  // Takes a picked picture off the look together with its role.
+  const removeRef = (index: number) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const roles = draftRoles(d);
+      return {
+        ...d,
+        referenceFileIds: d.referenceFileIds.filter((_, i) => i !== index),
+        referenceRoles: roles.filter((_, i) => i !== index),
+      };
+    });
+  };
+
+  // A preview that fails to load does not mean the picture was deleted (it may be
+  // too big to preview, or the session ended). Ask the server for the file itself
+  // and only call it gone when the server says so.
+  const checkRefPreview = async (fileId: string) => {
+    let gone = false;
+    try {
+      const res = await fetch(fileContentPath(fileId), { method: "HEAD", credentials: "include" });
+      gone = res.status === 404 || res.status === 403;
+    } catch {
+      gone = false;
+    }
+    const add = (prev: ReadonlySet<string>) => (prev.has(fileId) ? prev : new Set([...prev, fileId]));
+    if (gone) setMissingRefs(add);
+    else setUnshownRefs(add);
+  };
+
+  const onSearchImages = (e: React.FormEvent) => {
+    e.preventDefault();
+    void loadImages({ search: imageSearch });
   };
 
   // Picking or unpicking a picture keeps each picture's role with it.
@@ -1955,6 +2026,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     try {
       const res = (await saveLook(draftToSaveParams(draft))) as LooksResponse;
       setLooks(res.looks ?? []);
+      setSaveNote(res.note ?? null);
       setDraft(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1967,6 +2039,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     if (typeof window !== "undefined" && !window.confirm(`Delete the look "${look.name}"? Pictures already made with it are kept.`)) return;
     setBusy(true);
     setError(null);
+    setSaveNote(null);
     try {
       const res = (await deleteLook({ id: look.id })) as LooksResponse;
       setLooks(res.looks ?? []);
@@ -2000,6 +2073,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
       </div>
 
       {error ? <div style={errorBox}>{error}</div> : null}
+      {saveNote ? <div style={noticeBox} role="status">{saveNote}</div> : null}
 
       {looks.length === 0 ? (
         <div style={{ opacity: 0.7 }}>No looks are saved yet.</div>
@@ -2357,22 +2431,45 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
             <span>Reference pictures ({draft.referenceFileIds.length} of {refLimit} picked)</span>
             {draft.referenceFileIds.length > 0 ? (
               <div aria-label="Picked reference pictures" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {draft.referenceFileIds.map((id, i) => (
-                  <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
-                    <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
-                    <img src={thumbnailPathFor(fileContentPath(id))} loading="lazy" alt={`Reference picture ${i + 1}`} style={thumb} />
-                    <select
-                      aria-label={`What picture ${i + 1} is for`}
-                      value={draftRoles(draft)[i]}
-                      onChange={(e) => setRole(i, e.target.value)}
-                      style={input}
-                    >
-                      {REFERENCE_ROLE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
+                {draft.referenceFileIds.map((id, i) => {
+                  const missing = missingRefs.has(id);
+                  const unshown = !missing && unshownRefs.has(id);
+                  return (
+                    <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
+                      <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
+                      {missing ? (
+                        <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: 11, color: "#a61e4d", background: "#fff0f6", width: 120 }}>
+                          This picture is no longer in Files
+                        </div>
+                      ) : unshown ? (
+                        <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: 11, background: "#f1f3f5", width: 120 }}>
+                          This picture can't be shown right now
+                        </div>
+                      ) : (
+                        <img
+                          src={thumbnailPathFor(fileContentPath(id))}
+                          loading="lazy"
+                          alt={`Reference picture ${i + 1}`}
+                          style={thumb}
+                          onError={() => void checkRefPreview(id)}
+                        />
+                      )}
+                      <select
+                        aria-label={`What picture ${i + 1} is for`}
+                        value={draftRoles(draft)[i]}
+                        onChange={(e) => setRole(i, e.target.value)}
+                        style={input}
+                      >
+                        {REFERENCE_ROLE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      <button type="button" style={secondaryBtn} aria-label={`Remove picture ${i + 1}`} disabled={busy} onClick={() => removeRef(i)}>
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : null}
             {draft.referenceFileIds.length > refLimit ? (
@@ -2380,10 +2477,23 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 This model takes at most {refLimit} reference pictures. Remove some before saving.
               </div>
             ) : null}
+            <form onSubmit={onSearchImages} style={{ display: "flex", gap: 6 }}>
+              <input
+                aria-label="Search your pictures"
+                placeholder="Search your pictures by name"
+                value={imageSearch}
+                maxLength={160}
+                onChange={(e) => setImageSearch(e.target.value)}
+                style={{ ...input, flex: 1 }}
+              />
+              <button type="submit" style={secondaryBtn} disabled={imagesBusy}>Search</button>
+            </form>
             {images === null ? (
               <div style={{ opacity: 0.7 }}>Loading your pictures…</div>
             ) : images.length === 0 ? (
-              <div style={{ opacity: 0.7 }}>There are no pictures in Files yet.</div>
+              <div style={{ opacity: 0.7 }}>
+                {imageQuery ? "No pictures match that search." : "There are no pictures in Files yet."}
+              </div>
             ) : (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 260, overflowY: "auto" }}>
                 {images.map((img) => {
@@ -2403,6 +2513,13 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 })}
               </div>
             )}
+            {imagesCursor ? (
+              <div>
+                <button type="button" style={secondaryBtn} disabled={imagesBusy} onClick={() => void loadImages({ search: imageQuery, cursor: imagesCursor })}>
+                  {imagesBusy ? "Loading…" : "Load more pictures"}
+                </button>
+              </div>
+            ) : null}
           </div>
           <div style={{ ...card, gap: 6 }} aria-label="Preview prompt">
             <label style={field}>
@@ -3793,6 +3910,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listCastIdentities = usePluginAction(CAST_IDENTITIES_ACTION);
   const [castIdentities, setCastIdentities] = useState<CastIdentityOption[]>([]);
   const [castIdentityError, setCastIdentityError] = useState<string | null>(null);
+  const [castIdentitiesLoaded, setCastIdentitiesLoaded] = useState(false);
   useEffect(() => {
     if (!companyId || !selectedId) return;
     let cancelled = false;
@@ -3801,6 +3919,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       .then((r) => {
         if (cancelled) return;
         setCastIdentities(castIdentityOptions(r));
+        setCastIdentitiesLoaded(true);
         setCastIdentityError(null);
       })
       .catch((e) => {
@@ -4608,6 +4727,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       sceneNotes={sortedScenes.map((sc) => sc.notes)}
                       editable={editable}
                       identities={castIdentities}
+                      identitiesLoaded={castIdentitiesLoaded}
                       identityError={castIdentityError}
                       onSaved={async () => {
                         await loadStorylines();
@@ -4659,6 +4779,22 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
+                    castConfirm={
+                      <ShotCastConfirm
+                        key={selectedId}
+                        base={base}
+                        cast={selected.cast ?? EMPTY_CAST}
+                        shots={detailFor === selectedId ? shots : []}
+                        identities={castIdentities}
+                        identitiesLoaded={castIdentitiesLoaded}
+                        identityError={castIdentityError}
+                        editable={editable}
+                        onSaved={async () => {
+                          await loadStorylines();
+                        }}
+                        onLinkPerson={() => setActiveStep("cast")}
+                      />
+                    }
                     onShotLook={(shotId, pictureLookId) =>
                       void (async () => {
                         setError(null);

@@ -1,6 +1,6 @@
 -- Media Studio code-rendered videos (D14; plan card "Code-rendered video
--- worker for infographics and explainers"). (Numbered 0258: 0257 is
--- legal-contract-reminders.)
+-- worker for infographics and explainers"). (Numbered 0260: 0258 is
+-- storyline-content-rating and 0259 is media-setup-register.)
 --
 -- One new company-scoped table, see packages/db/src/schema/code_render_jobs.ts:
 --   * code_render_jobs: one row per check / snapshot / render job sent to the
