@@ -1,6 +1,6 @@
 {
-  "id": "1518915a-d30b-4934-9e2b-05e44918e2d2",
-  "prevId": "e3b6d9b1-8531-4f20-a9ae-9c257cdee973",
+  "id": "5ec5f857-a50e-45bb-af35-57b677cfeb4d",
+  "prevId": "939d9ee0-ebd9-4f12-aaa7-a5d4c60d2a7f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -45796,6 +45796,25 @@
           "notNull": true,
           "default": "'{}'::jsonb"
         },
+        "content_rating": {
+          "name": "content_rating",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'sfw'"
+        },
+        "content_rating_set_by": {
+          "name": "content_rating_set_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "content_rating_set_at": {
+          "name": "content_rating_set_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_by_agent_id": {
           "name": "created_by_agent_id",
           "type": "uuid",
@@ -45988,6 +46007,10 @@
         "video_storylines_status_check": {
           "name": "video_storylines_status_check",
           "value": "\"video_storylines\".\"status\" IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'needs_attention', 'failed', 'cancelled')"
+        },
+        "video_storylines_content_rating_check": {
+          "name": "video_storylines_content_rating_check",
+          "value": "\"video_storylines\".\"content_rating\" IN ('sfw', 'mature')"
         },
         "video_storylines_provider_check": {
           "name": "video_storylines_provider_check",
