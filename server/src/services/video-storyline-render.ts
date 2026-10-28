@@ -565,6 +565,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     throw unprocessable(info.refusal);
   }
 
+  const RENDER_IN_FLIGHT_MESSAGE = "A shot of this storyline is still rendering. Wait for it to finish before starting the render.";
+
   async function startRender(companyId: string, storylineId: string, actor: VideoStorylineActor, input: StartVideoStorylineRenderInput) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -579,6 +581,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Phase 2: only AI shots render (and cost money); the company's own
     // videos and photos are prepared by ffmpeg, free.
     const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
+
+    // DUR-4930 (security review B1): a single-shot re-render leaves the film in draft/paused with its shot queued or
+    // rendering. A startRender now would pick that shot (it is not "done") and call the provider a second time for
+    // it, with two chains then rendering every shot twice past the cap. Wait for the re-render to settle instead.
+    if (shots.some((s) => s.clipKind === "generated" && (s.status === "queued" || s.status === "rendering"))) {
+      throw conflict(RENDER_IN_FLIGHT_MESSAGE);
+    }
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
     // still needs to render must already be approved. Checked here, upfront
@@ -654,6 +663,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(locked.status)) {
         throw conflict(`This storyline is already ${locked.status.replace(/_/g, " ")}.`);
       }
+      // Again under the lock: a re-render may have queued a shot since the read above (DUR-4930).
+      const [inFlight] = await tx
+        .select({ id: videoShots.id })
+        .from(videoShots)
+        .where(and(eq(videoShots.storylineId, storylineId), eq(videoShots.clipKind, "generated"), inArray(videoShots.status, ["queued", "rendering"])))
+        .limit(1);
+      if (inFlight) throw conflict(RENDER_IN_FLIGHT_MESSAGE);
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, pending.id), eq(videoShots.storylineId, storylineId)));
       if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
         throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");

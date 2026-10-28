@@ -409,6 +409,19 @@ d("storyline model change", () => {
       expect((await storylineRow(storylineId)).status).toBe("paused");
     });
 
+    it("startRender is refused (409) while a re-rendered shot is in flight, and the provider is started once (DUR-4930 B1)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await db.update(videoStorylines).set({ budgetCapCents: 1000 }).where(eq(videoStorylines.id, storylineId));
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({ status: 409 });
+      for (let i = 0; i < 4; i++) await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft", "draft"]);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(1000);
+    });
+
     it("a rendering film whose cap has gone does not start the next shot", async () => {
       const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
       const rec = recordingService({ model: KLING_16, provider: "fal" });
