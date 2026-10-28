@@ -44,7 +44,7 @@ Give the account only what the deploy does, with the key restricted in `authoriz
 restrict,command="internal-sftp" ssh-ed25519 AAAA... deploy
 ```
 
-and `Subsystem sftp internal-sftp` in `sshd_config`. The key can then do nothing but SFTP, whatever happens to it. ed25519 keys work with the runner's curl (curl 8.14 / libssh2 1.11 authenticates with the private key alone; the runner also passes the public half, derived with `ssh-keygen -y`, when `ssh-keygen` is installed, for older libssh2 builds).
+and `Subsystem sftp internal-sftp` in `sshd_config`. The key can then do nothing but SFTP, whatever happens to it. The runner host's curl must use the libssh2 SFTP backend (check `curl --version` for `libssh2/`; Debian's does, Ubuntu's curl is built on libssh and is not covered by the real-server proof). ed25519 keys work with the runner's curl (curl 8.14 / libssh2 1.11 authenticates with the private key alone; the runner also passes the public half, derived with `ssh-keygen -y`, when `ssh-keygen` is installed, for older libssh2 builds).
 
 The account needs to be able to create, rename and remove files and folders under the remote directory: the runner uses upload, `mkdir`, `rename`, `rm` and `rmdir`.
 

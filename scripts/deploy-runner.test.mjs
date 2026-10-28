@@ -5003,6 +5003,13 @@ test("DUR-4977: resolve_deploy_vars refuses an sftp policy with no/invalid host-
 // with DEPLOY_RUNNER_TEST_SSHD (plus DEPLOY_RUNNER_TEST_SSHD_LIBEXEC for the
 // directory holding sshd-session/sshd-auth, and DEPLOY_RUNNER_TEST_SSHD_LD_LIBRARY_PATH
 // if it was unpacked from a package rather than installed).
+// The runner host's curl (Debian) speaks SFTP through libssh2. Ubuntu/CI curl builds use libssh, whose
+// --hostpubsha256 handling is a different code path, so the real-server proof only applies to libssh2.
+function curlUsesLibssh2() {
+  const out = spawnSync("curl", ["--version"], { encoding: "utf8" });
+  return !out.error && /\blibssh2\//.test(out.stdout || "");
+}
+
 function findSshd() {
   const candidates = [process.env.DEPLOY_RUNNER_TEST_SSHD, "/usr/sbin/sshd", "/usr/local/sbin/sshd"].filter(Boolean);
   return candidates.find((c) => existsSync(c));
@@ -5037,7 +5044,11 @@ async function waitForPort(port) {
 }
 
 test("DUR-4977: with a real sshd (restrict,command=internal-sftp) and an ed25519 key, the real curl uploads, swaps, removes and cleans up staging behind a pinned host key", {
-  skip: !findSshd() || spawnSync("ssh-keygen", ["-?"]).error ? "no sshd/ssh-keygen available (set DEPLOY_RUNNER_TEST_SSHD)" : false,
+  skip: !findSshd() || spawnSync("ssh-keygen", ["-?"]).error
+    ? "no sshd/ssh-keygen available (set DEPLOY_RUNNER_TEST_SSHD)"
+    : !curlUsesLibssh2()
+      ? "this curl's SFTP backend is not libssh2 (e.g. Ubuntu's libssh build); the runner host's curl is libssh2-based"
+      : false,
 }, async () => {
   const sshd = findSshd();
   const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-sshd-test-"));
