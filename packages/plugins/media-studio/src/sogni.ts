@@ -45,6 +45,7 @@
 // is checked first: https, the storage host the docs name, no redirects.
 
 import type { FetchImpl, GenerationInput, GenerationResult, GenerationProvider } from "./providers.js";
+import { SOGNI_MAX_LORAS } from "@paperclipai/plugin-sdk/media";
 
 export const SOGNI_API_BASE = "https://api.sogni.ai";
 
@@ -190,8 +191,8 @@ export function sogniWorkflowModel(model: string, tool: SogniTool): string {
 /** edit_image makes at most this many pictures per call for Media Studio (krea-identity-edit's own limit is 2). */
 export const SOGNI_MAX_VARIATIONS = 2;
 
-/** At most this many LoRAs on one picture (Sogni's limit, also advertised as constraints.maxPerRequest). */
-export const SOGNI_MAX_LORAS = 8;
+/** At most this many LoRAs on one picture (Sogni's limit, also advertised as constraints.maxPerRequest). Defined in the SDK's media module. */
+export { SOGNI_MAX_LORAS };
 
 export interface SogniLoraPick {
   id: string;

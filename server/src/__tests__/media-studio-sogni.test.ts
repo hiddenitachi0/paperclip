@@ -3,16 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
 import plugin from "../../../packages/plugins/media-studio/src/worker.js";
 import manifest, { TOOL_GENERATE } from "../../../packages/plugins/media-studio/src/manifest.js";
-import { SogniProvider, assertSogniStorageUrl, sogniWorkflowModel } from "../../../packages/plugins/media-studio/src/sogni.js";
+import { SogniProvider, assertSogniStorageUrl, sogniCanonicalModelId, sogniWorkflowModel } from "../../../packages/plugins/media-studio/src/sogni.js";
+import { classifyLoras, lorasForModel, madeForText, parseSogniLoraCatalog } from "@paperclipai/plugin-sdk/media";
 import {
   SOGNI_OFFLINE_MODELS,
   SogniCatalog,
   checkSogniLoras,
   checkSogniOverrides,
-  classifyLoras,
-  lorasForModel,
-  madeForText,
-  parseSogniLoraCatalog,
   parseSogniModelCatalog,
 } from "../../../packages/plugins/media-studio/src/sogni-catalog.js";
 
@@ -755,7 +752,7 @@ describe("Sogni's model and LoRA catalog", () => {
       sourceUrl: "https://civitai.com/models/2729908?modelVersionId=3068874",
     });
     expect(parsed.loras.find((l) => l.id === "krea2-realism-engine")!.needsFilterOff).toBe(true);
-    expect(lorasForModel(parsed, "krea-2-turbo").map((l) => l.id)).toEqual([
+    expect(lorasForModel(parsed, sogniCanonicalModelId("krea-2-turbo")).map((l) => l.id)).toEqual([
       "krea2-detail-enhancer",
       "krea2-warm-light",
       "krea2-candid",
@@ -1444,8 +1441,8 @@ describe("LoRA fit for a model (sogni-catalog classifyLoras)", () => {
   it("sorts each LoRA into fits / made for other models / can't tell", () => {
     const picks = [{ id: "krea2-candid" }, { id: "gone", name: "Gone" }];
     expect(classifyLoras({ id: "dark_beast_krea2_fp8", name: "Dark Beast KREA 2" }, picks, known, names).map((c) => c.fit)).toEqual(["fits", "unknown"]);
-    // A tool key is matched as its catalog id.
-    expect(classifyLoras({ id: "krea-2-turbo", name: "Krea 2 Turbo" }, picks, known, names)[0]!.fit).toBe("fits");
+    // The SDK takes catalog ids: callers turn a tool key into its catalog id first.
+    expect(classifyLoras({ id: sogniCanonicalModelId("krea-2-turbo"), name: "Krea 2 Turbo" }, picks, known, names)[0]!.fit).toBe("fits");
     const z = classifyLoras({ id: DARK_BEAST_V9, name: "Dark Beast Z-Image Turbo v9" }, picks, known, names);
     expect(z[0]).toMatchObject({ fit: "other-models", name: "Editorial <-> Candid" });
     expect(z[0]!.warning).toBe(
