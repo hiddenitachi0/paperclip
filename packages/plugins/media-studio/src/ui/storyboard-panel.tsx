@@ -276,6 +276,8 @@ export function StoryboardPanel(props: {
   onShotLook?: (shotId: string, pictureLookId: string | null) => void;
   /** Who is in each shot (from step 2's Cast), as plain labels such as "Maja (saved person)". */
   shotCast?: Record<string, string[]>;
+  /** The "Who is in each shot" confirm block, drawn above the picture tiles. */
+  castConfirm?: React.ReactNode;
 }) {
   const { base, summary, actions } = props;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -433,6 +435,8 @@ export function StoryboardPanel(props: {
           </span>
         </div>
       )}
+
+      {props.castConfirm}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(190px, 100%), 1fr))", gap: 10 }}>
         {sorted.map((shot) => {

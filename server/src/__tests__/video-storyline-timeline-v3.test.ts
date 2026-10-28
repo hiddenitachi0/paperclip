@@ -181,7 +181,7 @@ d("storyline timeline v3", () => {
       expect(row.errorMessage).toContain("Sogni API key");
     });
 
-    it("a re-render that cannot start pauses with the shot's reason", async () => {
+    it("a re-render that cannot start fails the shot with its reason and leaves the film as it was", async () => {
       const { companyId, storylineId, shotIds } = await seed();
       await markMade(shotIds[0]!, companyId);
       await markMade(shotIds[1]!, companyId);
@@ -191,7 +191,7 @@ d("storyline timeline v3", () => {
       });
       const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
       await expect(render.reRenderShot(companyId, storylineId, shotIds[1]!, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("enough credit") });
-      expect((await storylineRow(storylineId)).status).toBe("paused");
+      expect((await storylineRow(storylineId)).status).toBe("done");
       const shot = await shotRow(shotIds[1]!);
       expect(shot.status).toBe("failed");
       expect(shot.errorMessage).toContain("enough credit");
@@ -444,7 +444,8 @@ d("storyline timeline v3", () => {
           failFirst();
           expect(await firstOutcome).toMatchObject({ message: expect.stringContaining("did not start again") });
           expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
-          expect((await storylineRow(film.storylineId)).status).toBe("rendering");
+          // A re-render leaves the film's own status alone (DUR-4915), and the late failure must not touch it either.
+          expect((await storylineRow(film.storylineId)).status).toBe("ready_to_stitch");
           // C: still refused while B holds the shot.
           await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 409 });
           expect(stub.starts).toBe(2);
@@ -473,6 +474,56 @@ d("storyline timeline v3", () => {
           expect(stub.starts).toBe(0);
           expect(await runningJobs(film.storylineId)).toBe(0);
           expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+        });
+
+        it("a re-rendered shot (already queued by the caller) that ran out of time is put back to failed, never left queued, and nothing is sent", async () => {
+          const film = await seed({ shots: 1 });
+          await markMade(film.shotIds[0]!, film.companyId);
+          await db.update(videoStorylines).set({ status: "ready_to_stitch", spentCents: 40 }).where(eq(videoStorylines.id, film.storylineId));
+          let clock = new Date();
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          const render = videoStorylineRenderService(db, {
+            now: () => clock,
+            buildProvider: () => stub.provider,
+            resolveApiKey: async () => {
+              clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+              return "key";
+            },
+          });
+          await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ message: expect.stringContaining("took too long to get ready") });
+          expect(stub.starts).toBe(0);
+          expect(await runningJobs(film.storylineId)).toBe(0);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+          // Nothing is left to lock the film out: a fresh re-render is accepted and starts exactly once.
+          const fresh = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+          await fresh.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          expect(stub.starts).toBe(1);
+        });
+
+        it("a shot claimed by the start itself and then stopped by the deadline is put back (failed, not queued) with no paid call", async () => {
+          const film = await seed({ shots: 1 });
+          let clock = new Date();
+          let preparing = true;
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          // The deadline passes inside the claim write itself: the first clock read after the key lookup jumps the clock.
+          const render = videoStorylineRenderService(db, {
+            now: () => {
+              const read = clock;
+              if (!preparing) clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+              return read;
+            },
+            buildProvider: () => stub.provider,
+            resolveApiKey: async () => {
+              preparing = false;
+              return "key";
+            },
+          });
+          await expect(render.startRender(film.companyId, film.storylineId, ACTOR, {})).rejects.toMatchObject({ message: expect.stringContaining("took too long to get ready") });
+          expect(stub.starts).toBe(0);
+          expect(await runningJobs(film.storylineId)).toBe(0);
+          const shot = await shotRow(film.shotIds[0]!);
+          expect(shot.status).toBe("failed");
+          expect(shot.errorMessage).toContain("took too long to get ready");
         });
       });
     });
