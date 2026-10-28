@@ -393,7 +393,7 @@ d("storyline cast (database)", () => {
       expect(captured.videos).toHaveLength(1);
     });
 
-    it("re-render, preview and animate refuse an unconfirmed shot before any paid call; a re-render cannot start the film's chain either", async () => {
+    it("re-render, preview and animate refuse an unconfirmed shot before any paid call", async () => {
       const { companyId, storylineId, shotId, sceneId } = await seed();
       const second = await addShot(companyId, storylineId, sceneId, 1, "Maja leaves");
       const maja = await savedPerson(companyId, "maja");
@@ -406,16 +406,10 @@ d("storyline cast (database)", () => {
       // The shot itself is unconfirmed.
       await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
         status: 422,
-        message: expect.stringContaining("Confirm who is in shots 1 and 2 first."),
+        message: expect.stringContaining("Confirm who is in shot 1 first."),
       });
-      // Only the target is confirmed: the draft film would flip to rendering and chain into the unconfirmed shot, so still refused.
+      // Only the target is checked: a re-render queues that one shot and does not start the film's chain (DUR-4915).
       await storylines.setShotCast(companyId, storylineId, shotId, ["c1"], ACTOR);
-      await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
-        status: 422,
-        message: expect.stringContaining("Confirm who is in shot 2 first."),
-      });
-      const [draft] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
-      expect(draft!.status).not.toBe("rendering");
 
       // Preview needs the target shot confirmed, nothing else.
       await videoStorylineSettingsService(db).setAdvancedEnabled(companyId, true);
@@ -497,11 +491,6 @@ d("storyline cast (database)", () => {
       const added = await addShot(companyId, storylineId, sceneId, 1, "Maja waves goodbye");
       await approve(added);
       await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({
-        status: 422,
-        message: expect.stringContaining("Confirm who is in shot 2 first."),
-      });
-      // So is a re-render of the first shot, which would resume the chain into it.
-      await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
         status: 422,
         message: expect.stringContaining("Confirm who is in shot 2 first."),
       });
