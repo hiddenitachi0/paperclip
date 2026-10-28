@@ -434,6 +434,57 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
     expect(after.status).toBe(200);
     expect(uploadSlotsInUse("company-1")).toBe(0);
   });
+  it("F2: a client that goes away mid-upload gives back its upload slot and leaves nothing on disk", async () => {
+    const { createServer } = await import("node:http");
+    const { once } = await import("node:events");
+    const handled: string[] = [];
+    const server = express();
+    server.post("/upload", async (req, res) => {
+      try {
+        const file = await receiveCompanyFileUpload(req, res, limits, "company-gone");
+        handled.push("received");
+        await discardUpload(file);
+      } catch (err) {
+        handled.push(String(err));
+      }
+      if (!res.headersSent && !res.destroyed) res.status(499).end();
+    });
+    const http = createServer(server);
+    http.listen(0, "127.0.0.1");
+    await once(http, "listening");
+    try {
+      const { port } = http.address() as { port: number };
+      const boundary = "----paperclip-d18-test";
+      const head = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="film.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
+        "latin1",
+      );
+      const { request: httpRequest } = await import("node:http");
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: "/upload",
+        headers: { "content-type": `multipart/form-data; boundary=${boundary}`, "content-length": String(head.length + 4 * 1024 * 1024) },
+      });
+      req.on("error", () => undefined);
+      req.write(head);
+      req.write(fakeMp4(256 * 1024));
+      // Past the ordinary limit: it is being spooled and holds a slot.
+      await vi.waitFor(async () => {
+        expect(uploadSlotsInUse("company-gone")).toBe(1);
+        expect(await fs.readdir(workDir)).toHaveLength(1);
+      });
+      req.destroy();
+      await vi.waitFor(async () => {
+        expect(uploadSlotsInUse("company-gone")).toBe(0);
+        expect(await fs.readdir(workDir)).toEqual([]);
+      });
+      expect(handled).not.toContain("received");
+    } finally {
+      http.close();
+    }
+  });
 });
 
 describe("D18 security review F2: at most a few large uploads per company at once", () => {
