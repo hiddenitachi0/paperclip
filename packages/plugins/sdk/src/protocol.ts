@@ -1103,7 +1103,11 @@ export interface PluginMediaSetupLora {
   /** Explicit multiplier (never a percentage). */
   strength: number;
   name: string | null;
-  /** The id or link the provider takes ("h3-better-motion", "personal-...", or an https link on Fal). */
+  /**
+   * The id or link the provider takes ("h3-better-motion", "personal-...", or an
+   * https link on Fal). A link never comes with its query string or "#" part:
+   * a link with a key in it is never saved, and the rest stays on the board's pages.
+   */
   ref: string | null;
   source: "catalog" | "personal" | "url" | null;
   triggerWords: string[];
@@ -1151,6 +1155,7 @@ export interface PluginMediaLora {
   companyId: string;
   provider: "sogni" | "fal";
   source: "catalog" | "personal" | "url";
+  /** Sogni id, or an https link on Fal (never with its query string or "#" part). */
   ref: string;
   name: string;
   notes: string;
@@ -1175,7 +1180,7 @@ export interface PluginMediaProjectDefaults {
   defaultContinuityMode: "stills" | "keyframes";
 }
 
-/** A setup resolved on the host with the database: exactly what a run sends. */
+/** A setup resolved on the host with the database: exactly what a run sends (links without their query string). */
 export interface PluginMediaResolvedSetup {
   setupId: string;
   name: string;

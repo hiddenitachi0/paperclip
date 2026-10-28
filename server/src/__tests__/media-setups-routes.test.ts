@@ -407,6 +407,59 @@ d("media setup register routes", () => {
       expect(nsfwModel.body.matureReasons.join(" ")).toMatch(/made for mature pictures/);
     });
 
+    it("refuses a LoRA link with a key in it, and never shows agents or plugin workers a link's query string", async () => {
+      const companyId = await seedCompany();
+      const app = appFor({ board: [companyId] });
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      for (const ref of [
+        "https://civitai.com/api/download/models/123?token=sekret-123",
+        "https://civitai.com/api/download/models/123?type=Model&api_key=sekret-123",
+        "https://bucket.s3.amazonaws.com/motion.safetensors?X-Amz-Signature=sekret-123",
+      ]) {
+        const keyed = await request(app).post(`/api/companies/${companyId}/media/loras`).send({ provider: "fal", source: "url", ref, name: "Civitai motion", family: "wan21", contentTag: "sfw" });
+        expect(keyed.status, ref).toBe(422);
+        expect(keyed.body.error, ref).toMatch(/holds what looks like a key or password/);
+        expect(JSON.stringify(keyed.body), ref).not.toMatch(/sekret/);
+      }
+      expect((await db.select().from(mediaLoras).where(eq(mediaLoras.companyId, companyId))).some((row) => row.ref.includes("sekret"))).toBe(false);
+
+      const full = "https://civitai.com/api/download/models/123?type=Model&format=SafeTensor";
+      const bare = "https://civitai.com/api/download/models/123";
+      const link = await request(app).post(`/api/companies/${companyId}/media/loras`).send({ provider: "fal", source: "url", ref: full, name: "Civitai motion", family: "wan21", contentTag: "sfw" });
+      expect(link.status).toBe(201);
+      expect(link.body.ref).toBe(full);
+      const setup = await request(app)
+        .post(`/api/companies/${companyId}/media/setups`)
+        .send({ kind: "video", name: "Fal motion", provider: "fal", modelId: "fal-ai/wan-flf2v", loras: [{ loraId: link.body.id, strength: 1 }], params: { promptExpansion: false }, status: "approved" });
+      expect(setup.status).toBe(201);
+      expect(setup.body.loras[0].ref).toBe(full);
+
+      const agentReads = await Promise.all([
+        request(agent).get(`/api/companies/${companyId}/media/loras`),
+        request(agent).get(`/api/companies/${companyId}/media/loras/${link.body.id}`),
+        request(agent).get(`/api/companies/${companyId}/media/setups`),
+        request(agent).get(`/api/companies/${companyId}/media/setups/${setup.body.id}`),
+        request(agent).get(`/api/companies/${companyId}/media/setups/${setup.body.id}/resolve`),
+      ]);
+      for (const res of agentReads) expect(res.status).toBe(200);
+      expect(agentReads[1]!.body.ref).toBe(bare);
+      expect(agentReads[3]!.body.loras[0].ref).toBe(bare);
+      expect(agentReads[4]!.body).toMatchObject({ usable: true, loras: [expect.objectContaining({ ref: bare })] });
+      expect(JSON.stringify(agentReads.map((res) => res.body))).not.toMatch(/format=SafeTensor/);
+
+      // ctx.mediaLibrary, with and without approvedOnly.
+      const host = mediaLibraryHostService(db, (id) => id ?? companyId);
+      const workerReads = await Promise.all([
+        host.listLoras({ companyId }),
+        host.listSetups({ companyId }),
+        host.getSetup({ companyId, setupId: setup.body.id }),
+        host.resolve({ companyId, setupId: setup.body.id }),
+        host.resolve({ companyId, setupId: setup.body.id, approvedOnly: true }),
+      ]);
+      expect(workerReads[3]!.loras[0]!.ref).toBe(bare);
+      expect(JSON.stringify(workerReads)).toContain(bare);
+      expect(JSON.stringify(workerReads)).not.toMatch(/format=SafeTensor/);
+    });
   });
 
   describe("who may do what", () => {

@@ -24,6 +24,8 @@ import { mediaSetupsService } from "./media-setups.js";
  *   sets it on every path an agent drives.
  * - No write methods. The only write is the one-time starter seed, the same
  *   one the REST routes run on first use.
+ * - LoRA links come without their query string on every method (`plugin`
+ *   reader), as for agents: the worker hands what it reads to agent tools.
  */
 
 function toPluginSetup(setup: MediaModelSetup): PluginMediaSetup {
@@ -105,13 +107,13 @@ export function mediaLibraryHostService(db: Db, ensureCompanyId: (companyId?: st
     async listSetups(params) {
       const companyId = ensureCompanyId(params.companyId);
       const kind = params.kind === "image" || params.kind === "video" ? params.kind : undefined;
-      return (await setups.listSetups(companyId, { agent: params.approvedOnly === true }, { kind })).map(toPluginSetup);
+      return (await setups.listSetups(companyId, { agent: params.approvedOnly === true, plugin: true }, { kind })).map(toPluginSetup);
     },
     async getSetup(params) {
       const companyId = ensureCompanyId(params.companyId);
       // An archived setup is still returned by id (with its status), so a
       // worker can say so plainly; with approvedOnly only approved ones are.
-      const setup = await orNull(() => setups.getSetup(companyId, String(params.setupId ?? ""), { agent: params.approvedOnly === true }));
+      const setup = await orNull(() => setups.getSetup(companyId, String(params.setupId ?? ""), { agent: params.approvedOnly === true, plugin: true }));
       return setup ? toPluginSetup(setup) : null;
     },
     async getProjectDefaults(params) {
@@ -121,11 +123,11 @@ export function mediaLibraryHostService(db: Db, ensureCompanyId: (companyId?: st
     async listLoras(params) {
       const companyId = ensureCompanyId(params.companyId);
       // The usable ones only: archived and refused LoRAs never reach a worker.
-      return (await setups.listLoras(companyId, { agent: true })).map(toPluginLora);
+      return (await setups.listLoras(companyId, { agent: true, plugin: true })).map(toPluginLora);
     },
     async resolve(params) {
       const companyId = ensureCompanyId(params.companyId);
-      const resolved = await orNull(() => setups.resolveSetup(companyId, String(params.setupId ?? ""), { agent: params.approvedOnly === true }));
+      const resolved = await orNull(() => setups.resolveSetup(companyId, String(params.setupId ?? ""), { agent: params.approvedOnly === true, plugin: true }));
       return resolved ? toPluginResolved(resolved) : null;
     },
   };

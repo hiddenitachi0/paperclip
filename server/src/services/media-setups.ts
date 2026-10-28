@@ -11,6 +11,7 @@ import {
   checkMediaSetup,
   effectiveMediaLoraContentTag,
   inferMediaLoraFamily,
+  mediaLoraRefForAgents,
   pickMediaSetupParams,
   summarizeMediaSetupTrials,
   type CreateMediaLoraInput,
@@ -62,6 +63,8 @@ import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoSt
  * Content: every check uses the Media Studio safety module's rules
  * (media-content-rules.ts). A LoRA the module refuses in every film is never
  * saved or used; a storyline only takes setups its content rating allows.
+ * Agents and plugin workers see LoRA links without their query string, and a
+ * link with a key in it is never saved.
  *
  * Starters: on first use each company gets the D4 starter setups and the two
  * starter LoRAs, once (deleting them later does not bring them back). The
@@ -83,6 +86,13 @@ export interface MediaSetupsActor {
 /** Who is reading: agents only ever see approved setups and usable LoRAs. */
 export interface MediaSetupsReader {
   agent: boolean;
+  /** A plugin worker reading through ctx.mediaLibrary: LoRA links come without their query string, as for agents. */
+  plugin?: boolean;
+}
+
+/** Agents and plugin workers never see what follows the "?" in a LoRA link. */
+function hidesLinkQueries(reader: MediaSetupsReader): boolean {
+  return reader.agent || reader.plugin === true;
 }
 
 /** What happened to one storyline when the setup it uses changed. */
@@ -137,7 +147,7 @@ export function loraForCheck(row: LoraRow): MediaLoraForCheck {
   };
 }
 
-export function toMediaLoraView(row: LoraRow): MediaLora {
+export function toMediaLoraView(row: LoraRow, reader: MediaSetupsReader = { agent: false }): MediaLora {
   const lora = loraForCheck(row);
   const effective = effectiveMediaLoraContentTag(lora, mediaContentRules);
   const floor = mediaContentRules.loraFloor(lora);
@@ -146,7 +156,7 @@ export function toMediaLoraView(row: LoraRow): MediaLora {
     companyId: row.companyId,
     provider: row.provider as MediaLoraProvider,
     source: row.source as MediaLoraSource,
-    ref: row.ref,
+    ref: hidesLinkQueries(reader) ? mediaLoraRefForAgents(lora) : row.ref,
     name: row.name,
     notes: row.notes,
     triggerWords: row.triggerWords,
@@ -390,7 +400,7 @@ export function mediaSetupsService(db: Db) {
     return out;
   }
 
-  function toSetupView(row: SetupRow, lib: ReadonlyMap<string, MediaLoraForCheck>, trials: TrialRow[]): MediaModelSetup {
+  function toSetupView(row: SetupRow, lib: ReadonlyMap<string, MediaLoraForCheck>, trials: TrialRow[], reader: MediaSetupsReader): MediaModelSetup {
     const check = checkMediaSetup(setupForCheck(row), lib, mediaContentRules);
     const billing: MediaBillingCoverage = check.billing;
     return {
@@ -410,7 +420,7 @@ export function mediaSetupsService(db: Db) {
           loraId: pick.loraId,
           strength: pick.strength,
           name: lora?.name ?? null,
-          ref: lora?.ref ?? null,
+          ref: lora ? (hidesLinkQueries(reader) ? mediaLoraRefForAgents(lora) : lora.ref) : null,
           source: lora?.source ?? null,
           triggerWords: lora?.triggerWords ?? [],
           contentTag: lora ? effectiveMediaLoraContentTag(lora, mediaContentRules) : null,
@@ -465,24 +475,24 @@ export function mediaSetupsService(db: Db) {
       .where(and(...conditions))
       .orderBy(desc(mediaModelSetups.favorite), asc(mediaModelSetups.createdAt), asc(mediaModelSetups.name));
     const [lib, trials] = await Promise.all([library(companyId), trialsBySetup(companyId, rows.map((r) => r.id))]);
-    return rows.map((row) => toSetupView(row, lib, trials.get(row.id) ?? []));
+    return rows.map((row) => toSetupView(row, lib, trials.get(row.id) ?? [], reader));
   }
 
   async function getSetup(companyId: string, setupId: string, reader: MediaSetupsReader): Promise<MediaModelSetup> {
     const row = await getSetupRow(companyId, setupId, reader);
     const [lib, trials] = await Promise.all([library(companyId), trialsBySetup(companyId, [row.id])]);
-    return toSetupView(row, lib, trials.get(row.id) ?? []);
+    return toSetupView(row, lib, trials.get(row.id) ?? [], reader);
   }
 
   async function listLoras(companyId: string, reader: MediaSetupsReader, opts: { includeArchived?: boolean } = {}): Promise<MediaLora[]> {
     await ensureStarters(companyId);
-    const views = (await loraRows(companyId)).map(toMediaLoraView);
+    const views = (await loraRows(companyId)).map((row) => toMediaLoraView(row, reader));
     if (reader.agent) return views.filter((lora) => !lora.archivedAt && lora.effectiveContentTag !== "refused");
     return opts.includeArchived ? views : views.filter((lora) => !lora.archivedAt);
   }
 
   async function getLora(companyId: string, loraId: string, reader: MediaSetupsReader): Promise<MediaLora> {
-    const view = toMediaLoraView(await getLoraRow(companyId, loraId));
+    const view = toMediaLoraView(await getLoraRow(companyId, loraId), reader);
     if (reader.agent && (view.archivedAt || view.effectiveContentTag === "refused")) throw notFound(LORA_NOT_FOUND);
     return view;
   }
@@ -506,7 +516,9 @@ export function mediaSetupsService(db: Db) {
       family: row.family ?? check.family,
       loras: (row.loras ?? []).flatMap((pick) => {
         const lora = lib.get(pick.loraId);
-        return lora ? [{ loraId: lora.id, ref: lora.ref, source: lora.source, name: lora.name ?? lora.ref, strength: pick.strength, triggerWords: lora.triggerWords }] : [];
+        if (!lora) return [];
+        const ref = hidesLinkQueries(reader) ? mediaLoraRefForAgents(lora) : lora.ref;
+        return [{ loraId: lora.id, ref, source: lora.source, name: lora.name || ref, strength: pick.strength, triggerWords: lora.triggerWords }];
       }),
       triggerWords: check.triggerWords,
       // Only the allowed settings reach a run: never a provider safety switch (plan 2.10).

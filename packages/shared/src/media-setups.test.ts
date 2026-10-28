@@ -7,6 +7,8 @@ import {
   createMediaSetupSchema,
   createMediaSetupTrialSchema,
   effectiveMediaLoraContentTag,
+  mediaLoraLinkSecretParams,
+  mediaLoraRefForAgents,
   mediaModelCapability,
   mediaSetupParamProblems,
   pickMediaSetupParams,
@@ -235,6 +237,75 @@ describe("media setups: LoRA library rules", () => {
     expect(checkMediaLoraFields({ ...base, provider: "fal", source: "url", ref: "https://u:p@civitai.com/x" }).join(" ")).toMatch(/https/);
     expect(checkMediaLoraFields({ ...base, provider: "fal", source: "url", ref: "https://civitai.com/api/download/models/1" })).toEqual([]);
     expect(checkMediaLoraFields({ ...base, strengthDefault: 2 }).join(" ")).toMatch(/above the highest/);
+  });
+});
+
+describe("media setups: LoRA links never carry a key", () => {
+  const fal = {
+    provider: "fal" as const,
+    source: "url" as const,
+    name: "Link",
+    contentTag: "sfw" as const,
+    providerNsfw: false,
+    providerSexual: false,
+    strengthMin: null,
+    strengthMax: null,
+    strengthDefault: 1,
+    recommendedMin: null,
+    recommendedMax: null,
+  };
+
+  it("refuses a link whose query string or # part holds a key, token, password or signature", () => {
+    const links = [
+      "https://civitai.com/api/download/models/123?token=abc123secret",
+      "https://civitai.com/api/download/models/123?type=Model&Token=abc",
+      "https://example.com/l.safetensors?key=abc",
+      "https://example.com/l.safetensors?api_key=abc",
+      "https://example.com/l.safetensors?apiKey=abc",
+      "https://example.com/l.safetensors?x-api-key=abc",
+      "https://example.com/l.safetensors?access_token=abc",
+      "https://example.com/l.safetensors?auth=abc",
+      "https://example.com/l.safetensors?Authorization=Bearer%20abc",
+      "https://example.com/l.safetensors?sig=abc&se=2026-01-01",
+      "https://bucket.s3.amazonaws.com/l.safetensors?X-Amz-Credential=a&X-Amz-Signature=b",
+      "https://storage.googleapis.com/b/l.safetensors?X-Goog-Signature=abc",
+      "https://example.com/l.safetensors?password=abc",
+      "https://example.com/l.safetensors?secret=abc",
+      "https://example.com/l.safetensors?session_id=abc",
+      "https://example.com/l.safetensors#access_token=abc",
+      "https://example.com/l.safetensors?%74oken=abc",
+    ];
+    for (const ref of links) {
+      expect(mediaLoraLinkSecretParams(ref).length, ref).toBeGreaterThan(0);
+      const problems = checkMediaLoraFields({ ...fal, ref });
+      expect(problems.join(" "), ref).toMatch(/holds what looks like a key or password/);
+      // The message names the part, never its value.
+      expect(problems.join(" "), ref).not.toMatch(/abc/);
+    }
+  });
+
+  it("keeps links whose query string holds no key", () => {
+    for (const ref of [
+      "https://civitai.com/api/download/models/123?type=Model&format=SafeTensor",
+      "https://huggingface.co/acme/motion/resolve/main/motion.safetensors?download=true",
+      "https://huggingface.co/acme/motion/blob/main/motion.safetensors#L10",
+    ]) {
+      expect(mediaLoraLinkSecretParams(ref), ref).toEqual([]);
+      expect(checkMediaLoraFields({ ...fal, ref }), ref).toEqual([]);
+    }
+  });
+
+  it("refuses a setup that uses a stored link with a key", () => {
+    const stored = lora({ provider: "fal", source: "url", ref: "https://civitai.com/api/download/models/1?token=abc", name: "Old link", family: null, compatibleModelIds: [] });
+    const result = checkMediaSetup(setup({ provider: "fal", modelId: "fal-ai/wan-flf2v", loras: [{ loraId: stored.id, strength: 1 }] }), library(stored));
+    expect(result.problems.join(" ")).toMatch(/link of the LoRA "Old link" holds what looks like a key/);
+  });
+
+  it("shows agents a link without its query string or # part", () => {
+    expect(mediaLoraRefForAgents({ source: "url", ref: "https://civitai.com/api/download/models/1?type=Model&format=SafeTensor" })).toBe("https://civitai.com/api/download/models/1");
+    expect(mediaLoraRefForAgents({ source: "url", ref: "https://user@huggingface.co/a/b.safetensors#x" })).toBe("https://huggingface.co/a/b.safetensors");
+    expect(mediaLoraRefForAgents({ source: "url", ref: "not a link?token=x" })).toBe("not a link");
+    expect(mediaLoraRefForAgents({ source: "catalog", ref: "h3-better-motion" })).toBe("h3-better-motion");
   });
 });
 

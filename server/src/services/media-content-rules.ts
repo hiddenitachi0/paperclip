@@ -1,5 +1,5 @@
 import { evaluateLora, evaluateModel, type LoraPolicyInput } from "@paperclipai/plugin-sdk/media";
-import { type MediaContentRules, type MediaLoraContentFloor, type MediaLoraRuleInput } from "@paperclipai/shared";
+import { mediaLoraRefForAgents, type MediaContentRules, type MediaLoraContentFloor, type MediaLoraRuleInput } from "@paperclipai/shared";
 
 /**
  * The content rules for model setups and the LoRA library: the Media Studio
@@ -24,7 +24,8 @@ import { type MediaContentRules, type MediaLoraContentFloor, type MediaLoraRuleI
 function loraPolicyInput(lora: MediaLoraRuleInput): LoraPolicyInput {
   return {
     id: lora.ref.trim(),
-    name: lora.name?.trim() || lora.ref.trim(),
+    // The module names the LoRA in its messages: never show a link's query string.
+    name: lora.name?.trim() || mediaLoraRefForAgents(lora),
     nsfw: lora.providerNsfw === true,
     sexual: lora.providerSexual === true,
     // Honoured by the module only for ids that start with "personal-".

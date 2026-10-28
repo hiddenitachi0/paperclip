@@ -23,6 +23,8 @@ import { z } from "zod";
  *   - Params come from an allow-list (MEDIA_SETUP_PARAM_KEYS): a setup never
  *     carries a provider safety switch, so it can never turn a filter off.
  *   - A video setup may only use Fal or Sogni (the storyline CHECKs).
+ *   - A LoRA link never holds a key, token or signature, and agents only see
+ *     links without their query string (mediaLoraRefForAgents).
  *
  * The content rules are the Media Studio safety module's (`evaluateLora` and
  * `evaluateModel` in @paperclipai/plugin-sdk/media), the same rules every film
@@ -343,6 +345,65 @@ export function effectiveMediaLoraContentTag(lora: MediaLoraRuleInput & { conten
   return lora.contentTag;
 }
 
+// ─── LoRA links ──────────────────────────────────────────────────────────────
+
+// Query (or #) parameters that carry a key, token, password or signature:
+// Civitai ?token=, ?api_key=, signed S3/GCS links (X-Amz-Signature,
+// X-Amz-Credential, X-Goog-Signature), Azure SAS sig=, ... Matched on the
+// name with case and anything but letters and digits ignored, so "Api-Key",
+// "api_key" and "apiKey" are the same. Refusing too much only means a person
+// removes a harmless part of the link.
+const LINK_SECRET_NAMES: ReadonlySet<string> = new Set(["key", "sig", "pass", "pwd", "jwt", "bearer", "hmac"]);
+const LINK_SECRET_PARTS: readonly string[] = ["token", "apikey", "secret", "signature", "password", "passwd", "credential", "auth", "session"];
+
+function isSecretParamName(name: string): boolean {
+  const squashed = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return LINK_SECRET_NAMES.has(squashed) || squashed.endsWith("key") || LINK_SECRET_PARTS.some((part) => squashed.includes(part));
+}
+
+/** The names of a link's parameters (after "?" or "#") that look like a key, token, password or signature; empty when none do. */
+export function mediaLoraLinkSecretParams(link: string): string[] {
+  let url: URL;
+  try {
+    url = new URL(link);
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const params of [url.searchParams, new URLSearchParams(url.hash.replace(/^#/, ""))]) {
+    for (const name of params.keys()) if (isSecretParamName(name)) names.add(name);
+  }
+  return [...names];
+}
+
+function linkSecretProblem(names: string[]): string {
+  const shown = names
+    .slice(0, 3)
+    .map((name) => `"${name.slice(0, 40)}"`)
+    .join(", ");
+  return (
+    `The LoRA link holds what looks like a key or password (${shown}, after the "?" or "#"). ` +
+    "Agents can see LoRA links, so a link must never carry one. Remove that part and save the link again. " +
+    "A LoRA that can only be downloaded with a key cannot be added as a link yet."
+  );
+}
+
+/**
+ * A LoRA's ref as agents and plugin workers see it: a link without its query
+ * string or "#" part (and without any user name); Sogni ids as they are. A
+ * link with a key is refused when it is saved, and what is left after the
+ * "?" still only shows on the board's own pages.
+ */
+export function mediaLoraRefForAgents(lora: { source: MediaLoraSource | string; ref: string }): string {
+  if (lora.source !== "url") return lora.ref;
+  try {
+    const url = new URL(lora.ref);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return lora.ref.split(/[?#]/, 1)[0] ?? "";
+  }
+}
+
 /** Strength bounds for a LoRA: its own scale when known, else the provider's usual one. */
 export function mediaLoraStrengthBounds(lora: {
   provider: MediaLoraProvider;
@@ -518,6 +579,9 @@ export function checkMediaLoraFields(lora: {
     }
     if (!url || url.protocol !== "https:" || url.username || url.password || !url.hostname.includes(".")) {
       problems.push("The LoRA link must be a plain https link (no user name or password in it).");
+    } else {
+      const secrets = mediaLoraLinkSecretParams(lora.ref);
+      if (secrets.length > 0) problems.push(linkSecretProblem(secrets));
     }
   }
   const min = lora.strengthMin;
@@ -601,11 +665,16 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
       problems.push("A picked LoRA is not in this company's LoRA library (it may have been archived or deleted). Pick LoRAs from the library.");
       continue;
     }
-    const label = lora.name?.trim() || lora.ref;
+    const label = lora.name?.trim() || mediaLoraRefForAgents(lora);
     const floor = rules.loraFloor(lora);
     const tag = effectiveMediaLoraContentTag(lora, rules);
     if (tag === "refused") {
       problems.push(floor?.tag === "refused" ? `${floor.reason} Remove it.` : `The LoRA "${label}" is refused and can never be used. Remove it.`);
+      continue;
+    }
+    // A link saved before keys in links were refused (or written outside the API).
+    if (lora.source === "url" && mediaLoraLinkSecretParams(lora.ref).length > 0) {
+      problems.push(`The link of the LoRA "${label}" holds what looks like a key or password. Add the LoRA again with a link without it, and use that one.`);
       continue;
     }
     if (lora.provider !== setup.provider) {

@@ -284,6 +284,10 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   `@paperclipai/plugin-sdk/media`, applied by `server/src/services/media-content-rules.ts`): a LoRA it refuses in
   every film (filter bypass in any spelling, age sliders such as `krea2-age`) can never be saved or used, a part it
   holds mature rates the setup mature, and a safe-for-work storyline only takes setups rated safe for work.
+- A LoRA link (Fal) whose query string or `#` part carries a key, token, password or signature (`?token=`,
+  `api_key`, `sig`, `X-Amz-Signature`, ...) is refused with a plain message, so no key is ever stored. Agents and
+  plugin workers (`ctx.mediaLibrary`) only ever get a link without its query string; the full link stays on the
+  board's own pages.
 - The worker reads them through `ctx.mediaLibrary` (capability `media.library.read`, read-only): `listSetups`,
   `getSetup`, `getProjectDefaults`, `listLoras` and `resolve` (checked on the server against the company's own
   LoRAs). Pass `approvedOnly: true` on every path an agent drives. The Create tab, tools and Identities are moved
