@@ -402,9 +402,20 @@ export const updateVideoShotSchema = z
     transitionIn: shotFields.transitionIn,
     /** This shot's own look for its storyboard picture (a look id, "none", or null to use the storyline's). */
     pictureLookId: z.string().trim().min(1).max(100).nullable(),
+    /**
+     * Pin this one shot to its own video service ("keep this shot on X"); null = follow the film's service
+     * and model again. `model` only goes with a service (null = that service's default, or the film's model
+     * when it is the same service).
+     */
+    providerId: storylineFields.providerId.nullable(),
+    model: storylineFields.model,
   })
   .partial()
-  .strict();
+  .strict()
+  .refine((value) => value.model == null || value.providerId != null, {
+    message: "Pick a video service to keep this shot on before naming a model.",
+    path: ["model"],
+  });
 export type UpdateVideoShotInput = z.infer<typeof updateVideoShotSchema>;
 
 export const startVideoStorylineRenderSchema = z
