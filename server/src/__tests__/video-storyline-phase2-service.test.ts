@@ -56,7 +56,7 @@ vi.mock("../storage/index.ts", () => ({
   }),
 }));
 
-const video = vi.hoisted(() => ({ starts: [] as Array<Record<string, unknown>>, keys: [] as string[], failStart: false }));
+const video = vi.hoisted(() => ({ starts: [] as Array<Record<string, unknown>>, keys: [] as string[], failStart: false, flaggedPoll: false, falCalls: [] as Array<Record<string, unknown>> }));
 vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/video-provider-clients.ts")>();
   class Stub {
@@ -72,6 +72,7 @@ vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
       return { externalId: `job-${video.starts.length}`, model: String(input.model ?? "default"), provider: this.name };
     }
     async poll() {
+      if (video.flaggedPoll) return { status: "failed" as const, error: "Fal's own safety check flagged this clip.", flagged: true };
       return { status: "done" as const, result: { contentType: "video/mp4", dataUrl: `data:video/mp4;base64,${Buffer.from("animated").toString("base64")}` } };
     }
     async cancel() {}
@@ -140,7 +141,12 @@ vi.mock("../services/video-quality-check.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/video-quality-check.ts")>()),
   runVideoQualityCheck: async () => ({ passed: true, issues: [] }),
 }));
-vi.mock("../services/fal-cost-events.ts", () => ({ recordFalCostEvent: async () => null }));
+vi.mock("../services/fal-cost-events.ts", () => ({
+  recordFalCostEvent: async (_db: unknown, _fetch: unknown, params: Record<string, unknown>) => {
+    video.falCalls.push(params);
+    return null;
+  },
+}));
 
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
@@ -195,6 +201,8 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     video.starts.length = 0;
     video.keys.length = 0;
     video.failStart = false;
+    video.flaggedPoll = false;
+    video.falCalls.length = 0;
     ff.normalizeCalls.length = 0;
     ff.titles.length = 0;
     ff.music.length = 0;
@@ -462,6 +470,30 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     expect(afterDone!.spentCents).toBe(settled!.costCents);
     const [shot] = await db.select().from(videoShots).where(eq(videoShots.id, film.shotId));
     expect(shot).toMatchObject({ clipKind: "generated", status: "done", sourceUploadId: film.uploadId });
+  });
+
+  it("a clip Fal's own check flagged is refused but its held money is settled at the cost, not released (DUR-4898 F1)", async () => {
+    const film = await photoFilm();
+    const clips = videoStorylineClipsService(db, { modelOptions: { createModelClient: fakeModel('{"peopleShown": false, "apparentAdult": null}').createModelClient } });
+    await clips.animate(film.companyId, film.storylineId, film.shotId, { prompt: "Waves roll in", confirmCostCents: film.quote }, ACTOR);
+    video.flaggedPoll = true;
+    await videoStorylineRenderService(db).tick();
+
+    const [shot] = await db.select().from(videoShots).where(eq(videoShots.id, film.shotId));
+    // Never a finished clip: no result, nothing to chain from.
+    expect(shot).toMatchObject({ status: "failed", resultObjectKey: null });
+    // The hold is settled at the cost (as a finished clip would be), not released to 0: spentCents keeps counting it.
+    const [spend] = await db.select().from(videoMediaSpend).where(eq(videoMediaSpend.shotId, film.shotId));
+    expect(spend!.status).toBe("settled");
+    expect(spend!.costCents).toBeGreaterThan(0);
+    const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, film.storylineId));
+    expect(storyline!.spentCents).toBe(spend!.costCents);
+    // (recordFalCostEvent is stubbed here, so the monthly ledger row still holds the quote; it was not released.)
+    expect(await videoStorylineFootageService(db).monthlySpentCents(film.companyId)).toBe(film.quote);
+    // The Fal bill was recorded against the held ledger row.
+    const mine = video.falCalls.filter((c) => c.companyId === film.companyId);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ billingCode: "video-storyline-shot", settleBillingCode: expect.any(String) });
   });
 
   it("refuses to animate past the film's budget or the company's monthly cap, and gives nothing away when the service fails to start", async () => {

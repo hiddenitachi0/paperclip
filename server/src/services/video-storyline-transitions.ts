@@ -1117,6 +1117,41 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (released) await releaseStorylineMediaSpend(db, take.companyId, storylineTransitionSpendCode(take.id));
   }
 
+  /**
+   * Fal's own check flagged a finished transition clip: it is thrown away (never stored, approved or chained), but
+   * Fal bills the request. Record the real cost, settle the held money at it and keep it counted in spentCents,
+   * instead of releasing it to 0 (DUR-4898, security review F1).
+   */
+  async function failFlaggedTake(take: TakeRow, storyline: StorylineRow, message: string, apiKey: string): Promise<void> {
+    const recorded = await recordFalCostEvent(db, storylineSafeFetch, {
+      companyId: take.companyId,
+      apiKey,
+      agentId: storyline.createdByAgentId,
+      createdByUserId: take.createdByUserId ?? (storyline.createdByAgentId ? null : storyline.createdByUserId),
+      model: take.model,
+      usage: { seconds: Math.round(take.durationMs / 1000) },
+      estimateCents: take.reservedCents,
+      billingCode: "video-storyline-transition",
+      settleBillingCode: storylineTransitionSpendCode(take.id),
+    });
+    const costCents = recorded?.costCents ?? take.reservedCents;
+    await withCompanyScope(db, take.companyId, async (tx) => {
+      const [current] = await tx.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.id, take.id)).for("update");
+      if (!current || current.status !== "generating") return;
+      await tx
+        .update(videoTransitionTakes)
+        .set({ status: "failed", error: message.slice(0, 1_000), costCents, completedAt: nowOf(), updatedAt: nowOf() })
+        .where(eq(videoTransitionTakes.id, take.id));
+      const delta = costCents - current.reservedCents;
+      if (delta !== 0) {
+        await tx
+          .update(videoStorylines)
+          .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} + ${delta})`, updatedAt: nowOf() })
+          .where(eq(videoStorylines.id, take.storylineId));
+      }
+    });
+  }
+
   async function useTake(companyId: string, storylineId: string, transitionId: string, takeId: string, actor: VideoStorylineActor): Promise<VideoTransitionSummary> {
     await settings.assertAdvancedEnabled(companyId);
     const row = await getRow(companyId, storylineId, transitionId);
@@ -1301,7 +1336,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
           continue;
         }
         if (outcome.status === "failed") {
-          await failTake(take, outcome.error);
+          if (outcome.flagged && take.provider === "fal") await failFlaggedTake(take, storyline, outcome.error, apiKey);
+          else await failTake(take, outcome.error);
           failed += 1;
           continue;
         }

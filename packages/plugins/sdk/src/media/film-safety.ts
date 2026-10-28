@@ -139,3 +139,50 @@ export function falResultFlagged(result: unknown): boolean {
 }
 
 export const FAL_FLAGGED_MESSAGE = "Fal's own safety check flagged this picture, so it was thrown away. Describe it more gently and try again.";
+
+/** What a flagged Fal result used, so the caller can still record what Fal bills for it. */
+export interface FalFlaggedUsage {
+  images: number;
+  /** Total size of the flagged pictures, when Fal reported it (per-megapixel pricing). */
+  megapixels?: number;
+}
+
+/**
+ * A Fal result its own safety check flagged. The picture is thrown away (never
+ * stored, approved or chained), but Fal still bills the request: whoever
+ * catches this MUST record `usage` as a cost before refusing, never release
+ * the money it held (DUR-4898, security review F1).
+ */
+export class FalFlaggedError extends Error {
+  readonly falFlagged = true as const;
+  constructor(
+    readonly model: string,
+    readonly usage: FalFlaggedUsage,
+    message: string = FAL_FLAGGED_MESSAGE,
+  ) {
+    super(message);
+    this.name = "FalFlaggedError";
+  }
+}
+
+/** Whether an error is a flagged Fal result. By shape as well as class, so a second copy of this module still matches. */
+export function isFalFlaggedError(err: unknown): err is FalFlaggedError {
+  if (err instanceof FalFlaggedError) return true;
+  if (!err || typeof err !== "object") return false;
+  const e = err as { falFlagged?: unknown; model?: unknown; usage?: unknown };
+  return e.falFlagged === true && typeof e.model === "string" && !!e.usage && typeof e.usage === "object";
+}
+
+/** The usage of a flagged picture result: how many pictures, and their size when Fal said. */
+export function falFlaggedUsage(result: unknown): FalFlaggedUsage {
+  const images = (result as { images?: unknown } | null)?.images;
+  const list = Array.isArray(images) ? (images as Array<{ width?: unknown; height?: unknown }>) : [];
+  const count = Math.max(1, list.length);
+  let megapixels = 0;
+  let sized = list.length > 0;
+  for (const image of list) {
+    if (typeof image?.width === "number" && typeof image?.height === "number") megapixels += (image.width * image.height) / 1_000_000;
+    else sized = false;
+  }
+  return { images: count, ...(sized && megapixels > 0 ? { megapixels } : {}) };
+}

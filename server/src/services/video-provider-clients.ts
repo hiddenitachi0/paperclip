@@ -85,7 +85,8 @@ export interface MediaJobHandle {
 export type MediaPollOutcome =
   | { status: "running"; progress?: string }
   | { status: "done"; result: MediaJobResult }
-  | { status: "failed"; error: string };
+  /** `flagged`: Fal's own safety check threw the result away. Fal still bills it, so the caller records the cost instead of releasing the money it held. */
+  | { status: "failed"; error: string; flagged?: boolean };
 
 export interface MediaJobResult {
   contentType: string;
@@ -165,7 +166,7 @@ async function falQueuePoll(fetchImpl: FetchImpl, apiKey: string, handle: MediaJ
   if (!resultRes.ok) return { status: "failed", error: `fal.ai finished but the result could not be fetched (${resultRes.status}).` };
   const result = (await resultRes.json()) as Record<string, unknown>;
   // Fal's own check flagged the clip: a failure. It never becomes a finished shot, so nothing is chained from it.
-  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE.replace("picture", "clip") };
+  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE.replace("picture", "clip"), flagged: true };
   const media = result.video as { url?: string; content_type?: string } | undefined;
   if (!media?.url) return { status: "failed", error: "fal.ai finished but sent nothing back. Try again." };
   if (!/^https:\/\//i.test(media.url)) return { status: "failed", error: "fal.ai gave an address that is not https, so it was not used." };

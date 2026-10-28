@@ -26,7 +26,7 @@
 // Kept deliberately identical in behavior to the plugin's copies; mirror any
 // change to providers.ts's FalProvider / audio.ts's FalAudioProvider here.
 
-import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
+import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -110,7 +110,8 @@ export class FalDirectPictureProvider {
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }>; seed?: number };
-    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
+    // Fal still bills a flagged picture: the error carries the usage so the caller records the cost before refusing.
+    if (falResultFlagged(data)) throw new FalFlaggedError(model, falFlaggedUsage(data));
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);

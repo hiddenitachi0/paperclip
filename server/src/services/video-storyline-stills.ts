@@ -16,7 +16,7 @@ import {
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { personalLoraNeedsFilterOff, SogniLoraCatalogCache } from "@paperclipai/plugin-sdk/media";
+import { isFalFlaggedError, personalLoraNeedsFilterOff, SogniLoraCatalogCache } from "@paperclipai/plugin-sdk/media";
 import {
   FalImageProvider,
   SOGNI_STILL_DEFAULT_MODEL,
@@ -379,6 +379,20 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       const aspect = storyline.aspect === "9:16" || storyline.aspect === "1:1" || storyline.aspect === "16:9" ? storyline.aspect : undefined;
       imageResult = await provider.generate(aspect ? { ...input, aspect } : input);
     } catch (err) {
+      // Fal's own check flagged the picture: it is thrown away (never stored, approved or chained), but Fal still
+      // bills the request, so its cost is recorded before the refusal (DUR-4898, security review F1).
+      if (isFalFlaggedError(err) && target.providerId === "fal") {
+        await recordFalCostEvent(db, safeImageFetch, {
+          companyId,
+          apiKey,
+          agentId: actor.agentId,
+          createdByUserId: actor.agentId ? null : actor.actorId,
+          model: err.model,
+          usage: err.usage,
+          estimateCents: estimate.estimatedTotalCents,
+          billingCode: "video-storyline-still",
+        });
+      }
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     const { buffer, contentType } = await downloadImageBytes(imageResult);

@@ -116,6 +116,8 @@ interface Fake {
   workflowArtifacts: number;
   editedPicture: Buffer;
   falStatus: string;
+  /** The next fal.run picture answer is one Fal's own safety check flagged. */
+  falFlagged?: boolean;
 }
 
 async function setup(config: Record<string, unknown> = {}): Promise<{ harness: TestHarness; fake: Fake }> {
@@ -185,7 +187,7 @@ async function setup(config: Record<string, unknown> = {}): Promise<{ harness: T
       if (u.pathname.endsWith("/status")) return json(200, { status: fake.falStatus });
       return json(200, { lora_file: { url: "https://v3.fal.media/files/lora.safetensors" }, config_file: { url: "https://v3.fal.media/files/c.json" } });
     }
-    if (u.host === "fal.run") return json(200, { images: [{ url: "https://v3.fal.media/files/placed.png", content_type: "image/png" }] });
+    if (u.host === "fal.run") return json(200, { images: [{ url: "https://v3.fal.media/files/placed.png", content_type: "image/png", width: 1000, height: 1000 }], ...(fake.falFlagged ? { has_nsfw_concepts: [true] } : {}) });
     if (u.host === "v3.fal.media") return new Response(new Uint8Array(fake.editedPicture), { status: 200, headers: { "Content-Type": "image/png" } });
     // Hugging Face.
     if (u.host === "huggingface.co") {
@@ -806,6 +808,19 @@ describe("training set: generate anywhere, keep provenance, mix batches", () => 
     const res = await harness.performAction<any>("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner);
     expect(res.candidates[0]).toMatchObject({ service: "fal", model: "fal-ai/flux-2-pro/edit", kind: "portrait" });
     expect(fake.calls.some((c) => c.url === "https://fal.run/fal-ai/flux-2-pro/edit")).toBe(true);
+  });
+
+  it("a candidate Fal's own check flagged is refused but its reserved spend is settled at the Fal price, not given back (DUR-4898 F1)", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    fake.falFlagged = true;
+    const release = vi.spyOn(harness.ctx.billing, "releaseMediaStudioDirectSpend");
+    const settle = vi.spyOn(harness.ctx.billing, "settleMediaStudioDirectSpend");
+    await expect(
+      harness.performAction("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner),
+    ).rejects.toThrow(/safety check flagged/);
+    expect(release).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ endpointId: "fal-ai/flux-2-pro/edit", usage: { images: 1, megapixels: 1 } }));
   });
 
   it("downloads the ticked pictures as a zip with captions and a README of where each came from", async () => {

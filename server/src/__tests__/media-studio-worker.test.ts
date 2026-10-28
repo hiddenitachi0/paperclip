@@ -189,6 +189,27 @@ describe("media-studio consistency: seed and reference pictures", () => {
     expect(withoutSeed.content).toContain("Seed: 987");
   });
 
+  it("a picture Fal's own check flagged is refused and not saved, but the agent's cost is recorded first (DUR-4898 F1)", async () => {
+    const harness = await setup(FAL_CONFIG);
+    harness.ctx.http.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ images: [{ url: "https://v3.fal.media/files/black.jpg", width: 1024, height: 768 }], has_nsfw_concepts: [true] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as typeof harness.ctx.http.fetch;
+    const record = vi.fn(async () => ({}));
+    (harness.ctx as any).billing = { ...(harness.ctx as any).billing, recordAgentMediaCost: record };
+    const createFile = vi.spyOn(harness.ctx.files, "createCompanyFile");
+
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa" }, runCtx);
+
+    expect(result.error).toMatch(/safety check flagged/);
+    expect(createFile).not.toHaveBeenCalled();
+    // Fal still bills it: the cost is on the agent's books, priced for the picture's size.
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ runId: RUN, kind: "image", provider: "fal", model: "fal-ai/flux/schnell", usage: { images: 1, megapixels: 1024 * 768 / 1_000_000 } }));
+  });
+
   it("accepts a seed the model sent as text", async () => {
     const harness = await setup(FAL_CONFIG);
     const calls = fakeFal(harness);

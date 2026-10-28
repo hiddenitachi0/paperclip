@@ -3,6 +3,7 @@ import {
   SAFE_FOR_WORK_AVOID,
   classifyLoras,
   evaluateLora,
+  isFalFlaggedError,
   personalLoraNeedsFilterOff,
   lorasForModel,
   madeForText,
@@ -206,6 +207,24 @@ async function runGeneration(
   const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
   ctx.logger.info(`media-studio: generating via ${impl.name}`);
   return impl.generate(input);
+}
+
+/**
+ * An agent's picture. When Fal's own safety check flags it, the picture is thrown away but Fal still bills the
+ * request, so its cost is recorded against the agent before the error goes on (DUR-4898, security review F1).
+ */
+async function runAgentGeneration(
+  ctx: PluginContext,
+  input: GenerationInput,
+  runCtx: { companyId: string; runId: string },
+  issueId: string | null,
+): Promise<GenerationResult> {
+  try {
+    return await runGeneration(ctx, input, runCtx.companyId, runCtx);
+  } catch (err) {
+    if (isFalFlaggedError(err)) await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: "fal", model: err.model, usage: err.usage, issueId });
+    throw err;
+  }
 }
 
 /** A whole number 0..MAX_SEED, from a number or a numeric string the model sent; otherwise undefined. */
@@ -1862,7 +1881,7 @@ const plugin = definePlugin({
         }
 
         try {
-          const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
+          const result = await runAgentGeneration(ctx, input, runCtx, issueId || null);
           await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           const seed = typeof result.seed === "number" ? result.seed : null;
@@ -2317,6 +2336,8 @@ const plugin = definePlugin({
       try {
         return await run(reservation.reservationId);
       } catch (err) {
+        // Fal billed a picture its own check flagged: the reservation stays (settled at the real price by `run`), never given back.
+        if (isFalFlaggedError(err)) throw err;
         try {
           await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId);
         } catch (releaseErr) {
@@ -2437,12 +2458,20 @@ const plugin = definePlugin({
       const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
       return withEditSpend("variation", context, raw, async (reservationId) => {
         try {
-          const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+          let result: GenerationResult;
+          try {
+            result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+          } catch (err) {
+            if (isFalFlaggedError(err)) await settleFalEditSpend(context.companyId as string, reservationId, err.model, err.usage);
+            throw err;
+          }
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           // Kontext takes one or more reference images but makes one output image -- priced as 1 image.
           await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_REFERENCE_MODEL, { images: 1 });
           return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
         } catch (err) {
+          // Kept as it is: withEditSpend leaves a flagged picture's (already settled) reservation alone.
+          if (isFalFlaggedError(err)) throw err;
           throw new Error(errorText(err));
         }
       });
@@ -3134,7 +3163,7 @@ export async function runQuickPicture(
   try {
     made = await withQuickTimeout(
       (async () => {
-        const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
+        const result = await runAgentGeneration(ctx, input, runCtx, issueId || null);
         await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
         return { result, ...(await toAttachmentBytes(ctx, result)) };
       })(),

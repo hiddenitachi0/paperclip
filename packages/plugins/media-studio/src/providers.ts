@@ -9,7 +9,7 @@
 //                 poll GET /history/{prompt_id} ; GET /view?filename=&subfolder=&type=
 //   Sogni:        see sogni.ts (durable workflow: start, poll, download)
 
-import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
+import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import {
   SogniProvider,
   isKnownSogniModel,
@@ -189,7 +189,7 @@ export class FalProvider implements GenerationProvider {
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
     // Fal's own check flagged the picture (it comes back black): a failure, never used.
-    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
+    if (falResultFlagged(data)) throw new FalFlaggedError(model, falFlaggedUsage(data));
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
@@ -225,7 +225,7 @@ export class FalProvider implements GenerationProvider {
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
-    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
+    if (falResultFlagged(data)) throw new FalFlaggedError(model, falFlaggedUsage(data));
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);

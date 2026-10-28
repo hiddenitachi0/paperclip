@@ -73,7 +73,7 @@ export async function falQueuePoll(
   if (!resultRes.ok) return { status: "failed", error: `fal.ai finished but the result could not be fetched (${resultRes.status}).` };
   const result = (await resultRes.json()) as Record<string, unknown>;
   // Fal's own check flagged the result: a failure, never a finished clip.
-  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE };
+  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE.replace("picture", "clip"), flagged: true };
   const media = result[resultKey] as { url?: string; content_type?: string } | undefined;
   if (!media?.url) return { status: "failed", error: "fal.ai finished but sent nothing back. Try again." };
   if (!/^https:\/\//i.test(media.url)) return { status: "failed", error: "fal.ai gave an address that is not https, so it was not used." };

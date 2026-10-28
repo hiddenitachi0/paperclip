@@ -87,6 +87,8 @@ function fakeFalQueue(
     submitFails?: boolean;
     mediaBytes?: Buffer;
     mediaContentTypeHeader?: string;
+    /** Fal's own safety check flagged the finished clip. */
+    flagged?: boolean;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -104,7 +106,7 @@ function fakeFalQueue(
     }
     if (url.startsWith("https://queue.fal.run/") && url.includes("/requests/")) {
       const key = opts.resultKey ?? "video";
-      return json(200, { [key]: { url: mediaUrl, content_type: opts.mediaContentType ?? (key === "video" ? "video/mp4" : "audio/mpeg") } });
+      return json(200, { [key]: { url: mediaUrl, content_type: opts.mediaContentType ?? (key === "video" ? "video/mp4" : "audio/mpeg") }, ...(opts.flagged ? { has_nsfw_concepts: [true] } : {}) });
     }
     if (url === mediaUrl) {
       return new Response(opts.mediaBytes ?? MP4, {
@@ -315,6 +317,27 @@ describe("media-generation-poll (background job engine)", () => {
     expect(check.data.status).toBe("failed");
     expect(check.data.error).toMatch(/not video/);
     expect(createComment.mock.calls[0]![1]).toMatch(/Could not make the video/);
+  });
+
+  it("a clip Fal's own check flagged fails the job and is never delivered; the cost counted when it started is not given back (DUR-4898 F1)", async () => {
+    const harness = await setup(FAL, true);
+    fakeFalQueue(harness, { status: "COMPLETED", flagged: true });
+    const record = vi.fn(async () => ({}));
+    (harness.ctx as any).billing = { ...(harness.ctx as any).billing, recordAgentMediaCost: record };
+    const createFile = vi.spyOn(harness.ctx.files, "createCompanyFile");
+    const createAttachment = vi.spyOn(harness.ctx.issues, "createAttachment");
+
+    const started = await harness.executeTool<any>(TOOL_GENERATE_VIDEO, { prompt: "x", issueId: ISSUE }, runCtx);
+    expect(record).toHaveBeenCalledTimes(1);
+    await harness.runJob(JOB_KEY_MEDIA_POLL);
+
+    const check = await harness.executeTool<any>(TOOL_CHECK_MEDIA_JOB, { jobId: started.data.jobId }, runCtx);
+    expect(check.data.status).toBe("failed");
+    expect(check.data.error).toMatch(/safety check flagged this clip/);
+    expect(createFile).not.toHaveBeenCalled();
+    expect(createAttachment).not.toHaveBeenCalled();
+    // Nothing on the failure path gives the money back: the one cost record from the start stands.
+    expect(record).toHaveBeenCalledTimes(1);
   });
 
   it("gives up a job that has run past the maximum age, without hanging forever", async () => {

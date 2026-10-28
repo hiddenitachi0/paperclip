@@ -17,7 +17,7 @@
 // is what a storyboard picture with a Media Studio look needs. No retries on
 // 429/409 (the person just presses Make picture again).
 
-import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
+import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import { readSogniWorkflowCredits } from "./sogni-cost.js";
 
 export type ImageFetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
@@ -125,7 +125,8 @@ export class FalImageProvider implements ImageGenerationProvider {
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }> };
     // Fal's own check flagged the picture (it comes back black): a failure, never stored, approved or chained.
-    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
+    // Fal still bills it, so the error carries the usage for the caller to record first.
+    if (falResultFlagged(data)) throw new FalFlaggedError(model, falFlaggedUsage(data));
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const megapixels = typeof image.width === "number" && typeof image.height === "number" ? (image.width * image.height) / 1_000_000 : undefined;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SogniLoraInfo } from "@paperclipai/plugin-sdk/media";
+import { FalFlaggedError, type SogniLoraInfo } from "@paperclipai/plugin-sdk/media";
 import {
   assertFilmModelAllowed,
   filmContentFilter,
@@ -116,7 +116,8 @@ describe("Fal requests carry the safety fields", () => {
       return { video: { url: "https://v3.fal.media/x.mp4" }, has_nsfw_concepts: [true] };
     });
     const outcome = await new FalVideoProvider("k", rec.fetchImpl).poll({ externalId: "r1", model: "fal-ai/wan-i2v-lora", provider: "fal" });
-    expect(outcome).toMatchObject({ status: "failed", error: expect.stringContaining("safety check flagged") });
+    // `flagged`: Fal still bills it, so the render records the cost instead of releasing the money it held.
+    expect(outcome).toMatchObject({ status: "failed", flagged: true, error: expect.stringContaining("safety check flagged") });
     const ok = recorder((url) => (url.endsWith("/status") ? { status: "COMPLETED" } : { video: { url: "https://v3.fal.media/x.mp4" }, has_nsfw_concepts: [false] }));
     expect((await new FalVideoProvider("k", ok.fetchImpl).poll({ externalId: "r1", model: "fal-ai/wan-i2v-lora", provider: "fal" })).status).toBe("done");
   });
@@ -128,7 +129,9 @@ describe("Fal requests carry the safety fields", () => {
       expect(rec.calls[0]!.body).toMatchObject({ enable_safety_checker: true });
     }
     const flagged = recorder(() => ({ images: [{ url: "https://v3.fal.media/black.jpg" }], has_nsfw_concepts: [true] }));
-    await expect(new FalImageProvider("k", flagged.fetchImpl).generate({ prompt: "p" })).rejects.toThrow(/safety check flagged/);
+    // The error carries the model and usage, so the caller can record Fal's bill before refusing.
+    await expect(new FalImageProvider("k", flagged.fetchImpl).generate({ prompt: "p" })).rejects.toBeInstanceOf(FalFlaggedError);
+    await expect(new FalImageProvider("k", flagged.fetchImpl).generate({ prompt: "p" })).rejects.toMatchObject({ model: "fal-ai/flux/schnell", usage: { images: 1 } });
     const direct = recorder(() => ({ images: [{ url: "https://v3.fal.media/black.jpg" }], has_nsfw_concepts: [true] }));
     await expect(new FalDirectPictureProvider("k", direct.fetchImpl).generate({ prompt: "p" })).rejects.toThrow(/safety check flagged/);
     expect(direct.calls[0]!.body).toMatchObject({ enable_safety_checker: true });
@@ -143,7 +146,7 @@ describe("the Media Studio plugin's Fal calls carry the same safety fields", () 
       expect(rec.calls[0]!.body).toMatchObject({ enable_safety_checker: true });
     }
     const flagged = recorder(() => ({ images: [{ url: "https://v3.fal.media/black.jpg" }], has_nsfw_concepts: [true] }));
-    await expect(new FalProvider("k", flagged.fetchImpl as never).generate({ prompt: "p" } as never)).rejects.toThrow(/safety check flagged/);
+    await expect(new FalProvider("k", flagged.fetchImpl as never).generate({ prompt: "p" } as never)).rejects.toBeInstanceOf(FalFlaggedError);
   });
 
   it("queued video: Wan gets both checks, Veo the strictest tolerance, and a flagged result fails the job", async () => {
@@ -154,6 +157,6 @@ describe("the Media Studio plugin's Fal calls carry the same safety fields", () 
     await falQueueSubmit(veo.fetchImpl as never, "k", "fal-ai/veo3.1", { prompt: "p" });
     expect(veo.calls[0]!.body).toMatchObject({ safety_tolerance: "1" });
     const flagged = recorder((url) => (url.endsWith("/status") ? { status: "COMPLETED" } : { video: { url: "https://v3.fal.media/x.mp4" }, has_nsfw_concepts: [true] }));
-    expect(await falQueuePoll(flagged.fetchImpl as never, "k", { externalId: "r1", model: "fal-ai/wan-flf2v", provider: "fal" } as never, "video")).toMatchObject({ status: "failed" });
+    expect(await falQueuePoll(flagged.fetchImpl as never, "k", { externalId: "r1", model: "fal-ai/wan-flf2v", provider: "fal" } as never, "video")).toMatchObject({ status: "failed", flagged: true });
   });
 });

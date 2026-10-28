@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   FAL_STRICTEST_SAFETY_TOLERANCE,
+  FalFlaggedError,
   SAFE_FOR_WORK_AVOID,
   applyLoraRules,
+  falFlaggedUsage,
   falResultFlagged,
   falSafetyFields,
+  isFalFlaggedError,
   personalLoraNeedsFilterOff,
   readContentMode,
   withSfwNegativePrompt,
@@ -113,5 +116,18 @@ describe("film safety: Fal fields", () => {
     expect(falResultFlagged({ has_nsfw_concepts: [false] })).toBe(false);
     expect(falResultFlagged({ images: [] })).toBe(false);
     expect(falResultFlagged(null)).toBe(false);
+  });
+  it("a flagged picture is a typed error that carries the model and usage, so its cost can be recorded", () => {
+    const err = new FalFlaggedError("fal-ai/flux/schnell", falFlaggedUsage({ images: [{ width: 1000, height: 1000 }, { width: 1000, height: 500 }] }));
+    expect(isFalFlaggedError(err)).toBe(true);
+    expect(err).toMatchObject({ model: "fal-ai/flux/schnell", usage: { images: 2, megapixels: 1.5 }, message: expect.stringContaining("safety check flagged") });
+    // By shape too, so a second copy of this module still matches; ordinary errors do not.
+    expect(isFalFlaggedError({ falFlagged: true, model: "m", usage: { images: 1 } })).toBe(true);
+    expect(isFalFlaggedError(new Error("nope"))).toBe(false);
+    expect(isFalFlaggedError(null)).toBe(false);
+  });
+  it("counts at least one picture, and gives a size only when every picture has one", () => {
+    expect(falFlaggedUsage({})).toEqual({ images: 1 });
+    expect(falFlaggedUsage({ images: [{ width: 1000, height: 1000 }, {}] })).toEqual({ images: 2 });
   });
 });

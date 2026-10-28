@@ -77,7 +77,8 @@ export interface MediaJobHandle {
 export type MediaPollOutcome =
   | { status: "running"; progress?: string }
   | { status: "done"; result: MediaJobResult }
-  | { status: "failed"; error: string };
+  /** `flagged`: Fal's own safety check threw the result away. Fal still bills it, so the caller records the cost instead of releasing the money it held. */
+  | { status: "failed"; error: string; flagged?: boolean };
 
 export interface MediaJobResult {
   contentType: string;

@@ -38,7 +38,10 @@ vi.mock("../storage/index.ts", () => ({
 const video = vi.hoisted(() => ({
   starts: [] as Array<Record<string, unknown>>,
   keys: [] as string[],
-  outcome: { status: "done" } as { status: "done" | "failed" | "running"; error?: string },
+  outcome: { status: "done" } as { status: "done" | "failed" | "running"; error?: string; flagged?: boolean },
+  /** What recordFalCostEvent was asked to record, and the price it answers with (null: Fal's price is unavailable). */
+  falCalls: [] as Array<Record<string, unknown>>,
+  falPrice: null as { costCents: number; costMicroUsd: number } | null,
 }));
 vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/video-provider-clients.ts")>();
@@ -55,7 +58,7 @@ vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
     }
     async poll() {
       if (video.outcome.status === "done") return { status: "done" as const, result: { contentType: "video/mp4", dataUrl: `data:video/mp4;base64,${Buffer.from("bridge").toString("base64")}` } };
-      if (video.outcome.status === "failed") return { status: "failed" as const, error: video.outcome.error ?? "nope" };
+      if (video.outcome.status === "failed") return { status: "failed" as const, error: video.outcome.error ?? "nope", ...(video.outcome.flagged ? { flagged: true } : {}) };
       return { status: "running" as const };
     }
     async cancel() {}
@@ -80,7 +83,12 @@ vi.mock("../services/video-ffmpeg.ts", async (importOriginal) => ({
   extractFirstFrameDataUri: async () => "data:image/jpeg;base64,RklSU1Q=",
   buildClipContactSheet: async (_clip: Buffer, side: string) => Buffer.from(`sheet-${side}`),
 }));
-vi.mock("../services/fal-cost-events.ts", () => ({ recordFalCostEvent: async () => null }));
+vi.mock("../services/fal-cost-events.ts", () => ({
+  recordFalCostEvent: async (_db: unknown, _fetch: unknown, params: Record<string, unknown>) => {
+    video.falCalls.push(params);
+    return video.falPrice;
+  },
+}));
 
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
@@ -152,6 +160,8 @@ d("storyline strip transitions", () => {
     video.starts.length = 0;
     video.keys.length = 0;
     video.outcome = { status: "done" };
+    video.falCalls.length = 0;
+    video.falPrice = null;
   });
 
   async function seedCompany(name: string): Promise<string> {
@@ -472,6 +482,50 @@ d("storyline strip transitions", () => {
     const rejected = race.find((r) => r.status === "rejected") as PromiseRejectedResult;
     expect(String(rejected.reason?.message)).toContain("monthly limit");
     expect(await svc2.monthlySpentCents(one.companyId)).toBe(Math.ceil(3 * 8.4));
+  });
+
+  it("a clip Fal's own check flagged is thrown away but its cost is recorded and stays counted, never released (DUR-4898 F1)", async () => {
+    const film = await seedFilm();
+    const svc = videoStorylineTransitionsService(db);
+    const gap = await svc.upsert(film.companyId, film.storylineId, { fromShotId: film.a, toShotId: film.b, kind: "ai" }, ACTOR);
+    video.falCalls.length = 0;
+    await svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR);
+    const [held] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, film.storylineId));
+    expect(held!.spentCents).toBe(26);
+
+    video.outcome = { status: "failed", error: "Fal's own safety check flagged this clip.", flagged: true };
+    await svc.tick();
+    const [take] = await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.transitionId, gap.id!));
+    // The result is refused: no file, never chosen.
+    expect(take).toMatchObject({ status: "failed", resultObjectKey: null, reservedCents: 26, costCents: 26 });
+    const strip = await svc.strip(film.companyId, film.storylineId);
+    expect(strip.gaps[0]!.chosenTakeId).toBeNull();
+    // The money was NOT given back, and the Fal bill was written as a cost against the held row.
+    const [after] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, film.storylineId));
+    expect(after!.spentCents).toBe(26);
+    expect(strip.monthly.spentCents).toBe(26);
+    // (The tick advances every running take; only this film's take is looked at.)
+    const mine = video.falCalls.filter((c) => String(c.settleBillingCode).includes(take!.id));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ billingCode: "video-storyline-transition", model: "fal-ai/kling-video/v3/standard/image-to-video" });
+  });
+
+  it("a flagged clip is settled at Fal's real price when it differs from the held estimate", async () => {
+    const film = await seedFilm();
+    const svc = videoStorylineTransitionsService(db);
+    const gap = await svc.upsert(film.companyId, film.storylineId, { fromShotId: film.a, toShotId: film.b, kind: "ai" }, ACTOR);
+    await svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR);
+    video.falPrice = { costCents: 31, costMicroUsd: 310_000 };
+    video.outcome = { status: "failed", error: "flagged", flagged: true };
+    try {
+      await svc.tick();
+    } finally {
+      video.falPrice = null;
+    }
+    const [take] = await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.transitionId, gap.id!));
+    expect(take).toMatchObject({ status: "failed", costCents: 31 });
+    const [after] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, film.storylineId));
+    expect(after!.spentCents).toBe(31);
   });
 
   it("a take that timed out with a provider job keeps its cost counted; the writer's prompts are masked (DUR-4711)", async () => {

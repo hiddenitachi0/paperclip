@@ -22,7 +22,7 @@
 // same gate as the Edit tab. Every key comes from a company secret, resolved
 // here on the server; no key ever reaches the browser.
 
-import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields, isFilterBypassLora } from "@paperclipai/plugin-sdk/media";
+import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields, isFalFlaggedError, isFilterBypassLora } from "@paperclipai/plugin-sdk/media";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { FAL_REFERENCE_MODEL, assertFalModelId, selectProvider, type FetchImpl } from "./providers.js";
 import { assemblePrompt } from "./look-prompt.js";
@@ -251,6 +251,15 @@ export async function withSpend<T>(
   try {
     return await run(reservation.reservationId);
   } catch (err) {
+    // Fal billed a picture its own check flagged: the reservation stays counted at its price, never given back.
+    if (isFalFlaggedError(err)) {
+      try {
+        await ctx.billing.settleMediaStudioDirectSpend(companyId, { reservationId: reservation.reservationId, endpointId: err.model, usage: err.usage });
+      } catch (settleErr) {
+        ctx.logger.warn(`media-studio: could not settle a flagged picture's Fal cost: ${errorText(settleErr)}`);
+      }
+      throw err;
+    }
     try {
       await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId);
     } catch (releaseErr) {
@@ -849,7 +858,7 @@ export async function makeIdentityPictures(
       });
       if (!res.ok) throw new Error(`Fal.ai could not make the pictures (error ${res.status}).`);
       const body = (await res.json()) as { images?: Array<{ url?: string }>; seed?: number };
-      if (falResultFlagged(body)) throw new Error(FAL_FLAGGED_MESSAGE);
+      if (falResultFlagged(body)) throw new FalFlaggedError(checked, falFlaggedUsage(body));
       const urls = (body.images ?? []).map((i) => i.url ?? "").filter((u) => /^https:\/\/|^data:image\//.test(u));
       if (urls.length === 0) throw new Error("Fal.ai sent no picture back. Try again.");
       const out: MadePicture[] = [];

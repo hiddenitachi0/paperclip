@@ -5,6 +5,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import type { SogniLoraInfo } from "@paperclipai/plugin-sdk/media";
 import { and, eq } from "drizzle-orm";
 import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines } from "@paperclipai/db";
+import { FalFlaggedError } from "@paperclipai/plugin-sdk/media";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
@@ -15,7 +16,13 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
  * the picture's notes. Every paid call is stubbed.
  */
 
-const captured = vi.hoisted(() => ({ pictures: [] as Array<{ provider: string; input: Record<string, unknown> }>, failWith: null as string | null }));
+const captured = vi.hoisted(() => ({
+  pictures: [] as Array<{ provider: string; input: Record<string, unknown> }>,
+  failWith: null as string | null,
+  /** A Fal picture its own safety check flagged: the provider throws the typed error carrying the usage. */
+  flagged: false,
+  falCosts: [] as Array<Record<string, unknown>>,
+}));
 
 vi.mock("../storage/index.js", () => ({
   getStorageService: () => ({
@@ -35,7 +42,12 @@ vi.mock("../services/secrets.js", async (importOriginal) => {
   return { ...real, secretService: () => ({ resolveSecretValueForVideoRender: async () => "test-key" }) };
 });
 
-vi.mock("../services/fal-cost-events.js", () => ({ recordFalCostEvent: async () => undefined }));
+vi.mock("../services/fal-cost-events.js", () => ({
+  recordFalCostEvent: async (_db: unknown, _fetch: unknown, params: Record<string, unknown>) => {
+    captured.falCosts.push(params);
+    return undefined;
+  },
+}));
 
 vi.mock("../services/image-provider-clients.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../services/image-provider-clients.js")>();
@@ -44,6 +56,7 @@ vi.mock("../services/image-provider-clients.js", async (importOriginal) => {
     async generate(input: Record<string, unknown>) {
       captured.pictures.push({ provider: this.name, input });
       if (captured.failWith) throw new Error(captured.failWith);
+      if (captured.flagged) throw new FalFlaggedError(String(input.model ?? "fal-ai/flux/schnell"), { images: 1, megapixels: 0.5 });
       return { provider: this.name, model: String(input.model ?? "default"), contentType: "image/png", imageDataUrl: "data:image/png;base64,aGk=" };
     }
   }
@@ -253,6 +266,8 @@ d("storyboard stills apply the look rules (database)", () => {
   beforeEach(() => {
     captured.pictures.length = 0;
     captured.failWith = null;
+    captured.flagged = false;
+    captured.falCosts.length = 0;
   });
 
   async function seed() {
@@ -577,6 +592,19 @@ d("storyboard stills apply the look rules (database)", () => {
     const [row] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
     expect(row!.stillObjectKey).toBeNull();
     await expect(stills().approveShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("4898 F1. a Fal picture flagged by Fal's own check is never stored or approved, but its cost is recorded before the refusal", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "fal" } }, ACTOR);
+    captured.flagged = true;
+    await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("safety check flagged") });
+    const [row] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
+    expect(row!.stillObjectKey).toBeNull();
+    await expect(stills().approveShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422 });
+    // Fal still bills a flagged picture: the cost event carries its usage.
+    expect(captured.falCosts).toHaveLength(1);
+    expect(captured.falCosts[0]).toMatchObject({ companyId, billingCode: "video-storyline-still", usage: { images: 1, megapixels: 0.5 } });
   });
 
 });
