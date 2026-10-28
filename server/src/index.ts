@@ -1206,6 +1206,15 @@ export async function startServer(): Promise<StartedServer> {
       if (tradingReconciled.pausedCount > 0) {
         logger.warn({ ...tradingReconciled }, "startup trading-agent reconciliation paused running strategies");
       }
+      // DUR-4999: one ledger note per strategy when the engine version changed,
+      // and the symbol map checked against the exchange's market list. Neither
+      // may stop boot.
+      await tradingAgent.noteEngineVersion().catch((err) => {
+        logger.error({ err }, "startup trading-agent engine-version note failed");
+      });
+      await tradingAgent.verifyMarketsOnBoot().catch((err) => {
+        logger.error({ err }, "startup trading-agent market check failed");
+      });
 
       // DUR-100: verify every active routine's declared schedule chains actually
       // have a live, usable trigger row before logging anything as healthy —

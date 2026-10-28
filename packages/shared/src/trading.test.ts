@@ -2,8 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRADING_RISK_CONFIG,
   TRADING_HARD_CEILING,
+  DEFAULT_TRADING_RULE_CONFIG,
+  TRADING_ENGINE_VERSION,
+  TRADING_MARKET_SYMBOLS,
+  TRADING_ASSETS,
+  ccxtSymbolFor,
   createTradingStrategySchema,
+  dropFormingCandles,
   evaluateSmaCrossover,
+  tradingMaxCandleAgeMs,
+  tradingRuleVersionLabel,
+  tradingSignalStillHolds,
+  tradingWarmUpBars,
+  updateTradingStrategySchema,
   evaluateTradingRule,
   simpleMovingAverage,
   tradingRiskConfigSchema,
@@ -107,5 +118,48 @@ describe("evaluateSmaCrossover", () => {
   it("evaluateTradingRule dispatches to the sma_crossover evaluator", () => {
     const closes = [10, 9, 8, 7, 6, 20];
     expect(evaluateTradingRule(closes, config)).toBe(evaluateSmaCrossover(closes, config));
+  });
+});
+
+describe("DUR-4999 engine basics", () => {
+  it("puts the engine version in the rule label without touching the stored rule version", () => {
+    expect(DEFAULT_TRADING_RULE_CONFIG.version).toBe(1);
+    expect(tradingRuleVersionLabel(DEFAULT_TRADING_RULE_CONFIG)).toBe(`sma_crossover@1 · engine ${TRADING_ENGINE_VERSION}`);
+    expect(tradingRuleVersionLabel(DEFAULT_TRADING_RULE_CONFIG)).toBe("sma_crossover@1 · engine 2");
+  });
+
+  it("new strategies default to 4h candles and a 0.40% fee; PATCH does not take a timeframe", () => {
+    const parsed = createTradingStrategySchema.parse({ name: "x", asset: "BTC" });
+    expect(parsed.timeframe).toBe("4h");
+    expect(parsed.riskConfig.feeRatePct).toBe(0.4);
+    expect(() => createTradingStrategySchema.parse({ name: "x", asset: "BTC", timeframe: "5m" })).toThrow();
+    expect(() => updateTradingStrategySchema.parse({ timeframe: "1h" })).toThrow();
+  });
+
+  it("has one USD symbol per asset", () => {
+    for (const asset of TRADING_ASSETS) expect(ccxtSymbolFor(asset)).toBe(TRADING_MARKET_SYMBOLS[asset]);
+    expect(ccxtSymbolFor("BTC")).toBe("BTC/USD");
+  });
+
+  it("drops bars that have not closed yet", () => {
+    const now = new Date("2026-01-01T04:00:00Z");
+    const bars = [{ openTime: new Date("2026-01-01T00:00:00Z") }, { openTime: new Date("2026-01-01T04:00:00Z") }];
+    expect(dropFormingCandles(bars, "4h", now)).toEqual([bars[0]]);
+  });
+
+  it("allows one timeframe plus 10 minutes of price age", () => {
+    expect(tradingMaxCandleAgeMs("15m")).toBe(25 * 60_000);
+    expect(tradingMaxCandleAgeMs("4h")).toBe(4 * 3_600_000 + 10 * 60_000);
+  });
+
+  it("covers the slowest indicator's warm-up", () => {
+    expect(tradingWarmUpBars({ ...DEFAULT_TRADING_RULE_CONFIG, slowPeriod: 400 })).toBe(401);
+  });
+
+  it("a buy still holds only while fast is above slow", () => {
+    const config = { ...DEFAULT_TRADING_RULE_CONFIG, fastPeriod: 2, slowPeriod: 4 };
+    expect(tradingSignalStillHolds([1, 1, 1, 2, 3], config, "buy")).toBe(true);
+    expect(tradingSignalStillHolds([1, 1, 1, 2, 3], config, "sell")).toBe(false);
+    expect(tradingSignalStillHolds([3, 3, 3, 2, 1], config, "sell")).toBe(true);
   });
 });

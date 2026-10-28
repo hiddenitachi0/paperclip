@@ -69,6 +69,16 @@ export const tradingStrategies = pgTable(
     status: text("status").notNull().default("paused"),
     pauseReason: text("pause_reason"),
     checkEveryMinutes: integer("check_every_minutes").notNull().default(15),
+    // DUR-4999 (migration 0261): the candle size the rule decides on. Rows
+    // that existed before the migration were all 15m strategies and keep it
+    // (the column default); the service passes the new-strategy default
+    // (4h) explicitly on insert.
+    timeframe: text("timeframe").notNull().default("15m"),
+    // Open time of the newest closed bar this strategy has evaluated. The
+    // next tick evaluates every closed bar after it, in order (capped; see
+    // TRADING_MAX_CATCH_UP_BARS). Null = never evaluated: the first tick
+    // evaluates only the latest closed bar and never trades old history.
+    lastEvaluatedBarAt: timestamp("last_evaluated_bar_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull().defaultNow(),
     checkLeaseUntil: timestamp("check_lease_until", { withTimezone: true }),
     consecutiveErrors: integer("consecutive_errors").notNull().default(0),
@@ -110,6 +120,7 @@ export const tradingStrategies = pgTable(
       "trading_strategies_asset_check",
       sql`${table.asset} IN ('BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE', 'TRX', 'AVAX', 'DOT', 'LINK', 'LTC')`,
     ),
+    timeframeCheck: check("trading_strategies_timeframe_check", sql`${table.timeframe} IN ('15m', '1h', '4h', '1d')`),
     checkEveryCheck: check("trading_strategies_check_every_minutes_check", sql`${table.checkEveryMinutes} >= 5 AND ${table.checkEveryMinutes} <= 240`),
     startingCashCheck: check("trading_strategies_starting_cash_nok_check", sql`${table.startingCashNok} > 0`),
     positionQuantityCheck: check("trading_strategies_position_quantity_check", sql`${table.positionQuantity} >= 0`),
