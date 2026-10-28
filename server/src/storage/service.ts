@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
-import type { StorageService, StorageProvider, PutFileInput, PutFileResult } from "./types.js";
-import { badRequest, forbidden, unprocessable } from "../errors.js";
+import { Transform } from "node:stream";
+import type { StorageService, StorageProvider, PutFileInput, PutFileFromPathInput, PutFileResult } from "./types.js";
+import { HttpError, badRequest, forbidden, unprocessable } from "../errors.js";
 
 const MAX_SEGMENT_LENGTH = 120;
 
@@ -69,7 +71,7 @@ function buildObjectKey(companyId: string, namespace: string, originalFilename: 
   return `${companyId}/${ns}/${year}/${month}/${day}/${filename}`;
 }
 
-function assertPutFileInput(input: PutFileInput): void {
+function assertPutFileMeta(input: Pick<PutFileInput, "companyId" | "namespace" | "contentType">): void {
   if (!input.companyId || input.companyId.trim().length === 0) {
     throw unprocessable("companyId is required");
   }
@@ -79,6 +81,17 @@ function assertPutFileInput(input: PutFileInput): void {
   if (!input.contentType || input.contentType.trim().length === 0) {
     throw unprocessable("contentType is required");
   }
+}
+
+/** Size of a regular file on disk, or a plain 422 when there is none. */
+async function sourceFileSize(filePath: string): Promise<number> {
+  const stat = await fs.stat(filePath).catch(() => null);
+  if (!stat || !stat.isFile()) throw unprocessable("File to store was not found");
+  return stat.size;
+}
+
+function assertPutFileInput(input: PutFileInput): void {
+  assertPutFileMeta(input);
   if (!(input.body instanceof Buffer)) {
     throw unprocessable("body must be a Buffer");
   }
@@ -109,6 +122,49 @@ export function createStorageService(provider: StorageProvider): StorageService 
         contentType,
         byteSize,
         sha256: hashBuffer(input.body),
+        originalFilename: input.originalFilename,
+      };
+    },
+
+    async putFileFromPath(input: PutFileFromPathInput): Promise<PutFileResult> {
+      assertPutFileMeta(input);
+      const byteSize = await sourceFileSize(input.filePath);
+      if (byteSize <= 0) {
+        throw unprocessable("File is empty");
+      }
+      if (input.maxBytes !== undefined && byteSize > input.maxBytes) {
+        throw new HttpError(413, `File exceeds ${input.maxBytes} bytes`);
+      }
+      const objectKey = buildObjectKey(input.companyId, input.namespace, input.originalFilename);
+      const contentType = input.contentType.trim().toLowerCase();
+
+      // One pass over the file: hashed on its way to the provider, never held whole in memory.
+      const hash = createHash("sha256");
+      let streamedBytes = 0;
+      const source = createReadStream(input.filePath);
+      const hashing = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          hash.update(chunk);
+          streamedBytes += chunk.length;
+          callback(null, chunk);
+        },
+      });
+      source.on("error", (err) => hashing.destroy(err));
+      source.pipe(hashing);
+      await provider.putObject({ objectKey, body: hashing, contentType, contentLength: byteSize });
+
+      if (streamedBytes !== byteSize) {
+        // The file changed while it was being stored: never keep a half-written copy.
+        await provider.deleteObject({ objectKey }).catch(() => undefined);
+        throw unprocessable("File changed while it was being stored");
+      }
+
+      return {
+        provider: provider.id,
+        objectKey,
+        contentType,
+        byteSize,
+        sha256: hash.digest("hex"),
         originalFilename: input.originalFilename,
       };
     },

@@ -76,6 +76,9 @@ export interface VideoStorylineSummary {
   cast: VideoStorylineCast;
   /** The director whose AI story writer writes this storyline (step 1); null = none picked. */
   directorId: string | null;
+  /** Film studio Phase 1: the saved model setups the pictures and clips use; null = custom (not from a setup). */
+  imageSetupId: string | null;
+  videoSetupId: string | null;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -183,6 +186,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     pictureSettings: pictureFields(row.pictureSettings),
     cast: readVideoStorylineCast(row.pictureSettings),
     directorId: row.directorId ?? null,
+    imageSetupId: row.imageSetupId ?? null,
+    videoSetupId: row.videoSetupId ?? null,
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,
@@ -261,8 +266,12 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
 // "cancelled" is editable too: cancelling stops spending, it must not leave the storyline stuck forever.
 const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed", "cancelled"]);
 
+export function isStorylineEditable(row: Pick<StorylineRow, "status">): boolean {
+  return EDITABLE_STORYLINE_STATUSES.has(row.status);
+}
+
 export function assertStorylineEditable(row: StorylineRow) {
-  if (!EDITABLE_STORYLINE_STATUSES.has(row.status)) {
+  if (!isStorylineEditable(row)) {
     throw conflict(
       `This storyline is ${row.status.replace(/_/g, " ")} and cannot be edited right now. Pause or wait for it to finish first.`,
     );
@@ -547,9 +556,21 @@ export function videoStorylineService(db: Db) {
     // loadReferenceImages resolves picture ids.
     if (settingMusicAssetId) input = { ...input, musicAssetId: await resolveMusicAssetId(companyId, input.musicAssetId!) };
     const settingMusicSourceKey = input.musicSourceKey !== undefined && input.musicSourceKey !== null;
+    // Film studio Phase 1: a direct provider/model edit that differs from what
+    // is stored makes the model "custom (not from a setup)", so the setup pick
+    // is cleared. Sending the same values back (e.g. while changing the look)
+    // keeps it.
+    const storedPicture = pictureFields(existing.pictureSettings);
+    const videoModelEdited =
+      (input.providerId !== undefined && input.providerId !== existing.providerId) || (input.model !== undefined && input.model !== existing.model);
+    const pictureModelEdited =
+      input.pictureSettings !== undefined &&
+      ((input.pictureSettings.providerId ?? null) !== (storedPicture.providerId ?? null) || (input.pictureSettings.model ?? null) !== (storedPicture.model ?? null));
     const [row] = await db
       .update(videoStorylines)
       .set({
+        ...(videoModelEdited ? { videoSetupId: null } : {}),
+        ...(pictureModelEdited ? { imageSetupId: null } : {}),
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
         ...(input.providerId !== undefined ? { providerId: input.providerId } : {}),

@@ -348,6 +348,17 @@ export interface HostServices {
       params: WorkerToHostMethods["personas.getPictureFeedbackRules"][0],
     ): Promise<WorkerToHostMethods["personas.getPictureFeedbackRules"][1]>;
   };
+
+  /** Media Studio's saved model setups, LoRA library and project defaults (read-only). */
+  mediaLibrary: {
+    listSetups(params: WorkerToHostMethods["mediaLibrary.listSetups"][0]): Promise<WorkerToHostMethods["mediaLibrary.listSetups"][1]>;
+    getSetup(params: WorkerToHostMethods["mediaLibrary.getSetup"][0]): Promise<WorkerToHostMethods["mediaLibrary.getSetup"][1]>;
+    getProjectDefaults(
+      params: WorkerToHostMethods["mediaLibrary.getProjectDefaults"][0],
+    ): Promise<WorkerToHostMethods["mediaLibrary.getProjectDefaults"][1]>;
+    listLoras(params: WorkerToHostMethods["mediaLibrary.listLoras"][0]): Promise<WorkerToHostMethods["mediaLibrary.listLoras"][1]>;
+    resolve(params: WorkerToHostMethods["mediaLibrary.resolve"][0]): Promise<WorkerToHostMethods["mediaLibrary.resolve"][1]>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +563,11 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
   "personas.getPictureFeedbackRules": "personas.picture_feedback.read",
   "models.analyseImage": "models.image_analysis.run",
+  "mediaLibrary.listSetups": "media.library.read",
+  "mediaLibrary.getSetup": "media.library.read",
+  "mediaLibrary.getProjectDefaults": "media.library.read",
+  "mediaLibrary.listLoras": "media.library.read",
+  "mediaLibrary.resolve": "media.library.read",
   "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
@@ -1065,6 +1081,22 @@ export function createHostClientHandlers(
     }),
     "personas.getPictureFeedbackRules": gated("personas.getPictureFeedbackRules", async (params) => {
       return services.personas.getPictureFeedbackRules(params);
+    }),
+
+    "mediaLibrary.listSetups": gated("mediaLibrary.listSetups", async (params) => {
+      return services.mediaLibrary.listSetups(params);
+    }),
+    "mediaLibrary.getSetup": gated("mediaLibrary.getSetup", async (params) => {
+      return services.mediaLibrary.getSetup(params);
+    }),
+    "mediaLibrary.getProjectDefaults": gated("mediaLibrary.getProjectDefaults", async (params) => {
+      return services.mediaLibrary.getProjectDefaults(params);
+    }),
+    "mediaLibrary.listLoras": gated("mediaLibrary.listLoras", async (params) => {
+      return services.mediaLibrary.listLoras(params);
+    }),
+    "mediaLibrary.resolve": gated("mediaLibrary.resolve", async (params) => {
+      return services.mediaLibrary.resolve(params);
     }),
   };
 }

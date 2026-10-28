@@ -272,6 +272,30 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   background removal). "Place product" sends the room as picture 1 and products as 2.., then puts the result back
   only inside the area (`mask-composite.ts`), so the rest of the room is pixel-identical.
 
+## Model setups and the LoRA library (film studio, Phase 1)
+
+- A **model setup** is a named recipe kept in core tables, not plugin state: service + exact model id + LoRAs
+  from the company's **LoRA library**, each with an explicit strength, plus params (prompt expansion always set).
+  Every company starts with editable drafts: Natural (MiniMax H3 + Better Motion 0.6), Natural face & speech
+  (H3 + Natural Face & Speech 0.6), Action (H3 + Better Motion 0.8), Romantic / calm (Wan 3 start + end, no
+  LoRA) and Stills (Krea 2). Owners and admins edit them under `/api/companies/:id/media/...`; agents only see
+  approved ones. Wan 3 takes no LoRA anywhere.
+- Setups and LoRAs are checked with the same safety module as every film (`evaluateLora` / `evaluateModel` in
+  `@paperclipai/plugin-sdk/media`, applied by `server/src/services/media-content-rules.ts`): a LoRA it refuses in
+  every film (filter bypass in any spelling, age sliders such as `krea2-age`) can never be saved or used, a part it
+  holds mature rates the setup mature, and a safe-for-work storyline only takes setups rated safe for work.
+- A LoRA link (Fal) whose query string or `#` part carries a key, token, password or signature (`?token=`,
+  `api_key`, `sig`, `X-Amz-Signature`, ...) is refused with a plain message, so no key is ever stored. Agents and
+  plugin workers (`ctx.mediaLibrary`) only ever get a link without its query string; the full link stays on the
+  board's own pages.
+- An approval is for a recipe. Changing an approved setup's kind, service, model, edit model, mode, LoRAs or params
+  moves it back to draft and clears the approver (agents stop seeing it), unless the same request approves it again
+  under that person's name. Name, notes, tags and favourite do not touch the approval.
+- The worker reads them through `ctx.mediaLibrary` (capability `media.library.read`, read-only): `listSetups`,
+  `getSetup`, `getProjectDefaults`, `listLoras` and `resolve` (checked on the server against the company's own
+  LoRAs). Pass `approvedOnly: true` on every path an agent drives. The Create tab, tools and Identities are moved
+  onto it by the later Phase 1 cards; today's look and render paths are unchanged.
+
 ## How it fits together (zero core edits)
 
 The plugin uses only existing Paperclip REST routes from its UI (running under the user

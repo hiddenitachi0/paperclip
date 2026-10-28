@@ -374,6 +374,28 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   }
 
   /**
+   * The shot's and storyline's own reference pictures as data: URIs, each
+   * through the age check before anything is sent: the refusal set is
+   * company-wide (file ids and byte hashes), so these pictures need no person.
+   * Refuses the whole render (a plain message) when one was flagged.
+   */
+  async function checkedReferenceImages(companyId: string, assetIds: readonly string[]): Promise<string[]> {
+    if (assetIds.length === 0) return [];
+    const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+    // One at a time so each file id is checked against its own bytes.
+    const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
+    for (const fileId of assetIds.slice(0, MAX_REFERENCE_IMAGES)) {
+      loaded.push({ fileId, dataUri: (await loadReferenceImages(db, companyId, [fileId]))[0] ?? null });
+    }
+    const refusal = castPictureRefusal(
+      loaded.map((p) => ({ ...p, personName: null })),
+      await loadCastAgeRefusals(db, plugin?.id ?? null, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    return loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
+  }
+
+  /**
    * DUR-4317/DUR-4320: this is the "no video provider call before approval"
    * enforcement point -- the storyboardStatus check below runs before
    * resolveProviderApiKey/provider.start, i.e. before any real, paid
@@ -442,7 +464,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const cast = await castVideoInput(companyId, storyline, shot);
     // The cast's pictures first (faces first), then the shot's and storyline's pictures.
-    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
+    const referenceImages = [...cast.flat, ...(await checkedReferenceImages(companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
     // See media-jobs-types.ts's MediaJobInput.referenceImages doc comment: neither provider confirms
     // combining a continuity frame with separate character pictures in one call, so we pick ONE image
     // to actually drive continuity/likeness -- the approved still wins, then the continuity frame.
@@ -1037,7 +1059,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const cast = await castVideoInput(companyId, storyline, shot);
-    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
+    const referenceImages = [...cast.flat, ...(await checkedReferenceImages(companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
     const startImage = continuityImage ?? cast.startFallback ?? referenceImages[0];
 
     const handle = await provider.start({

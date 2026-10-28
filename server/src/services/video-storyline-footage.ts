@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoShots, videoStorylines, videoUploads } from "@paperclipai/db";
 import {
@@ -12,6 +12,8 @@ import {
   type VideoUploadSummary,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
+import { applyInstanceVideoCeiling, mediaFootageHardLimits } from "./media-video-limits.js";
+import { companyStorageUsedBytes } from "./media-storage-quota.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastAgeRefusals, readPluginState } from "./storyline-cast.js";
 import { storylineCompanyModel } from "./video-storyline-company-model.js";
@@ -104,27 +106,12 @@ export function dataUriBytes(dataUri: string): Buffer | null {
  */
 export { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 
-/** Where music uploaded for storylines is stored (counted in the company's footage quota). */
-export const STORYLINE_MUSIC_NAMESPACE = "video-storylines/music";
-
 /**
- * Everything the company's footage quota counts: its uploads (raw, working,
- * preview, poster) plus music files uploaded for storylines (security review
- * DUR-4745: music used to sit outside the quota).
+ * The company's media storage limit counts storyline uploads, storyline
+ * music and (D18) large videos kept on tasks or in Files; it lives in
+ * media-storage-quota.ts so the task and Files routes can use it too.
  */
-export async function companyStorageUsedBytes(executor: Pick<Db, "select">, companyId: string): Promise<number> {
-  const [uploads] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(${videoUploads.rawByteSize} + ${videoUploads.workingByteSize} + ${videoUploads.previewByteSize} + ${videoUploads.posterByteSize}), 0)::bigint`,
-    })
-    .from(videoUploads)
-    .where(eq(videoUploads.companyId, companyId));
-  const [music] = await executor
-    .select({ total: sql<number>`coalesce(sum(${assets.byteSize}), 0)::bigint` })
-    .from(assets)
-    .where(and(eq(assets.companyId, companyId), sql`${assets.objectKey} like ${`${companyId}/${STORYLINE_MUSIC_NAMESPACE}/%`}`));
-  return Number(uploads?.total ?? 0) + Number(music?.total ?? 0);
-}
+export { companyStorageUsedBytes, STORYLINE_MUSIC_NAMESPACE } from "./media-storage-quota.js";
 
 export function uploadByteSize(row: Pick<UploadRow, "rawByteSize" | "workingByteSize" | "previewByteSize" | "posterByteSize">): number {
   return Number(row.rawByteSize) + Number(row.workingByteSize) + Number(row.previewByteSize) + Number(row.posterByteSize);
@@ -170,23 +157,32 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
 
   // ─── Per-company settings ───
 
+  /** The company's settings as the server applies them (D18: video limits never above the server's ceiling). */
   async function getSettings(companyId: string): Promise<MediaFootageSettings> {
     const id = await pluginId();
-    if (!id) return readMediaFootageSettings(null);
+    if (!id) return applyInstanceVideoCeiling(readMediaFootageSettings(null));
     const row = await registry.getCompanySettings(id, companyId);
-    return readMediaFootageSettings((row?.settingsJson ?? null) as Record<string, unknown> | null);
+    return applyInstanceVideoCeiling(readMediaFootageSettings((row?.settingsJson ?? null) as Record<string, unknown> | null));
   }
 
   async function setSettings(companyId: string, patch: UpdateMediaFootageSettingsInput): Promise<MediaFootageSettings> {
     const id = await pluginId();
     if (!id) throw notFound("The media-studio plugin is not installed.");
+    // D18: the server may set a lower ceiling than the hard limit; say so instead of quietly saving less.
+    const hard = mediaFootageHardLimits();
+    if (patch.maxVideoMb !== undefined && patch.maxVideoMb > hard.maxVideoMb) {
+      throw unprocessable(`This server allows uploaded videos up to ${hard.maxVideoMb} MB. Choose ${hard.maxVideoMb} MB or less.`);
+    }
+    if (patch.maxVideoFileMb !== undefined && patch.maxVideoFileMb > hard.maxVideoFileMb) {
+      throw unprocessable(`This server allows video files up to ${hard.maxVideoFileMb} MB. Choose ${hard.maxVideoFileMb} MB or less.`);
+    }
     const existing = await registry.getCompanySettings(id, companyId);
     const next: Record<string, unknown> = { ...((existing?.settingsJson ?? {}) as Record<string, unknown>) };
     for (const [field, key] of Object.entries(MEDIA_FOOTAGE_SETTINGS_KEYS) as Array<[keyof MediaFootageSettings, string]>) {
       if (patch[field] !== undefined) next[key] = patch[field];
     }
     await registry.upsertCompanySettings(id, companyId, { settingsJson: next });
-    return readMediaFootageSettings(next);
+    return applyInstanceVideoCeiling(readMediaFootageSettings(next));
   }
 
   // ─── The picture-reading model (age check, transition context) ───
