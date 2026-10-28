@@ -586,3 +586,142 @@ describe("Identities tab: several pictures of the person", () => {
     expect([...model.options].map((o) => o.textContent)).toContain(NAMES[ALPHA]);
   });
 });
+
+// ─── Pictures that were deleted from Files, and the Files picker ─────────────
+
+const PIC_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const PIC_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const SAVE_NOTE = "1 picture was removed because it is no longer in Files.";
+
+/** A fake Files list: a first page with a "next page" cursor and an older page. */
+function stubFilesList() {
+  const fetchMock = vi.fn(async (url: string) => {
+    const u = new URL(url, "http://x");
+    const body = u.searchParams.get("cursor")
+      ? { artifacts: [{ title: "Older", contentPath: `/api/attachments/${PIC_B}/content`, mediaKind: "image" }], nextCursor: null }
+      : { artifacts: [{ title: "Maja face", contentPath: `/api/attachments/${PIC_A}/content`, mediaKind: "image" }], nextCursor: "next-page" };
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+async function searchAndLoadMore(fetchMock: ReturnType<typeof stubFilesList>) {
+  expect(container.querySelector('button[title="Maja face"]')).not.toBeNull();
+  expect(container.querySelector('button[title="Older"]')).toBeNull();
+  await click(buttonNamed(container, "Load more pictures"));
+  expect(container.querySelector('button[title="Older"]')).not.toBeNull();
+  expect(container.querySelector('button[title="Maja face"]')).not.toBeNull();
+  expect(container.textContent).not.toContain("Load more pictures");
+  await act(async () => setValue(container.querySelector<HTMLInputElement>('input[aria-label="Search your pictures"]')!, "dress"));
+  await click(buttonNamed(container, "Search"));
+  const searchUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
+  expect(searchUrl).toContain("q=dress");
+  expect(searchUrl).toContain("qScope=filename");
+  expect(searchUrl).not.toContain("cursor=");
+  // Load more after a search asks for the same words together with the page it was given.
+  await click(buttonNamed(container, "Load more pictures"));
+  const moreUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
+  expect(moreUrl).toContain("q=dress");
+  expect(moreUrl).toContain("cursor=next-page");
+}
+
+describe("Pick from Files in Identities and Rooms", () => {
+  it("Identities: search by name and Load more", async () => {
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [] }));
+    const fetchMock = stubFilesList();
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, "New identity"));
+    await click(buttonNamed(container, "Pick from Files"));
+    await searchAndLoadMore(fetchMock);
+  });
+
+  it("Rooms: search by name and Load more", async () => {
+    actions["rooms.list"] = vi.fn(async () => ({ rooms: [], canManage: true }));
+    const fetchMock = stubFilesList();
+    root = createRoot(container);
+    await act(async () => root.render(<RoomsPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, "New room"));
+    await click(buttonNamed(container, "Pick from Files"));
+    await searchAndLoadMore(fetchMock);
+  });
+
+  it("picking a picture hands back its file and closes the list", async () => {
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [] }));
+    stubFilesList();
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, "New identity"));
+    await click(buttonNamed(container, "Pick from Files"));
+    await click(container.querySelector('button[title="Maja face"]') as HTMLElement);
+    expect(container.querySelector('input[aria-label="Search your pictures"]')).toBeNull();
+    expect(container.querySelector(`img[src="/api/attachments/${PIC_A}/content"]`)).not.toBeNull();
+  });
+});
+
+describe("a picture deleted from Files", () => {
+  it("Identities: the save note is shown on the saved identity, and clears when going back", async () => {
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity()] }));
+    actions["identities.save"] = vi.fn(async () => ({ identity: identity(), identities: [identity()], note: SAVE_NOTE }));
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Maja/));
+    await click(buttonNamed(container, "Edit"));
+    await click(buttonNamed(container, "Save identity"));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(SAVE_NOTE);
+    await click(buttonNamed(container, "All identities"));
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("Rooms: the save note is shown on the saved room", async () => {
+    const room = { id: "r1", name: "Living room", photoFileId: "photo", cameraNote: null, zones: [], products: [], updatedAt: "x" };
+    actions["rooms.list"] = vi.fn(async () => ({ rooms: [room], canManage: true }));
+    actions["rooms.save"] = vi.fn(async () => ({ room, rooms: [room], note: SAVE_NOTE }));
+    root = createRoot(container);
+    await act(async () => root.render(<RoomsPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Living room/));
+    await click(buttonNamed(container, "Edit"));
+    await click(buttonNamed(container, "Save room"));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(SAVE_NOTE);
+  });
+
+  async function failPreview(status: number | "network") {
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method });
+        if (status === "network") throw new TypeError("offline");
+        return new Response("", { status });
+      }),
+    );
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity()] }));
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    const img = container.querySelector('img[alt="Maja"]') as HTMLImageElement;
+    await act(async () => {
+      img.dispatchEvent(new Event("error"));
+    });
+    await flush();
+    return calls;
+  }
+
+  it("Identities: a picture the server says is gone is labelled 'No longer in Files'", async () => {
+    const calls = await failPreview(404);
+    expect(calls.some((c) => c.url === "/api/attachments/face-1/content" && c.method === "HEAD")).toBe(true);
+    expect(container.querySelector('[data-picture-state="gone"]')?.textContent).toBe("No longer in Files");
+  });
+
+  it.each([500, "network" as const])("Identities: a preview that fails for another reason (%s) is not called deleted", async (status) => {
+    await failPreview(status);
+    expect(container.textContent).not.toContain("No longer in Files");
+    expect(container.querySelector('[data-picture-state="unshown"]')?.textContent).toBe("Can't be shown right now");
+  });
+});

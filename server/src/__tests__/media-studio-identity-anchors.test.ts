@@ -701,6 +701,37 @@ describe("rooms: place a product through a zone mask", () => {
     ).room;
   }
 
+  it("a picture deleted from Files is left out of the room, with a note, and the rest is saved", async () => {
+    const { harness } = await setup();
+    const GONE = "f9f9f9f9-0000-4000-8000-0000000000f9";
+    const GONE_LAMP = "f8f8f8f8-0000-4000-8000-0000000000f8";
+    const res = await harness.performAction<any>(
+      "rooms.save",
+      {
+        name: "Living room",
+        photoFileId: ROOM,
+        zones: [
+          { name: "Left wall", maskFileId: MASK },
+          { name: "Gone wall", maskFileId: GONE },
+        ],
+        products: [
+          { name: "Grey sofa", fileId: SOFA, cutoutFileId: GONE },
+          { name: "Lost lamp", fileId: GONE_LAMP, cutoutFileId: null },
+        ],
+      },
+      owner,
+    );
+    expect(res.note).toBe("2 pictures were removed because they are no longer in Files.");
+    expect(res.room.zones.map((z: { name: string }) => z.name)).toEqual(["Left wall"]);
+    expect(res.room.products.map((p: { name: string; cutoutFileId: string | null }) => [p.name, p.cutoutFileId])).toEqual([["Grey sofa", null]]);
+    expect((await harness.performAction<any>("rooms.save", { id: res.room.id, name: "Living room", photoFileId: ROOM }, owner)).note).toBeNull();
+    // The room photo is the one picture a room cannot do without.
+    await expect(harness.performAction("rooms.save", { name: "Hall", photoFileId: GONE }, owner)).rejects.toThrow(/room photo is not in this company's Files any more/);
+    // A file that is there but not a picture is still refused.
+    harness.seed({ companyFiles: [file(EXTRA, Buffer.from("text"), COMPANY, "text/plain")] });
+    await expect(harness.performAction("rooms.save", { name: "Hall", photoFileId: ROOM, zones: [{ name: "Z", maskFileId: EXTRA }] }, owner)).rejects.toThrow(/not a picture/);
+  });
+
   it("only an owner/admin saves rooms; members can place (paid, reserved first)", async () => {
     const { harness } = await setup();
     await expect(harness.performAction("rooms.save", { name: "R", photoFileId: ROOM }, member)).rejects.toThrow(/owner or an admin/);
@@ -1624,8 +1655,66 @@ describe("several source pictures per identity", () => {
     await vision(harness);
     const many = Array.from({ length: MAX_SOURCE_PICTURES + 1 }, (_, i) => `f${i}f${i}f${i}f${i}-0000-4000-8000-000000000000`);
     await expect(makeIdentity(harness, { sourceFileIds: many })).rejects.toThrow(new RegExp(`at most ${MAX_SOURCE_PICTURES} pictures`));
-    await expect(makeIdentity(harness, { sourceFileIds: [CLOSE, FOREIGN] })).rejects.toThrow(/not in this company's Files/);
+    // Only pictures of another company: nothing is left to save.
+    await expect(makeIdentity(harness, { sourceFileIds: [FOREIGN], crops: [] })).rejects.toThrow(/not in this company's Files/);
     expect(harness.getState(identitiesKey)).toBeUndefined();
+    // Next to a picture of the company's own, it is left out and never stored.
+    const saved = await harness.performAction<any>("identities.save", { name: "Maja Berg", sourceFileIds: [CLOSE, FOREIGN], consentLikeness: true, consentAdult: true }, owner);
+    expect(saved.identity.sourcePictures.map((p: { fileId: string }) => p.fileId)).toEqual([CLOSE]);
+  });
+
+  describe("a picture deleted from Files does not stop the save", () => {
+    const GONE = "f9f9f9f9-0000-4000-8000-0000000000f9";
+    const GONE_CROP = "f8f8f8f8-0000-4000-8000-0000000000f8";
+    const save = (harness: TestHarness, extra: Record<string, unknown>) =>
+      harness.performAction<any>("identities.save", { name: "Maja Berg", consentLikeness: true, consentAdult: true, ...extra }, owner);
+
+    it("leaves out the missing pictures, says so, and keeps the rest", async () => {
+      const { harness } = await people();
+      const fn = await vision(harness);
+      const res = await save(harness, {
+        sourceFileIds: [GONE, CLOSE, FULL],
+        canonicalFileId: GONE,
+        crops: [
+          { role: "face", fileId: FACE, sourceFileId: GONE, box: { x: 0.2, y: 0.1, w: 0.5, h: 0.5 } },
+          { role: "body", fileId: GONE_CROP, sourceFileId: FULL, box: { x: 0.1, y: 0, w: 0.8, h: 1 } },
+        ],
+      });
+      expect(res.note).toBe("2 pictures were removed because they are no longer in Files.");
+      expect(res.identity.sourcePictures.map((p: { fileId: string }) => p.fileId)).toEqual([CLOSE, FULL]);
+      expect(res.identity.originalFileId).toBe(CLOSE);
+      expect(res.identity.canonicalFileId).toBeNull();
+      // The crop whose own picture is gone is dropped; one cut from a gone picture stays, as a separate picture.
+      expect(res.identity.crops.map((c: { role: string; fileId: string; sourceFileId: string | null }) => [c.role, c.fileId, c.sourceFileId])).toEqual([["face", FACE, null]]);
+      // The age check still runs on the pictures that remain.
+      expect(ageCallsOf(fn).map((c) => (c[1] as { fileId: string }).fileId).sort()).toEqual([CLOSE, FULL].sort());
+    });
+
+    it("says nothing when nothing is missing", async () => {
+      const { harness } = await people();
+      await vision(harness);
+      expect((await save(harness, { sourceFileIds: [CLOSE, FULL] })).note).toBeNull();
+    });
+
+    it("a remaining picture that is not clearly an adult still refuses the save", async () => {
+      const { harness } = await people();
+      await vision(harness, { young: [YOUNG] });
+      await expect(save(harness, { sourceFileIds: [GONE, CLOSE, YOUNG] })).rejects.toThrow(/young\.png/);
+      await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "identityAgeBlocks" }, [FULL]);
+      await expect(save(harness, { sourceFileIds: [GONE, CLOSE, FULL] })).rejects.toThrow(/under 18/);
+      expect(harness.getState(identitiesKey)).toBeUndefined();
+    });
+
+    it("a file that is there but not a picture is still refused", async () => {
+      const { harness } = await people();
+      harness.seed({ companyFiles: [file(EXTRA, Buffer.from("text"), COMPANY, "text/plain")] });
+      await expect(save(harness, { sourceFileIds: [GONE, CLOSE, EXTRA] })).rejects.toThrow(/not a picture/);
+    });
+
+    it("with no picture left it asks for one again", async () => {
+      const { harness } = await people();
+      await expect(save(harness, { sourceFileIds: [GONE], crops: [] })).rejects.toThrow(/not in this company's Files any more/);
+    });
   });
 
   it("every added picture must pass the age check (by content), and one not clearly adult is refused before it is used", async () => {
