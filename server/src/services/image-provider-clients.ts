@@ -128,7 +128,8 @@ export class FalImageProvider implements ImageGenerationProvider {
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const sent: SentRequestFacts = {
       tool: null,
-      safety: safetyFieldsOf(body),
+      // Fal's safety fields are added to the body at send time; read the same set back.
+      safety: safetyFieldsOf(body, falSafetyFields(model)),
       contentFilterOn: null,
       promptExpansion: PROMPT_EXPANSION_UNSUPPORTED,
       seed: SEED_UNSUPPORTED,

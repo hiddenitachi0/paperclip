@@ -315,7 +315,8 @@ export class FalVideoProvider implements MediaJobProvider {
     const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body, input.storeIO === false ? { storeIO: false } : {});
     const sent: SentRequestFacts = {
       tool: null,
-      safety: safetyFieldsOf(body),
+      // Fal's safety fields are added to the body at send time; read the same set back.
+      safety: safetyFieldsOf(body, falSafetyFields(model)),
       contentFilterOn: null,
       promptExpansion: PROMPT_EXPANSION_UNSUPPORTED,
       seed: typeof body.seed === "number" ? body.seed : seedSent(undefined),
