@@ -1807,6 +1807,13 @@
       "when": 1793135197343,
       "tag": "0258_storyline_content_rating",
       "breakpoints": true
+    },
+    {
+      "idx": 259,
+      "version": "7",
+      "when": 1793153326017,
+      "tag": "0259_media_setup_register",
+      "breakpoints": true
     }
   ]
 }
