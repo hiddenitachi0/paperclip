@@ -6,6 +6,7 @@ import {
   MediaStudioLooksPage,
   clampStrength,
   draftToSaveParams,
+  falModelOfLook,
   loraFits,
   withoutMisfits,
   filterSogniModels,
@@ -543,5 +544,15 @@ describe("looks page helpers", () => {
     });
     expect(modelFilterNotice(MODELS.find((m) => m.id === "one_obsession_v22_fp16") ?? null)).toBeNull();
     expect(modelFilterNotice(MODELS.find((m) => m.id === "dark_beast_krea2_fp8")!)).toMatch(/only works with the Sensitive content filter off/);
+  });
+
+  it("Create tab: only a Fal model is copied from a look into the Fal box", () => {
+    expect(falModelOfLook({ model: "fal-ai/flux/dev", provider: "fal" })).toBe("fal-ai/flux/dev");
+    expect(falModelOfLook({ model: "fal-ai/flux/dev", provider: null })).toBe("fal-ai/flux/dev");
+    expect(falModelOfLook({ model: "z_image_turbo_bf16", provider: "sogni" })).toBeNull();
+    expect(falModelOfLook({ model: "z_image_turbo_bf16", provider: null })).toBeNull();
+    expect(falModelOfLook({ model: "soul", provider: "higgsfield" })).toBeNull();
+    expect(falModelOfLook({ model: null, provider: "fal" })).toBeNull();
+    expect(falModelOfLook(undefined)).toBeNull();
   });
 });
