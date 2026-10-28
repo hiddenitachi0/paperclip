@@ -1093,6 +1093,13 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  // "Use the film's model for all shots": drops every shot's own pin. Registered before the :shotId routes.
+  router.post("/companies/:companyId/video-storylines/:storylineId/shots/use-film-model", ...gatedScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const storylineId = req.params.storylineId as string;
+    res.json(await storylines.clearShotModelPins(companyId, storylineId, actorOf(req)));
+  });
+
   router.delete("/companies/:companyId/video-storylines/:storylineId/shots/:shotId", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;

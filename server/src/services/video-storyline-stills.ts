@@ -10,6 +10,7 @@ import {
   type VideoStoryboardShotSummary,
   type VideoStoryboardSummary,
   readVideoStorylineCast,
+  videoCastNameMentioned,
   videoShotCast,
 } from "@paperclipai/shared";
 import { conflict, unprocessable } from "../errors.js";
@@ -29,6 +30,7 @@ import {
 } from "./image-provider-clients.js";
 import {
   editImageDropsNote,
+  falIgnoresNote,
   fitLorasToModel,
   loadStoryboardLooks,
   lookForShot,
@@ -38,6 +40,7 @@ import {
   sogniStepModel,
   storyboardPrompt,
   storyboardReferences,
+  type StoryboardLook,
   type StoryboardPictureTarget,
 } from "./storyboard-picture-look.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
@@ -57,6 +60,7 @@ import {
   castPictureRefusal,
   castPromptLine,
   loadCastAgeRefusals,
+  loadCastIdentities,
   loadLinkedCastIdentities,
   planCastStill,
   sheetWithCastIdentity,
@@ -83,6 +87,8 @@ interface ShotCastPeople {
   people: CastPerson[];
   notes: string[];
   pluginId?: string | null;
+  /** The person picked this shot's cast by hand: the names in its text then do not add anyone. */
+  pickedByHand?: boolean;
 }
 
 const IMAGE_FETCH_TIMEOUT_MS = 30_000;
@@ -281,14 +287,28 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     if (cast.people.length > 0) {
       return finishCastStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, cast);
     }
-    // Nobody is linked in this shot: a look that shows a saved person keeps only its style and setting.
-    const scoped = lookForShot(target.look, new Set());
+    // Nobody is linked in this shot: a look that shows a saved person keeps only its style and setting, unless the shot names that person.
+    const scoped = await lookOnShot(companyId, target, shot, cast);
     const look = scoped.look;
     const notes = [...cast.notes];
     if (scoped.note) notes.push(scoped.note);
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
-    const referenceImages = await loadReferenceImages(db, companyId, refs.ids);
+    let referenceImages: string[];
+    if (scoped.person) {
+      // The look's person is in this shot without a cast link (named in the text): their pictures face the same age check as a cast member's.
+      // One at a time so each file id is checked against its own bytes.
+      const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
+      for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
+      const refusal = castPictureRefusal(
+        loaded.map((p) => ({ ...p, personName: scoped.person! })),
+        await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+      );
+      if (refusal) throw unprocessable(refusal);
+      referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
+    } else {
+      referenceImages = await loadReferenceImages(db, companyId, refs.ids);
+    }
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
     const mode = filmContentMode(storyline);
@@ -312,15 +332,22 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
         const fit = fitLorasToModel({ name: look.name, loras: ruled.loras }, modelUsed, known);
         if (fit.note) notes.push(fit.note);
         if (fit.loras.length > 0) input.loras = fit.loras;
-        if (look.seed !== null) input.seed = look.seed;
-        if (look.guidance !== null) input.guidance = look.guidance;
-        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
-        const dropped = referenceImages.length > 0 ? editImageDropsNote(look) : null;
-        if (dropped) notes.push(dropped);
+        if (referenceImages.length > 0) {
+          // Sogni's editor has no place for these; they are not sent, and the note says so.
+          const dropped = editImageDropsNote(look);
+          if (dropped) notes.push(dropped);
+        } else {
+          if (look.seed !== null) input.seed = look.seed;
+          if (look.guidance !== null) input.guidance = look.guidance;
+          if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+        }
       }
-    } else if (target.model && referenceImages.length === 0) {
+    } else {
+      // Fal.ai uses the look's style words and character description only.
+      const ignored = falIgnoresNote(look);
+      if (ignored) notes.push(ignored);
       // With reference pictures Fal always uses FLUX Kontext (multi), which is what carries faces over.
-      input.model = target.model;
+      if (target.model && referenceImages.length === 0) input.model = target.model;
     }
     if (target.providerId === "fal") assertFilmModelAllowed(input.model, mode);
     // Safe-for-work words: in the prompt for edit_image and Fal; in "things to avoid" for Sogni's generate_image.
@@ -429,6 +456,34 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     return castInfo.notes.length > 0 ? { ...toStoryboardShotSummary(row), notes: castInfo.notes } : toStoryboardShotSummary(row);
   }
 
+  /**
+   * The look as it applies to this shot (see lookForShot). The look's saved
+   * person counts as in the shot when they are in its cast, or, unless the
+   * cast was picked by hand, when the shot's description names them (their
+   * name or nickname), as the cast does: a storyline with no cast, or whose
+   * cast lacks the person, still gets them in a shot that names them.
+   * `person` is their name when they are in the shot (else null).
+   */
+  async function lookOnShot(
+    companyId: string,
+    target: StoryboardPictureTarget,
+    shot: Pick<ShotRow, "prompt" | "cameraNotes">,
+    cast: ShotCastPeople,
+  ): Promise<{ look: StoryboardLook | null; note: string | null; person: string | null }> {
+    const present = new Set(cast.people.map((p) => p.identity.id));
+    const identityId = target.look?.identityId ?? null;
+    if (!identityId) return { ...lookForShot(target.look, present), person: null };
+    const inCast = cast.people.find((p) => p.identity.id === identityId)?.identity ?? null;
+    if (inCast) return { ...lookForShot(target.look, present), person: inCast.name };
+    const identity = (await loadCastIdentities(db, cast.pluginId ?? null, companyId)).find((i) => i.id === identityId) ?? null;
+    if (identity && !cast.pickedByHand) {
+      const text = [shot.prompt, shot.cameraNotes ?? ""].join("\n");
+      if (videoCastNameMentioned(text, identity.name) || videoCastNameMentioned(text, identity.nickname)) present.add(identityId);
+    }
+    // `person` is set whenever the look's person stays in this shot: their pictures go through the age check like a cast member's.
+    return { ...lookForShot(target.look, present, identity?.name ?? null), person: present.has(identityId) ? (identity?.name ?? null) : null };
+  }
+
   /** The shot's cast and the saved people they are linked to (company-scoped). */
   async function shotCastPeople(
     companyId: string,
@@ -437,11 +492,11 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     shot: Pick<ShotRow, "id" | "prompt" | "cameraNotes">,
   ): Promise<ShotCastPeople> {
     const cast = readVideoStorylineCast(storyline.pictureSettings);
-    if (cast.members.length === 0) return { castIds: [], people: [], notes: [] };
+    if (cast.members.length === 0) return { castIds: [], people: [], notes: [], pluginId };
     const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
-    const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
+    const { castIds, picked } = videoShotCast(shot, cast, castIdentityNames(identities));
     const { people, notes } = castPeople(castIds, cast.members, identities);
-    return { castIds, people, notes, pluginId };
+    return { castIds, people, notes, pluginId, pickedByHand: picked };
   }
 
   /**
@@ -464,7 +519,7 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     cast: ShotCastPeople,
   ): Promise<VideoStoryboardShotSummary> {
     // A look that shows a saved person puts that person's character fields and face/body pictures only on shots they are in.
-    const scoped = lookForShot(target.look, new Set(cast.people.map((p) => p.identity.id)));
+    const scoped = await lookOnShot(companyId, target, shot, cast);
     const look = scoped.look;
     const mode = filmContentMode(storyline);
     const filter = filmContentFilter(mode, look ? look.safeContentFilter : null);
@@ -492,7 +547,8 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
     }
     const refusal = castPictureRefusal(
-      loaded.filter((p) => p.owner).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner! })),
+      // The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
+      loaded.filter((p) => p.owner || scoped.person).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person! })),
       await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
     );
     if (refusal) throw unprocessable(refusal);
@@ -537,13 +593,21 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
         notes.push(`${people[0]?.member.name ?? "The person"}'s own LoRA was used to keep them the same.`);
       }
       if (loras.length > 0) input.loras = loras;
-      if (look) {
-        if (look.guidance !== null) input.guidance = look.guidance;
-        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
-        const dropped = editImageDropsNote(look);
-        if (dropped) notes.push(dropped);
-      }
       input.safeContentFilter = filter.safeContentFilter;
+      if (look) {
+        if (sent.length > 0) {
+          // Made from reference pictures: Sogni's editor has no place for seed, guidance or "things to avoid"; they are not sent, and the note says so.
+          const dropped = editImageDropsNote(look);
+          if (dropped) notes.push(dropped);
+        } else {
+          if (look.seed !== null) input.seed = look.seed;
+          if (look.guidance !== null) input.guidance = look.guidance;
+          if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+        }
+      }
+    } else {
+      const ignored = falIgnoresNote(look);
+      if (ignored) notes.push(ignored);
     }
     // Every cast picture is made from reference pictures: edit_image on Sogni (no negative field), Kontext/FLUX edit on Fal.
     Object.assign(input, filmPictureText(mode, { prompt: input.prompt, negativePrompt: input.negativePrompt }, false));

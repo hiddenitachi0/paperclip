@@ -183,13 +183,20 @@ export class SogniLoraCatalogCache {
 
   private async refresh(): Promise<SogniLoraCatalog | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
     try {
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Sogni LoRA catalog timed out")), SOGNI_LORA_CATALOG_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Sogni LoRA catalog timed out"));
+        }, SOGNI_LORA_CATALOG_TIMEOUT_MS);
       });
       const read = (async () => {
-        const res = await this.fetchImpl(SOGNI_LORA_CATALOG_URL, { method: "GET", headers: { Accept: "application/json" } });
+        // redirect: "error" keeps this to the one fixed address even with the default fetch.
+        const res = await this.fetchImpl(SOGNI_LORA_CATALOG_URL, { method: "GET", headers: { Accept: "application/json" }, redirect: "error", signal: controller.signal });
         if (res.status !== 200) return null;
+        const declared = Number(res.headers.get("content-length"));
+        if (Number.isFinite(declared) && declared > SOGNI_LORA_CATALOG_MAX_BYTES) return null;
         const text = await res.text();
         if (text.length > SOGNI_LORA_CATALOG_MAX_BYTES) return null;
         return parseSogniLoraCatalog(JSON.parse(text));

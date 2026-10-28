@@ -222,29 +222,41 @@ export function sheetWithoutCharacter(sheet: CharacterSheet): CharacterSheet {
   return Object.fromEntries(SHEET_FIELDS.filter((f) => f.group !== "character" && sheet[f.key]).map((f) => [f.key, sheet[f.key]])) as CharacterSheet;
 }
 
+/** Picture roles that stay on a shot without the look's person: they show the look's style and setting, not a person or their clothes. */
+const SCENE_ROLES: readonly ReferenceRole[] = ["style", "background"];
+
 /**
  * The look as it applies to one shot. A look that shows a saved person
- * (identityId) puts that person's character fields and face/body pictures
- * only on shots where the person is in the cast; any other shot gets the
- * look's style and setting, and a note saying what was left out. A look with
- * no saved person is returned as it is.
+ * (identityId) puts that person's character fields and pictures only on
+ * shots where the person is: in the shot's cast, or named in the shot's text
+ * (the caller decides, see presentIdentityIds). Any other shot gets the look's
+ * style and setting fields and only its style and background pictures: a
+ * picture tagged face, body, outfit or "other" (the tag every new picture
+ * starts with) may show the person, so it stays out too. A note says what was
+ * left out and how to get the person back. A look with no saved person is
+ * returned as it is.
  */
-export function lookForShot(look: StoryboardLook | null, castIdentityIds: ReadonlySet<string>): { look: StoryboardLook | null; note: string | null } {
-  if (!look || !look.identityId || castIdentityIds.has(look.identityId)) return { look, note: null };
+export function lookForShot(
+  look: StoryboardLook | null,
+  presentIdentityIds: ReadonlySet<string>,
+  personName?: string | null,
+): { look: StoryboardLook | null; note: string | null } {
+  if (!look || !look.identityId || presentIdentityIds.has(look.identityId)) return { look, note: null };
   const sheet = sheetWithoutCharacter(look.sheet);
   const referenceFileIds: string[] = [];
   const referenceRoles: ReferenceRole[] = [];
   look.referenceFileIds.forEach((id, i) => {
     const role = look.referenceRoles[i] ?? "other";
-    if (role === "face" || role === "body") return;
+    if (!SCENE_ROLES.includes(role)) return;
     referenceFileIds.push(id);
     referenceRoles.push(role);
   });
   const leftOutFields = Object.keys(look.sheet).length > Object.keys(sheet).length;
   const leftOutPictures = referenceFileIds.length < look.referenceFileIds.length;
+  const who = personName?.trim() || "the look's saved person";
   const note =
     leftOutFields || leftOutPictures
-      ? `The look "${look.name}" shows a saved person who is not in this shot, so its character description and face and body pictures were left out; only its style and setting were used.`
+      ? `The look "${look.name}" shows a saved person (${who}) who is not in this shot's cast and is not named in its description, so its character description and its face, body, outfit and untagged pictures were left out; its style, setting and style and background pictures were used. To put ${who} in this shot, add them to the cast in step 1 and link them to the saved person, or name them in the shot's description.`
       : null;
   return { look: { ...look, sheet, referenceFileIds, referenceRoles }, note };
 }
@@ -280,7 +292,7 @@ const SOGNI_MODEL_NAMES: Record<string, string> = {
 
 function skippedLorasNote(lookName: string, modelName: string, skipped: LoraFitCheck[]): string {
   const parts = skipped.map((check) =>
-    check.fit === "other-models" ? `"${check.name}" (made for ${madeForText(check.madeFor)})` : `"${check.name}" (Sogni does not list it for this account any more)`,
+    check.fit === "other-models" ? `"${check.name}" (made for ${madeForText(check.madeFor)})` : `"${check.name}" (Sogni does not list it any more)`,
   );
   const one = skipped.length === 1;
   return `The look "${lookName}" has ${one ? "a LoRA that does" : `${skipped.length} LoRAs that do`} not work with ${modelName}, so ${one ? "it was" : "they were"} left out of this picture: ${parts.join(", ")}. An owner or admin can remove ${one ? "it" : "them"} from the look.`;
@@ -307,7 +319,7 @@ export function fitLorasToModel(
   if (known === null) {
     return {
       loras: look.loras.slice(0, SOGNI_MAX_LORAS),
-      note: `Sogni's list of LoRAs could not be read just now, so the look "${look.name}" LoRAs were sent as saved and not checked against ${modelName}.`,
+      note: `Sogni's list of LoRAs could not be read just now, so the LoRAs of the look "${look.name}" were sent as saved and not checked against ${modelName}.`,
     };
   }
   const checks = classifyLoras({ id: modelId, name: modelName }, look.loras, known, SOGNI_MODEL_NAMES);
@@ -325,6 +337,20 @@ export function editImageDropsNote(look: Pick<StoryboardLook, "name" | "seed" | 
   if (dropped.length === 0) return null;
   const list = dropped.length === 1 ? dropped[0]! : `${dropped.slice(0, -1).join(", ")} and ${dropped[dropped.length - 1]}`;
   return `Pictures made from reference pictures use Sogni's picture editor, which has no place for the look's ${list}, so ${dropped.length === 1 ? "it was" : "they were"} not used.`;
+}
+
+/** What a Fal.ai picture ignores of the look (LoRAs, seed, guidance, "things to avoid"); null when the look sets none of it. */
+export function falIgnoresNote(look: Pick<StoryboardLook, "name" | "loras" | "seed" | "guidance" | "negativePrompt"> | null): string | null {
+  if (!look) return null;
+  const ignored = [
+    look.loras.length > 0 ? (look.loras.length === 1 ? "its LoRA" : "its LoRAs") : null,
+    look.seed !== null ? "seed" : null,
+    look.guidance !== null ? "guidance" : null,
+    look.negativePrompt ? '"things to avoid" text' : null,
+  ].filter((x): x is string => x !== null);
+  if (ignored.length === 0) return null;
+  const list = ignored.length === 1 ? ignored[0]! : `${ignored.slice(0, -1).join(", ")} and ${ignored[ignored.length - 1]}`;
+  return `Fal.ai pictures use only the style words and character description of the look "${look.name}", not ${list}, so ${ignored.length === 1 ? "it was" : "they were"} left out. Pick Sogni for this storyline to use ${ignored.length === 1 ? "it" : "them"}.`;
 }
 
 /**

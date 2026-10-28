@@ -258,7 +258,7 @@ describe("models and picture settings on the Storylines page", () => {
     expect(settings.textContent).toContain("Picture settings: Sogni, default model, no look (about $0.01 a picture)");
     // The help text says what a look really does here, not "the same way the Create tab uses it".
     expect(settings.textContent).not.toContain("the same way the Create tab");
-    expect(settings.textContent).toContain("only in shots where the look's saved person is in the cast");
+    expect(settings.textContent).toContain("only in shots where that person is in the cast");
     expect(settings.textContent).toContain("look made for Higgsfield cannot be used here yet");
     const serviceOptions = Array.from((settings.querySelector('select[aria-label="Picture service"]') as HTMLSelectElement).options).map((o) => o.value);
     expect(serviceOptions).toEqual(["", "sogni"]);

@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
 import { readContentMode } from "@paperclipai/plugin-sdk/media";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, videoTransitionTakes, withCompanyScope } from "@paperclipai/db";
@@ -35,6 +35,7 @@ import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastIdentities } from "./storyline-cast.js";
+import { estimateShotRenderCents, loadMadeClipTargets, realVideoModel } from "./video-storyline-shot-target.js";
 
 /**
  * DUR-4127: CRUD for a video storyline's project/scene/shot tree. Render
@@ -121,6 +122,10 @@ export interface VideoShotSummary {
   durationSeconds: number;
   lookReferenceAssetIds: string[];
   status: string;
+  /**
+   * A person's pin for this one shot ("keep this shot on X"); both null = the shot follows the film's
+   * service and model. A render never sets these: what a render used is on its job.
+   */
   providerId: string | null;
   model: string | null;
   resultObjectKey: string | null;
@@ -875,6 +880,10 @@ export function videoStorylineService(db: Db) {
       // A different look only changes the NEXT picture made for this shot; the
       // current picture and its approval stay until the person remakes it.
       ...(input.pictureLookId !== undefined ? { pictureLookId: input.pictureLookId } : {}),
+      // A person's pin to one service/model for this shot only; null service = follow the film again (the model goes with it).
+      ...(input.providerId !== undefined
+        ? { providerId: input.providerId, model: input.providerId === null ? null : realVideoModel(input.model) }
+        : {}),
       ...(touchesStillContent
         ? {
             storyboardStatus: "pending" as const,
@@ -910,16 +919,40 @@ export function videoStorylineService(db: Db) {
           .returning()
           .then((rows) => rows[0]);
     if (!row) throw new Error("Video shot update returned no row");
-    if (input.durationSeconds !== undefined) await recomputeEstimate(companyId, storylineId);
+    if (input.durationSeconds !== undefined || input.providerId !== undefined) await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
       companyId,
       ...activityActor(actor),
       action: "video_shot.updated",
       entityType: "video_shot",
       entityId: row.id,
-      details: { fields: Object.keys(input) },
+      details: { fields: Object.keys(input), ...(input.providerId !== undefined ? { pin: { providerId: row.providerId, model: row.model } } : {}) },
     });
     return toShotSummary(row);
+  }
+
+  /**
+   * "Use the film's model for all shots": drops every shot's own pin so the next render of any shot
+   * follows the film. Shots already made are untouched (their clips keep the model on their render job).
+   */
+  async function clearShotModelPins(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<{ cleared: number }> {
+    const storyline = await getStorylineRow(companyId, storylineId);
+    assertStorylineEditable(storyline);
+    const rows = await db
+      .update(videoShots)
+      .set({ providerId: null, model: null, updatedAt: new Date() })
+      .where(and(eq(videoShots.storylineId, storylineId), eq(videoShots.companyId, companyId), isNotNull(videoShots.providerId)))
+      .returning({ id: videoShots.id });
+    if (rows.length > 0) await recomputeEstimate(companyId, storylineId);
+    await logActivity(db, {
+      companyId,
+      ...activityActor(actor),
+      action: "video_storyline.shot_pins_cleared",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { cleared: rows.length },
+    });
+    return { cleared: rows.length };
   }
 
   async function deleteShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<void> {
@@ -952,12 +985,22 @@ export function videoStorylineService(db: Db) {
   async function recomputeEstimate(companyId: string, storylineId: string): Promise<VideoStorylineSummary> {
     const storyline = await getStorylineRow(companyId, storylineId);
     const allShots = await db
-      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus, clipKind: videoShots.clipKind })
+      .select({
+        id: videoShots.id,
+        status: videoShots.status,
+        providerId: videoShots.providerId,
+        model: videoShots.model,
+        durationSeconds: videoShots.durationSeconds,
+        storyboardStatus: videoShots.storyboardStatus,
+        clipKind: videoShots.clipKind,
+      })
       .from(videoShots)
       .where(eq(videoShots.storylineId, storylineId));
     // Phase 2: the company's own videos and photos cost nothing to put in the film.
     const shots = allShots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
-    const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
+    // The same target function the render uses (a shot's own pin, else the film's); a finished shot is priced at the model that made it.
+    const madeTargets = await loadMadeClipTargets(db, shots.filter((s) => s.status === "done").map((s) => s.id));
+    const estimate = estimateShotRenderCents(storyline, shots.map((s) => ({ ...s, madeWith: madeTargets.get(s.id) ?? null })));
     const [row] = await db
       .update(videoStorylines)
       .set({
@@ -1341,6 +1384,7 @@ export function videoStorylineService(db: Db) {
     deleteScene,
     createShot,
     updateShot,
+    clearShotModelPins,
     deleteShot,
     recomputeEstimate,
     importScript,
