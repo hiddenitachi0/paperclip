@@ -1088,6 +1088,120 @@ export interface PluginPictureFeedbackRules {
 }
 
 // ---------------------------------------------------------------------------
+// Media library (Media Studio film studio, Phase 1) -- `mediaLibrary.*`
+// ---------------------------------------------------------------------------
+//
+// Read-only views of the company's saved model setups, LoRA library and
+// new-project defaults, kept in core tables (not plugin state). Requires
+// `media.library.read`. Rows are only ever the requested company's; inside a
+// UI action the host also holds the worker to the company it confirmed.
+// Self-contained types: plugins cannot import @paperclipai/shared.
+
+/** One LoRA picked in a setup, with what the library knows about it (null fields: gone from the library). */
+export interface PluginMediaSetupLora {
+  loraId: string;
+  /** Explicit multiplier (never a percentage). */
+  strength: number;
+  name: string | null;
+  /**
+   * The id or link the provider takes ("h3-better-motion", "personal-...", or an
+   * https link on Fal). A link never comes with its query string or "#" part:
+   * a link with a key in it is never saved, and the rest stays on the board's pages.
+   */
+  ref: string | null;
+  source: "catalog" | "personal" | "url" | null;
+  triggerWords: string[];
+  contentTag: "sfw" | "mature" | "refused" | "unreviewed" | null;
+}
+
+/** A saved model setup ("Action" = MiniMax H3 + Better Motion at 0.8). */
+export interface PluginMediaSetup {
+  id: string;
+  companyId: string;
+  name: string;
+  description: string;
+  kind: "image" | "video";
+  /** sogni | fal | higgsfield | comfyui (a video setup is always sogni or fal). */
+  provider: string;
+  family: string | null;
+  /** t2i | edit | t2v | i2v | flf2v | r2v | extend */
+  mode: string | null;
+  /** The exact model id sent to the provider. */
+  modelId: string;
+  editModelId: string | null;
+  loras: PluginMediaSetupLora[];
+  /** Always holds `promptExpansion` (boolean). */
+  params: Record<string, unknown>;
+  /** Computed now: mature when the model or any LoRA is mature or not yet reviewed. */
+  contentRating: "sfw" | "mature";
+  /** Agents may only use "approved" setups. */
+  status: "draft" | "approved" | "archived";
+  tags: string[];
+  favorite: boolean;
+  notes: string;
+  builtinKey: string | null;
+  /** sogni-unlimited | sogni-premium | sogni-credits | fal-pay-per-use | higgsfield-credits | local | unknown */
+  billing: string;
+  billingLabel: string;
+  triggerWords: string[];
+  /** Plain sentences; empty when the setup can be used. */
+  problems: string[];
+  updatedAt: string;
+}
+
+/** A LoRA in the company's library. */
+export interface PluginMediaLora {
+  id: string;
+  companyId: string;
+  provider: "sogni" | "fal";
+  source: "catalog" | "personal" | "url";
+  /** Sogni id, or an https link on Fal (never with its query string or "#" part). */
+  ref: string;
+  name: string;
+  notes: string;
+  triggerWords: string[];
+  family: string | null;
+  compatibleModelIds: string[];
+  /** What counts (the stored tag raised to the rules' floor). "unreviewed" counts as mature. */
+  effectiveContentTag: "sfw" | "mature" | "refused" | "unreviewed";
+  strengthMin: number | null;
+  strengthMax: number | null;
+  strengthDefault: number;
+  recommendedMin: number | null;
+  recommendedMax: number | null;
+}
+
+/** The company's new-project defaults. */
+export interface PluginMediaProjectDefaults {
+  companyId: string;
+  defaultImageSetupId: string | null;
+  defaultVideoSetupId: string | null;
+  defaultContentRating: "sfw" | "mature";
+  defaultContinuityMode: "stills" | "keyframes";
+}
+
+/** A setup resolved on the host with the database: exactly what a run sends (links without their query string). */
+export interface PluginMediaResolvedSetup {
+  setupId: string;
+  name: string;
+  kind: "image" | "video";
+  status: "draft" | "approved" | "archived";
+  provider: string;
+  modelId: string;
+  editModelId: string | null;
+  mode: string | null;
+  family: string | null;
+  loras: Array<{ loraId: string; ref: string; source: "catalog" | "personal" | "url"; name: string; strength: number; triggerWords: string[] }>;
+  triggerWords: string[];
+  params: Record<string, unknown>;
+  contentRating: "sfw" | "mature";
+  billing: string;
+  /** False when the setup is archived or has problems; `problems` says why in plain words. */
+  usable: boolean;
+  problems: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Worker → Host Method Signatures (SDK client calls)
 // ---------------------------------------------------------------------------
 
@@ -1916,6 +2030,33 @@ export interface WorkerToHostMethods {
       runId: string;
     },
     result: PluginPictureFeedbackRules,
+  ];
+
+  // Media library (read-only)
+  "mediaLibrary.listSetups": [
+    params: {
+      companyId: string;
+      kind?: "image" | "video";
+      /** True on every agent path: only approved setups come back. Archived ones never do. */
+      approvedOnly?: boolean;
+    },
+    result: PluginMediaSetup[],
+  ];
+  "mediaLibrary.getSetup": [
+    params: { companyId: string; setupId: string; approvedOnly?: boolean },
+    result: PluginMediaSetup | null,
+  ];
+  "mediaLibrary.getProjectDefaults": [
+    params: { companyId: string },
+    result: PluginMediaProjectDefaults,
+  ];
+  "mediaLibrary.listLoras": [
+    params: { companyId: string },
+    result: PluginMediaLora[],
+  ];
+  "mediaLibrary.resolve": [
+    params: { companyId: string; setupId: string; approvedOnly?: boolean },
+    result: PluginMediaResolvedSetup | null,
   ];
 }
 

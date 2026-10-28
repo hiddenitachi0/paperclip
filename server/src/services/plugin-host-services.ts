@@ -37,6 +37,7 @@ import {
 import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
+import { mediaLibraryHostService } from "./media-library-host.js";
 import { pluginImageAnalysisService, type ImageAnalysisCaller, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
@@ -2930,6 +2931,10 @@ export function buildHostServices(
         });
       },
     },
+
+    // Media Studio film studio Phase 1: read-only setups, LoRAs and project
+    // defaults, rows of the requested company only (media-library-host.ts).
+    mediaLibrary: mediaLibraryHostService(db, ensureCompanyId),
 
     personas: {
       async reserveDailyGeneration(params) {
