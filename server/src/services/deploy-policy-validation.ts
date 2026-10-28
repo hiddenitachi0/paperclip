@@ -68,6 +68,7 @@ function describeSftpPathProblem(value: string): string | null {
   if (isAbsolutePath(value)) return "it is an absolute path";
   if (/\s/.test(value)) return "it contains a space";
   if (/['"\\]/.test(value)) return "it contains a quote or backslash character";
+  if (/[%#?]/.test(value)) return "it contains a percent sign, # or ? (the runner builds a URL from the path, so these would not mean what they say)";
   const body = value.endsWith("/") ? value.slice(0, -1) : value;
   const segments = body.split("/");
   if (segments.some((segment) => segment === "..")) return 'it contains a ".." segment';

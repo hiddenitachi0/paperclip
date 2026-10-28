@@ -4808,6 +4808,74 @@ test("DUR-4977: upload_via_sftp ships a folder entry's tracked files and passes 
   }
 });
 
+// Security review of PR #689 (F1): a tracked file named Apps/%2e%2e/%2e%2e/Apps/data/x
+// becomes a curl URL whose dot segments curl normalises, so the "staged" upload
+// would land on a live, excluded path. "#" and "?" cut the URL short and leave
+// the file in the docroot. Names are chosen by whoever writes the commit.
+test("DUR-4977: a tracked file name with %, # or ? refuses the deploy before any connection is opened", () => {
+  const names = ["Apps/%2e%2e/%2e%2e/Apps/data/users.json", "Apps/info.php#x", "Apps/info.php?x", "Apps/a%23.php"];
+  for (const name of names) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-urlchars-test-"));
+    try {
+      const site = makeGitSite(dir);
+      mkdirSync(path.dirname(path.join(site, name)), { recursive: true });
+      writeFileSync(path.join(site, name), "<?php // evil");
+      assertSuccess(run("git", ["add", "-A", "--", "Apps"], { cwd: site }), "git add");
+      assertSuccess(run("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "evil"], { cwd: site }), "git commit");
+      const binDir = path.join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      const callsLog = path.join(dir, "curl-calls.log");
+      writeFakeCurl(binDir, { callsLog });
+      const { result, log } = runSftpScript(
+        dir,
+        binDir,
+        `upload_via_sftp "aid-1" "${site}" "$(printf 'index.html\\nApps/')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}" "$(printf 'Apps/data/\\nApps/Turnus/turnus-store.php')"
+         echo "STATUS=$?"`,
+      );
+      assert.match(result.stdout, /STATUS=1/, `${name} must refuse the deploy\nstdout:${result.stdout}\nstderr:${result.stderr}`);
+      assert.match(log(), /percent sign, # or \?/);
+      assert.equal(curlCalls(callsLog).filter((c) => c.includes(" -T ")).length, 0, `${name}: nothing may be uploaded`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("DUR-4977: a tracked file with # in its name can be left out by excluding its folder, and then the deploy goes ahead", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-urlchars-excl-test-"));
+  try {
+    const site = makeGitSite(dir);
+    mkdirSync(path.join(site, "Apps", "old"), { recursive: true });
+    writeFileSync(path.join(site, "Apps", "old", "x#y.php"), "<?php // x");
+    assertSuccess(run("git", ["add", "-A", "--", "Apps"], { cwd: site }), "git add");
+    assertSuccess(run("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "hash"], { cwd: site }), "git commit");
+    const { result } = runSftpScript(dir, dir, `sftp_expand_allowlist "aid-1" "${site}" "Apps/" "Apps/old/"\n echo "STATUS=$?"`);
+    assert.match(result.stdout, /STATUS=0/, result.stderr);
+    assert.ok(!result.stdout.includes("x#y.php"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4977: an explicit allowlist or exclude entry with %, # or ? is refused", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-urlchars-entry-test-"));
+  try {
+    const site = makeGitSite(dir);
+    for (const [allowlist, excludes] of [["index.html#x", ""], ["Apps/", "Apps/%2e%2e/data/"], ["Apps/a%2ephp", ""], ["Apps/?/", ""]]) {
+      const { result } = runSftpScript(
+        dir,
+        dir,
+        `sftp_expand_allowlist "aid-1" "${site}" "$ALLOW" "$EXCL"
+         echo "STATUS=$?"`,
+        { ALLOW: allowlist, EXCL: excludes },
+      );
+      assert.match(result.stdout, /STATUS=1/, `${allowlist} / ${excludes}: must be refused`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("DUR-4977: upload_via_sftp refuses a missing or malformed host-key pin before reading the credential or opening a connection", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-nopin-test-"));
   try {

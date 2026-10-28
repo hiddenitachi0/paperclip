@@ -547,6 +547,8 @@ def sftp_path_problem(entry):
         return "an absolute path"
     if re.search(r"""\s|['"\\]""", entry):
         return "whitespace, a quote or a backslash in it"
+    if re.search(r"[%#?]", entry):
+        return "a percent sign, # or ? in it (curl would read it as part of the URL, not as a file name)"
     body = entry[:-1] if entry.endswith("/") else entry
     segments = body.split("/")
     if any(seg in ("", ".", "..") for seg in segments):
@@ -1618,6 +1620,10 @@ sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
 sftp_path_shape_ok() { # path -> 0 ok, 1 not a plain relative path
   local p="$1" body
   case "$p" in ""|/*|[A-Za-z]:[\\/]*) return 1 ;; esac
+  # % # ? : curl builds sftp://host/path from the name and reads them as URL
+  # syntax ("%2e%2e" is a dot segment, "#"/"?" cut the path short), so the file
+  # would land somewhere other than the name the policy checked.
+  case "$p" in *[%#?]*) return 1 ;; esac
   body="${p%/}"
   [ -n "$body" ] || return 1
   case "/$body/" in *//*|*/./*|*/../*) return 1 ;; esac
@@ -1716,6 +1722,13 @@ sftp_expand_allowlist() { # aid, target_dir, allowlist(newline), excludes(newlin
     if [ "$excluded" -eq 1 ]; then
       excluded_count=$((excluded_count + 1))
     else
+      # Checked only for files that would ship, so an operator can exclude one.
+      case "$name" in
+        *[%#?]*)
+          log "runner: $aid a tracked file to upload has a percent sign, # or ? in its name ($name) -- refusing the deploy; exclude or rename it"
+          return 1
+          ;;
+      esac
       final+=("$name")
     fi
   done
@@ -1790,6 +1803,11 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
     case "$entry" in
       *[[:space:]]*|*\'*|*\"*)
         log "runner: $aid SFTP allowlist entry '$entry' contains whitespace or a quote character, which curl's unescaped quote-command swap cannot handle safely -- refusing to upload or swap it"
+        failures=$((failures + 1))
+        continue
+        ;;
+      *[%#?]*)
+        log "runner: $aid SFTP allowlist entry '$entry' contains a percent sign, # or ? -- curl would read it as URL syntax and could stage it outside the staging folder or leave it in the live docroot, so it is refused"
         failures=$((failures + 1))
         continue
         ;;
@@ -1930,8 +1948,8 @@ sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, re
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
-      *[[:space:]]*|*\'*|*\"*)
-        log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote characters: $entry"
+      *[[:space:]]*|*\'*|*\"*|*[%#?]*)
+        log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote/URL-special characters: $entry"
         failures=$((failures + 1))
         continue
         ;;
