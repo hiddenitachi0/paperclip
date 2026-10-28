@@ -250,7 +250,9 @@ describe("describeDeployPolicyProblems", () => {
     },
   );
 
+  // paperclip:allow-git-push: transport-name string literal, not a git command invocation
   it("does not ask a git_push project for a host key pin", () => {
+    // paperclip:allow-git-push: transport-name string literal, not a git command invocation
     expect(describeDeployPolicyProblems(policy({ sftpHostKeySha256: undefined }), context, "git_push")).toEqual([]);
   });
 });
