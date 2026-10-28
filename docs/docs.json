@@ -85,6 +85,7 @@
               "deploy/deployment-modes",
               "deploy/database",
               "deploy/secrets",
+              "deploy/website-sftp-deploy",
               "deploy/storage",
               "deploy/environment-variables"
             ]

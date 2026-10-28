@@ -273,6 +273,8 @@ describe("ProjectProperties deployment section", () => {
             sftpUsername: "deploy",
             sftpRemotePath: "/httpdocs",
             sftpAllowlist: ["dist/index.html"],
+            sftpExclude: ["Apps/data/"],
+            sftpHostKeySha256: "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8",
           },
         })}
         onFieldUpdate={onFieldUpdate}
@@ -281,6 +283,11 @@ describe("ProjectProperties deployment section", () => {
     await flush();
 
     expect(el.textContent).toContain("SFTP host");
+    expect(el.textContent).toContain("SFTP host key fingerprint");
+    expect(el.textContent).toContain(".deploy-staging");
+    const inputValues = Array.from(el.querySelectorAll("input")).map((input) => input.value);
+    expect(inputValues).toContain("Apps/data/");
+    expect(inputValues).toContain("XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8");
     expect(el.textContent).toContain("never entered here");
     expect(el.textContent).not.toContain("How to deploy");
     expect(el.textContent).not.toContain("Services to restart");
