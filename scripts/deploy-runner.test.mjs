@@ -24,6 +24,8 @@ import test, { describe, it } from "node:test";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const SCRIPT = path.join(repoRoot, "scripts", "deploy-runner.sh");
+// DUR-4977: base64 sha256 host-key pin (no "SHA256:" prefix) the sftp policy now requires.
+const SFTP_PIN = "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { cwd: repoRoot, encoding: "utf8", ...options });
@@ -4100,7 +4102,7 @@ test("upload_via_sftp resolves the agent-bound credential via a chmod-600 netrc,
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4170,7 +4172,7 @@ test("upload_via_sftp fails closed and swaps nothing when an allowlisted file do
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4212,7 +4214,7 @@ test("DUR-4236: when one file fails to stage, nothing is swapped into the live p
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4253,7 +4255,7 @@ test("DUR-4236: a swap whose rename fails restores the previous live file from i
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4303,7 +4305,7 @@ test("DUR-4236: upload_via_sftp refuses an allowlist entry containing whitespace
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4349,7 +4351,7 @@ test("DUR-4236: a swap failure whose restore-rename also fails is reported as a 
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4383,7 +4385,7 @@ test("upload_via_sftp fails closed (no upload attempted) when no credential is b
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":null,"value":null}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4468,7 +4470,7 @@ test("sftp_remove_remote_entries deletes each given entry via the SFTP rm quote 
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
-      sftp_remove_remote_entries "aid-1" "$(printf '${entries}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      sftp_remove_remote_entries "aid-1" "$(printf '${entries}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4497,7 +4499,7 @@ test("sftp_remove_remote_entries is a no-op (no credential lookup, no curl) when
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { echo "cli_json must not be called when there is nothing to remove" >&2; exit 1; }
-      sftp_remove_remote_entries "aid-1" "" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      sftp_remove_remote_entries "aid-1" "" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4529,6 +4531,8 @@ test("maybe_rollback cleans up added files via sftp_remove_remote_entries when r
       DV_DEPLOY_TRANSPORT="sftp"
       DV_DEPLOY_TARGET_PATH="${targetDir}"
       DV_SFTP_ALLOWLIST="index.html"
+      DV_SFTP_EXCLUDE="data/"
+      DV_SFTP_HOST_KEY_SHA256="${SFTP_PIN}"
       DV_SFTP_HOST="sftp.example.invalid"
       DV_SFTP_PORT="22"
       DV_SFTP_USERNAME="deployer"
@@ -4544,10 +4548,14 @@ test("maybe_rollback cleans up added files via sftp_remove_remote_entries when r
     assertSuccess(result, "maybe_rollback");
 
     const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf8").trim().split("\n").filter(Boolean) : [];
-    assert.ok(calls.some((c) => c.startsWith("upload_via_sftp")), "the old allowlist must still be re-uploaded");
+    const uploadCall = calls.find((c) => c.startsWith("upload_via_sftp"));
+    assert.ok(uploadCall, "the old allowlist must still be re-uploaded");
+    // DUR-4977: the rollback re-upload is an SFTP connection like any other -- it must carry the pin and the excludes.
+    assert.ok(uploadCall.includes(SFTP_PIN) && uploadCall.endsWith("data/"), `rollback upload must pass the host key pin and excludes, got: ${uploadCall}`);
     const removeCall = calls.find((c) => c.startsWith("sftp_remove_remote_entries"));
     assert.ok(removeCall, `expected sftp_remove_remote_entries to be called, got: ${JSON.stringify(calls)}`);
     assert.ok(removeCall.includes("new-page.html"), "the added-entries list must be passed through to the cleanup call");
+    assert.ok(removeCall.includes(SFTP_PIN), "the cleanup deletes over SFTP too, so it needs the host key pin");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -4574,7 +4582,7 @@ test("upload_via_sftp fails closed (no upload attempted) when no credential is b
       set -uo pipefail
       source "${SCRIPT}"
       cli_json() { printf '{"kind":null,"value":null}'; }
-      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}"
       echo "STATUS=$?"
     `;
     const result = run("bash", ["-c", script], {
@@ -4612,6 +4620,8 @@ test("DUR-4068: a project with deployTransport \"sftp\" dispatches to upload_via
         sftpUsername: "deployer",
         sftpRemotePath: "/var/www/site",
         sftpAllowlist: ["index.html"],
+        sftpExclude: ["data/"],
+        sftpHostKeySha256: SFTP_PIN,
       },
       workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
     };
@@ -4644,9 +4654,474 @@ test("DUR-4068: a project with deployTransport \"sftp\" dispatches to upload_via
     const uploadCalls = calls.filter((line) => line.startsWith("upload_via_sftp"));
     assert.equal(uploadCalls.length, 1, `expected exactly one upload_via_sftp call for the deploy, got: ${JSON.stringify(calls)}`);
     assert.ok(uploadCalls[0].includes("agent-1") && uploadCalls[0].includes("co-1"), "the requesting agent id and company id must be threaded through to upload_via_sftp");
+    assert.ok(uploadCalls[0].includes(SFTP_PIN) && uploadCalls[0].endsWith("data/"), `the host key pin and the excludes must be threaded through to upload_via_sftp, got: ${uploadCalls[0]}`);
     assert.equal(scenario.commentsFor("aid-1").length, 1, "a successful sftp-transport deploy must still post exactly one success comment");
   } finally {
     scenario.cleanup();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// DUR-4977: the SFTP transport has to fit a real website project (durkan-web):
+// folder entries in the allowlist, an exclude list, a pinned host key on every
+// call, an ed25519 deploy key, and a staging folder that never outlives a run.
+// ---------------------------------------------------------------------------
+
+// A throwaway git checkout shaped like a small website: tracked files in
+// folders, plus an untracked file, a git-ignored file and a symlink-free tree.
+function makeGitSite(dir) {
+  const site = path.join(dir, "site");
+  mkdirSync(path.join(site, "Apps", "data"), { recursive: true });
+  mkdirSync(path.join(site, "Apps", "Turnus"), { recursive: true });
+  mkdirSync(path.join(site, "assets", "img"), { recursive: true });
+  writeFileSync(path.join(site, ".gitignore"), "ignored.txt\n");
+  writeFileSync(path.join(site, "index.html"), "<html>home</html>");
+  writeFileSync(path.join(site, "Apps", "a.php"), "<?php // a");
+  writeFileSync(path.join(site, "Apps", "data", "secret.json"), "{}");
+  writeFileSync(path.join(site, "Apps", "Turnus", "page.php"), "<?php // page");
+  writeFileSync(path.join(site, "Apps", "Turnus", "turnus-store.php"), "<?php // store");
+  writeFileSync(path.join(site, "assets", "img", "logo.png"), "png");
+  for (const args of [
+    ["init", "--quiet", "-b", "custom"],
+    ["add", "-A"],
+    ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "site"],
+  ]) {
+    assertSuccess(run("git", args, { cwd: site }), `git ${args[0]}`);
+  }
+  // Present on disk, never tracked: must never ship.
+  writeFileSync(path.join(site, "Apps", "untracked.php"), "<?php // untracked");
+  writeFileSync(path.join(site, "ignored.txt"), "ignored");
+  return site;
+}
+
+function runSftpScript(dir, binDir, body, extraEnv = {}) {
+  const logFile = path.join(dir, "runner.log");
+  const result = run(
+    "bash",
+    [
+      "-c",
+      `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      ${body}
+    `,
+    ],
+    { env: { ...process.env, ...extraEnv, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile } },
+  );
+  return { result, logFile, log: () => (existsSync(logFile) ? readFileSync(logFile, "utf8") : "") };
+}
+
+function curlCalls(callsLog) {
+  return existsSync(callsLog) ? readFileSync(callsLog, "utf8").split("\n").filter(Boolean) : [];
+}
+
+test("DUR-4977: a folder entry resolves to the files git tracks there, minus the excludes — never untracked or ignored files", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-expand-test-"));
+  try {
+    const site = makeGitSite(dir);
+    const { result } = runSftpScript(
+      dir,
+      dir,
+      `sftp_expand_allowlist "aid-1" "${site}" "$(printf 'index.html\\nApps/\\nassets/')" "$(printf 'Apps/data/\\nApps/Turnus/turnus-store.php')"
+       echo "STATUS=$?"`,
+    );
+    assert.match(result.stdout, /STATUS=0/, result.stderr);
+    const files = result.stdout.split("\n").filter((l) => l && !l.startsWith("STATUS="));
+    assert.deepEqual(files, ["Apps/Turnus/page.php", "Apps/a.php", "assets/img/logo.png", "index.html"]);
+    for (const leaked of ["Apps/untracked.php", "ignored.txt", "Apps/data/secret.json", "Apps/Turnus/turnus-store.php"]) {
+      assert.ok(!files.includes(leaked), `${leaked} must not be uploaded`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4977: an unsafe or useless allowlist/exclude entry refuses the whole deploy instead of being skipped", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-expand-unsafe-test-"));
+  try {
+    const site = makeGitSite(dir);
+    const cases = [
+      // [allowlist, excludes, why]
+      ["Apps/", "../outside", "exclude with .."],
+      ["Apps/", "/etc/passwd", "absolute exclude"],
+      ["Apps/", "Apps//data/", "exclude with an empty segment"],
+      ["Apps/", "./Apps/data/", "exclude with a . segment"],
+      ["Apps/", "Apps/da ta/", "exclude with a space"],
+      ["Apps/", "Apps/da'ta/", "exclude with a quote"],
+      ["../", "", "folder entry with .."],
+      ["Apps/../", "", "folder entry containing .."],
+      ["/var/www/", "", "absolute folder entry"],
+      ["Apps//", "", "folder entry with an empty segment"],
+      ["bad name/", "", "folder entry with a space"],
+      ["../index.html", "", "file entry with .."],
+      ["nonexistent-folder/", "", "folder that tracks no file (typo)"],
+      [":(glob)**/", "", "git pathspec magic must be taken literally, matching nothing"],
+      ["Apps/", "Apps/", "everything excluded leaves nothing to upload"],
+    ];
+    for (const [allowlist, excludes, why] of cases) {
+      const { result } = runSftpScript(
+        dir,
+        dir,
+        `sftp_expand_allowlist "aid-1" "${site}" "$ALLOW" "$EXCL"
+         echo "STATUS=$?"`,
+        { ALLOW: allowlist, EXCL: excludes },
+      );
+      assert.match(result.stdout, /STATUS=1/, `${why}: must be refused\nstdout:${result.stdout}\nstderr:${result.stderr}`);
+      assert.equal(result.stdout.replace(/STATUS=1\s*$/, ""), "", `${why}: nothing may be printed as a file list`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4977: upload_via_sftp ships a folder entry's tracked files and passes the host-key pin on every curl call", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-pin-test-"));
+  try {
+    const site = makeGitSite(dir);
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const callsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog });
+    const { result } = runSftpScript(
+      dir,
+      binDir,
+      `upload_via_sftp "aid-1" "${site}" "$(printf 'index.html\\nApps/')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}" "$(printf 'Apps/data/\\nApps/Turnus/turnus-store.php')"
+       echo "STATUS=$?"`,
+    );
+    assert.match(result.stdout, /STATUS=0/, result.stderr);
+
+    const calls = curlCalls(callsLog);
+    assert.ok(calls.length > 10, `expected staging, swap and cleanup calls, got ${calls.length}`);
+    for (const call of calls) {
+      assert.match(call, new RegExp(`--hostpubsha256 ${SFTP_PIN.replace(/[+/]/g, "\\$&")}( |$)`), `curl call without the host-key pin: ${call}`);
+    }
+    const uploads = calls.filter((c) => c.includes(" -T ")).map((c) => c.split(" -T ")[1].split(" ")[0]);
+    assert.deepEqual(
+      uploads.map((u) => path.relative(site, u)).sort(),
+      ["Apps/Turnus/page.php", "Apps/a.php", "index.html"],
+    );
+    assert.ok(!calls.some((c) => /untracked\.php|ignored\.txt|secret\.json|turnus-store\.php/.test(c)), "an untracked, ignored or excluded file reached curl");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4977: upload_via_sftp refuses a missing or malformed host-key pin before reading the credential or opening a connection", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-nopin-test-"));
+  try {
+    const site = makeGitSite(dir);
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const callsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog });
+    for (const pin of ["", "SHA256:XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8", "tooshort", "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8 --insecure"]) {
+      const { result, log } = runSftpScript(
+        dir,
+        binDir,
+        `cli_json() { echo "credential read" >> "${dir}/cred-read.log"; printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+         upload_via_sftp "aid-1" "${site}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${pin}" ""
+         echo "STATUS=$?"`,
+      );
+      assert.match(result.stdout, /STATUS=1/, `pin ${JSON.stringify(pin)} must be refused: ${result.stderr}`);
+      assert.match(log(), /host key pin/);
+    }
+    assert.equal(curlCalls(callsLog).length, 0, "no connection may be attempted without a valid pin");
+    assert.ok(!existsSync(path.join(dir, "cred-read.log")), "the credential must not even be read without a valid pin");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4977: a symlink in the checkout is refused, never uploaded (curl would follow it to a file on the runner)", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-symlink-test-"));
+  try {
+    const site = makeGitSite(dir);
+    writeFileSync(path.join(dir, "outside-secret.txt"), "runner secret");
+    spawnSync("ln", ["-s", path.join(dir, "outside-secret.txt"), path.join(site, "Apps", "link.txt")]);
+    assertSuccess(run("git", ["add", "-A"], { cwd: site }), "git add");
+    assertSuccess(run("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "link"], { cwd: site }), "git commit");
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const callsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog });
+    const { result, log } = runSftpScript(
+      dir,
+      binDir,
+      `upload_via_sftp "aid-1" "${site}" "Apps/" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}" ""
+       echo "STATUS=$?"`,
+    );
+    assert.match(result.stdout, /STATUS=1/);
+    assert.match(log(), /is a symlink/);
+    const calls = curlCalls(callsLog);
+    assert.ok(!calls.some((c) => c.includes("link.txt") && c.includes(" -T ")), "the symlink must not be uploaded");
+    assert.ok(!calls.some((c) => /-Q (mkdir|rename)/.test(c)), "nothing may be swapped live when a file was refused");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The staging folder sits inside the served docroot, so it must be gone after
+// every run -- including runs that failed while staging or while swapping.
+for (const scenario of [
+  { name: "a successful run", failRegex: undefined, status: 0 },
+  { name: "a run whose staging upload fails part-way", failRegex: "-T [^ ]*Apps/Turnus/page\\.php", status: 1 },
+  { name: "a run whose live swap fails", failRegex: "-Q rename [^ ]*\\.deploy-staging[^ ]*Apps/a\\.php", status: 1 },
+]) {
+  test(`DUR-4977: the .deploy-staging folder is removed after ${scenario.name}`, () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-staging-cleanup-test-"));
+    try {
+      const site = makeGitSite(dir);
+      const binDir = path.join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      const callsLog = path.join(dir, "curl-calls.log");
+      writeFakeCurl(binDir, { callsLog, failRegex: scenario.failRegex });
+      const { result } = runSftpScript(
+        dir,
+        binDir,
+        `upload_via_sftp "aid-1" "${site}" "$(printf 'index.html\\nApps/\\nassets/')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}" "Apps/data/"
+         echo "STATUS=$?"`,
+      );
+      assert.match(result.stdout, new RegExp(`STATUS=${scenario.status}`), `${result.stdout}\n${result.stderr}`);
+
+      const quotes = curlCalls(callsLog)
+        .filter((c) => c.includes(" -Q "))
+        .map((c) => c.split(" -Q ")[1].split(" sftp://")[0]);
+      const staging = "/var/www/site/.deploy-staging/aid-1";
+      // Every staged file is removed, the failed one included (curl may have left a partial copy)...
+      for (const f of ["Apps/Turnus/page.php", "Apps/a.php", "assets/img/logo.png", "index.html"]) {
+        assert.ok(quotes.includes(`rm ${staging}/${f}`), `staged ${f} must be removed, got ${JSON.stringify(quotes)}`);
+      }
+      // ...then every folder the staged paths created, deepest first, then the run folder and .deploy-staging.
+      const rmdirs = quotes.filter((q) => q.startsWith("rmdir "));
+      const idx = (p) => rmdirs.indexOf(`rmdir ${p}`);
+      for (const d of [`${staging}/Apps/Turnus`, `${staging}/Apps`, `${staging}/assets/img`, `${staging}/assets`, staging, "/var/www/site/.deploy-staging"]) {
+        assert.ok(idx(d) >= 0, `${d} must be removed, got ${JSON.stringify(rmdirs)}`);
+      }
+      assert.ok(idx(`${staging}/Apps/Turnus`) < idx(`${staging}/Apps`), "children before parents");
+      assert.ok(idx(`${staging}/assets/img`) < idx(`${staging}/assets`), "children before parents");
+      assert.ok(idx(`${staging}/Apps`) < idx(staging) && idx(staging) < idx("/var/www/site/.deploy-staging"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// resolve_deploy_vars (the Python block) is the first line of defence: a policy
+// that would put a file the operator meant to keep off the site live, or open
+// a connection without a pinned key, must not reach the upload at all.
+function resolveDeployVars(policyOverrides) {
+  const approval = { id: "aid-1", payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" } };
+  const project = {
+    id: "proj-1",
+    deployTransport: "sftp",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployTargetPath: "/tmp/never-used",
+      healthCheckUrl: "http://example.invalid/health",
+      requestingAgentId: "agent-1",
+      sftpHost: "sftp.example.invalid",
+      sftpUsername: "deployer",
+      sftpRemotePath: "/var/www/site",
+      sftpAllowlist: ["index.html", "Apps/"],
+      sftpExclude: ["Apps/data/"],
+      sftpHostKeySha256: SFTP_PIN,
+      ...policyOverrides,
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+  };
+  const result = run(
+    "bash",
+    [
+      "-c",
+      `set -uo pipefail; source "${SCRIPT}"; vars="$(resolve_deploy_vars "$APPROVAL" "$PROJECT")" || { echo "REFUSED"; exit 0; }; eval "$vars"; echo "STATUS=0"; echo "DV_SFTP_EXCLUDE=[$DV_SFTP_EXCLUDE]"; echo "DV_SFTP_HOST_KEY_SHA256=[$DV_SFTP_HOST_KEY_SHA256]"; echo "DV_SFTP_ALLOWLIST=[$DV_SFTP_ALLOWLIST]"`,
+    ],
+    { env: { ...process.env, APPROVAL: JSON.stringify(approval), PROJECT: JSON.stringify(project) } },
+  );
+  return { result };
+}
+
+test("DUR-4977: resolve_deploy_vars hands folder entries, excludes and the host-key pin to the upload", () => {
+  const { result } = resolveDeployVars({});
+  assert.match(result.stdout, /STATUS=0/, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /DV_SFTP_EXCLUDE=\[Apps\/data\/\]/);
+  assert.match(result.stdout, new RegExp(`DV_SFTP_HOST_KEY_SHA256=\\[${SFTP_PIN.replace(/[+/]/g, "\\$&")}\\]`));
+  assert.match(result.stdout, /DV_SFTP_ALLOWLIST=\[index\.html\nApps\/\]/);
+});
+
+test("DUR-4977: resolve_deploy_vars refuses an sftp policy with no/invalid host-key pin or an unsafe exclude/folder entry", () => {
+  for (const [overrides, why] of [
+    [{ sftpHostKeySha256: "" }, "no pin"],
+    [{ sftpHostKeySha256: undefined }, "pin absent"],
+    [{ sftpHostKeySha256: `SHA256:${SFTP_PIN}` }, "pin with SHA256: prefix"],
+    [{ sftpHostKeySha256: "short" }, "pin too short"],
+    [{ sftpExclude: ["../secrets/"] }, "exclude with .."],
+    [{ sftpExclude: ["/etc/"] }, "absolute exclude"],
+    [{ sftpExclude: ["Apps//data/"] }, "non-normal exclude"],
+    [{ sftpAllowlist: ["../"] }, "folder entry with .."],
+    [{ sftpAllowlist: ["Apps//"] }, "non-normal folder entry"],
+  ]) {
+    const { result } = resolveDeployVars(overrides);
+    assert.match(result.stdout, /REFUSED/, `${why}: must be refused\n${result.stdout}\n${result.stderr}`);
+  }
+});
+
+// DUR-4977: the proof that this runs against a real SFTP server and the host's
+// real curl, not a fake. A throwaway sshd on 127.0.0.1 with the exact shape of
+// the production account -- an ed25519 key restricted by
+// `restrict,command="internal-sftp"` -- and the runner's own functions driving
+// upload, mkdir, rename, rm and the staging cleanup through it.
+//
+// Needs an sshd binary, so it is skipped where there is none. Point it at one
+// with DEPLOY_RUNNER_TEST_SSHD (plus DEPLOY_RUNNER_TEST_SSHD_LIBEXEC for the
+// directory holding sshd-session/sshd-auth, and DEPLOY_RUNNER_TEST_SSHD_LD_LIBRARY_PATH
+// if it was unpacked from a package rather than installed).
+function findSshd() {
+  const candidates = [process.env.DEPLOY_RUNNER_TEST_SSHD, "/usr/sbin/sshd", "/usr/local/sbin/sshd"].filter(Boolean);
+  return candidates.find((c) => existsSync(c));
+}
+
+async function freePort() {
+  const net = await import("node:net");
+  return await new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+    srv.on("error", reject);
+  });
+}
+
+async function waitForPort(port) {
+  const net = await import("node:net");
+  for (let i = 0; i < 50; i += 1) {
+    const ok = await new Promise((resolve) => {
+      const sock = net.connect(port, "127.0.0.1", () => {
+        sock.destroy();
+        resolve(true);
+      });
+      sock.on("error", () => resolve(false));
+    });
+    if (ok) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`sshd did not start listening on ${port}`);
+}
+
+test("DUR-4977: with a real sshd (restrict,command=internal-sftp) and an ed25519 key, the real curl uploads, swaps, removes and cleans up staging behind a pinned host key", {
+  skip: !findSshd() || spawnSync("ssh-keygen", ["-?"]).error ? "no sshd/ssh-keygen available (set DEPLOY_RUNNER_TEST_SSHD)" : false,
+}, async () => {
+  const sshd = findSshd();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-sshd-test-"));
+  let daemon;
+  try {
+    const keys = path.join(dir, "keys");
+    mkdirSync(keys, { recursive: true });
+    for (const name of ["hostkey", "userkey", "wronghostkey"]) {
+      assertSuccess(run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", path.join(keys, name)]), `ssh-keygen ${name}`);
+    }
+    const fingerprint = (name) =>
+      run("ssh-keygen", ["-lf", path.join(keys, `${name}.pub`), "-E", "sha256"]).stdout.split(" ")[1].replace(/^SHA256:/, "");
+    const pin = fingerprint("hostkey");
+    const wrongPin = fingerprint("wronghostkey");
+    const authorizedKeys = path.join(keys, "authorized_keys");
+    writeFileSync(authorizedKeys, `restrict,command="internal-sftp" ${readFileSync(path.join(keys, "userkey.pub"), "utf8")}`, { mode: 0o600 });
+
+    const port = await freePort();
+    const sshdArgs = [
+      "-D", "-e", "-f", "/dev/null",
+      "-o", `Port=${port}`, "-o", "ListenAddress=127.0.0.1",
+      "-o", `HostKey=${path.join(keys, "hostkey")}`,
+      "-o", `AuthorizedKeysFile=${authorizedKeys}`,
+      "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "UsePAM=no",
+      "-o", "StrictModes=no", "-o", `PidFile=${path.join(keys, "sshd.pid")}`,
+      "-o", "Subsystem=sftp internal-sftp",
+    ];
+    const libexec = process.env.DEPLOY_RUNNER_TEST_SSHD_LIBEXEC;
+    if (libexec) sshdArgs.push("-o", `SshdSessionPath=${libexec}/sshd-session`, "-o", `SshdAuthPath=${libexec}/sshd-auth`);
+    const sshdEnv = { ...process.env };
+    if (process.env.DEPLOY_RUNNER_TEST_SSHD_LD_LIBRARY_PATH) sshdEnv.LD_LIBRARY_PATH = process.env.DEPLOY_RUNNER_TEST_SSHD_LD_LIBRARY_PATH;
+    daemon = spawn(sshd, sshdArgs, { env: sshdEnv, stdio: "ignore" });
+    await waitForPort(port);
+
+    const site = makeGitSite(dir);
+    const docroot = path.join(dir, "docroot");
+    mkdirSync(docroot, { recursive: true });
+    // An older live file, so the rename-aside/rename-in/remove-aside swap is exercised, not just fresh creates.
+    mkdirSync(path.join(docroot, "Apps"), { recursive: true });
+    writeFileSync(path.join(docroot, "Apps", "a.php"), "<?php // OLD");
+    const cred = JSON.stringify({ kind: "sftp_private_key", value: readFileSync(path.join(keys, "userkey"), "utf8") });
+    const username = os.userInfo().username;
+    const callUpload = (usePin, extra = "") => {
+      const logFile = path.join(dir, "runner.log");
+      const result = run(
+        "bash",
+        [
+          "-c",
+          `set -uo pipefail
+           source "${SCRIPT}"
+           cli_json() { printf '%s' "$CRED_JSON"; }
+           ${extra}
+           upload_via_sftp "aid-1" "${site}" "$(printf 'index.html\\nApps/\\nassets/')" "127.0.0.1" "${port}" "${username}" "${docroot}" "agent-1" "co-1" "${usePin}" "$(printf 'Apps/data/\\nApps/Turnus/turnus-store.php')"
+           echo "STATUS=$?"`,
+        ],
+        { env: { ...process.env, CRED_JSON: cred, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile } },
+      );
+      return { result, log: existsSync(logFile) ? readFileSync(logFile, "utf8") : "" };
+    };
+
+    // A host presenting a different key than the pinned one must receive nothing.
+    const wrong = callUpload(wrongPin);
+    assert.match(wrong.result.stdout, /STATUS=1/, `a mismatched host key must fail the upload\n${wrong.log}`);
+    assert.deepEqual(readdirSyncSafe(docroot), ["Apps"], "nothing may be written when the host key does not match the pin");
+    assert.equal(readFileSync(path.join(docroot, "Apps", "a.php"), "utf8"), "<?php // OLD");
+
+    const ok = callUpload(pin);
+    assert.match(ok.result.stdout, /STATUS=0/, `${ok.result.stdout}\n${ok.result.stderr}\n${ok.log}`);
+    assert.equal(readFileSync(path.join(docroot, "index.html"), "utf8"), "<html>home</html>");
+    assert.equal(readFileSync(path.join(docroot, "Apps", "a.php"), "utf8"), "<?php // a", "the old live file must be replaced");
+    assert.equal(readFileSync(path.join(docroot, "Apps", "Turnus", "page.php"), "utf8"), "<?php // page");
+    assert.equal(readFileSync(path.join(docroot, "assets", "img", "logo.png"), "utf8"), "png");
+    for (const absent of ["Apps/untracked.php", "ignored.txt", "Apps/data/secret.json", "Apps/Turnus/turnus-store.php"]) {
+      assert.ok(!existsSync(path.join(docroot, absent)), `${absent} must not have been uploaded`);
+    }
+    assert.ok(!existsSync(path.join(docroot, ".deploy-staging")), "the staging folder must be gone after the run");
+    assert.ok(!existsSync(path.join(docroot, "Apps", "a.php.deploy-bak")), "the aside copy must be removed after a good swap");
+
+    // The rollback delete (rm) goes through the same pinned, restricted connection.
+    const removeResult = run(
+      "bash",
+      [
+        "-c",
+        `set -uo pipefail
+         source "${SCRIPT}"
+         cli_json() { printf '%s' "$CRED_JSON"; }
+         sftp_remove_remote_entries "aid-1" "index.html" "127.0.0.1" "${port}" "${username}" "${docroot}" "agent-1" "co-1" "${pin}"
+         echo "STATUS=$?"`,
+      ],
+      { env: { ...process.env, CRED_JSON: cred, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "runner.log") } },
+    );
+    assert.match(removeResult.stdout, /STATUS=0/, `${removeResult.stdout}\n${removeResult.stderr}`);
+    assert.ok(!existsSync(path.join(docroot, "index.html")), "rm over SFTP must have removed the file");
+
+    // A failing run (an unreadable file halfway through staging) must leave no .deploy-staging behind either.
+    writeFileSync(path.join(site, "assets", "img", "zz-last.png"), "x");
+    assertSuccess(run("git", ["add", "-A"], { cwd: site }), "git add");
+    assertSuccess(run("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "more"], { cwd: site }), "git commit");
+    spawnSync("chmod", ["000", path.join(site, "assets", "img", "zz-last.png")]);
+    const failed = callUpload(pin);
+    spawnSync("chmod", ["644", path.join(site, "assets", "img", "zz-last.png")]);
+    assert.match(failed.result.stdout, /STATUS=1/, `${failed.result.stdout}\n${failed.log}`);
+    assert.ok(!existsSync(path.join(docroot, ".deploy-staging")), "the staging folder must be gone after a failed run too");
+  } finally {
+    daemon?.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function readdirSyncSafe(p) {
+  return spawnSync("ls", ["-A", p], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).sort();
+}
