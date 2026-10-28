@@ -49,6 +49,7 @@ import { securityReviewSettingsRoutes } from "./routes/security-review-settings.
 import { qualityLoopRoutes } from "./routes/quality-loops.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
+import { mediaSetupRoutes } from "./routes/media-setups.js";
 import { bragRoutes } from "./routes/brag.js";
 import { codeRenderRoutes } from "./routes/code-renders.js";
 import { tradingRoutes } from "./routes/trading.js";
@@ -381,6 +382,7 @@ export async function createApp(
   api.use(qualityLoopRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
+  api.use(mediaSetupRoutes(db));
   api.use(bragRoutes(db));
   api.use(codeRenderRoutes(db));
   api.use(tradingRoutes(db));

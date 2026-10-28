@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { check, index, pgTable, real, integer, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { companySecrets } from "./company_secrets.js";
+import { mediaModelSetups } from "./media_model_setups.js";
 import { modelDirectoryEntries } from "./model_directory_entries.js";
 
 /**
@@ -37,6 +38,14 @@ export const videoStorylineDirectors = pgTable(
     defaultVideoModel: text("default_video_model"),
     defaultLookId: text("default_look_id"),
     defaultShotSeconds: integer("default_shot_seconds"),
+    // Film studio Phase 1 (0259): the director's preset blocks. All nullable;
+    // default_look_id stays until Looks become Styles (Phase 2).
+    defaultImageSetupId: uuid("default_image_setup_id").references(() => mediaModelSetups.id, { onDelete: "set null" }),
+    defaultVideoSetupId: uuid("default_video_setup_id").references(() => mediaModelSetups.id, { onDelete: "set null" }),
+    // sfw | mature
+    defaultContentRating: text("default_content_rating"),
+    // stills | keyframes
+    defaultContinuityMode: text("default_continuity_mode"),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -52,6 +61,14 @@ export const videoStorylineDirectors = pgTable(
     shotSecondsCheck: check(
       "video_storyline_directors_shot_seconds_check",
       sql`${table.defaultShotSeconds} IS NULL OR (${table.defaultShotSeconds} >= 1 AND ${table.defaultShotSeconds} <= 60)`,
+    ),
+    contentRatingCheck: check(
+      "video_storyline_directors_content_rating_check",
+      sql`${table.defaultContentRating} IS NULL OR ${table.defaultContentRating} IN ('sfw', 'mature')`,
+    ),
+    continuityModeCheck: check(
+      "video_storyline_directors_continuity_mode_check",
+      sql`${table.defaultContinuityMode} IS NULL OR ${table.defaultContinuityMode} IN ('stills', 'keyframes')`,
     ),
     temperatureCheck: check(
       "video_storyline_directors_temperature_check",

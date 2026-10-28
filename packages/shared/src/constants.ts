@@ -1276,6 +1276,8 @@ export const PLUGIN_CAPABILITIES = [
   "billing.media_studio_direct.reserve",
   // Models: picture analysis with a company's saved model, run by the host
   "models.image_analysis.run",
+  // Media Studio: read the company's saved model setups, LoRA library and project defaults
+  "media.library.read",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
