@@ -691,6 +691,39 @@ describe("a picture deleted from Files", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toBe(SAVE_NOTE);
   });
 
+  it("Identities: a refused save shows the server's message, not [object Object]", async () => {
+    const message = "The person's picture is not in this company's Files any more. Pick it again.";
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity()] }));
+    actions["identities.save"] = vi.fn(async () => {
+      throw { code: "ERR_BRIDGE", message };
+    });
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Maja/));
+    await click(buttonNamed(container, "Edit"));
+    await click(buttonNamed(container, "Save identity"));
+    expect(container.textContent).toContain(message);
+    expect(container.textContent).not.toContain("[object Object]");
+  });
+
+  it("Rooms: a refused save shows the server's message, not [object Object]", async () => {
+    const message = "The room photo is not in this company's Files any more. Pick a new photo for the room.";
+    const room = { id: "r1", name: "Living room", photoFileId: "photo", cameraNote: null, zones: [], products: [], updatedAt: "x" };
+    actions["rooms.list"] = vi.fn(async () => ({ rooms: [room], canManage: true }));
+    actions["rooms.save"] = vi.fn(async () => {
+      throw { code: "ERR_BRIDGE", message };
+    });
+    root = createRoot(container);
+    await act(async () => root.render(<RoomsPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Living room/));
+    await click(buttonNamed(container, "Edit"));
+    await click(buttonNamed(container, "Save room"));
+    expect(container.textContent).toContain(message);
+    expect(container.textContent).not.toContain("[object Object]");
+  });
+
   async function failPreview(status: number | "network") {
     const calls: Array<{ url: string; method?: string }> = [];
     vi.stubGlobal(

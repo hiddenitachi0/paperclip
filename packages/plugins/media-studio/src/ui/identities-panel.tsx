@@ -52,6 +52,7 @@ import {
 } from "./anchor-helpers.js";
 import { FilesPictureList } from "./files-picture-list.js";
 import { StoredPicture } from "./stored-picture.js";
+import { errText } from "./error-text.js";
 
 // ─── Types (as the worker sends them; see src/identity.ts) ───────────────────
 
@@ -278,10 +279,6 @@ const dangerBtn: React.CSSProperties = { ...baseBtn, background: "#f03e3e", colo
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "inherit", borderColor: "#ced4da" };
 const thumb: React.CSSProperties = { width: 96, height: 96, objectFit: "cover", borderRadius: 6, display: "block", border: "1px solid rgba(128,128,128,0.35)" };
 const row: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 // ─── Crop editor ─────────────────────────────────────────────────────────────
 

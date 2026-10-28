@@ -13,6 +13,7 @@ import {
   uploadPicture,
 } from "./anchor-helpers.js";
 import { FilesPictureList } from "./files-picture-list.js";
+import { errText } from "./error-text.js";
 
 // Rooms: a photo of a real room, named areas in it (zones) and product
 // pictures. "Place product" puts products into one zone and keeps the rest of
@@ -36,10 +37,6 @@ const dangerBtn: React.CSSProperties = { ...baseBtn, background: "#f03e3e", colo
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "inherit", borderColor: "#ced4da" };
 const thumb: React.CSSProperties = { width: 96, height: 96, objectFit: "cover", borderRadius: 6, display: "block", border: "1px solid rgba(128,128,128,0.35)" };
 const row: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 export function roomToDraft(room: Room | null): Draft {
   return room
