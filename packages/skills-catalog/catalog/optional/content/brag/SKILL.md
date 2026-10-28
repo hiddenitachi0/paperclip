@@ -21,12 +21,15 @@ Paperclip modifications: catalog frontmatter only, plus the notes below.
 NOT vendored: the bundled ende.app music tracks (licence unstated). Treat
 music as unavailable (`--no-music` behaviour) unless a track is provided.
 Bundled SFX under assets/sfx are CC0 (Kenney.nl / unicae_games).
-Paperclip phase 1 does not run `npx hyperframes` at runtime; do not
-download Hyperframes — use the brag-slim path (slim.md) to build the video
-with tools already on the machine.
+Agents never run `npx hyperframes` themselves; do not download Hyperframes.
+Hyperframes runs in Paperclip's locked-down render worker instead (see the
+PAPERCLIP RENDERER note below); without it, use the brag-slim path (slim.md)
+to build the video with tools already on the machine.
 -->
 
 > **PAPERCLIP RULE — ONLY WHEN A PERSON ASKS.** Run this skill only when a person asked for a video on the task (in the task they wrote or in their comment). Never start a brag video on your own initiative, for example after finishing a task. A person can instead tick "Make a short brag video when this is done" on a task; Paperclip then makes it automatically and you do nothing.
+
+> **PAPERCLIP RENDERER.** Never download or run Hyperframes yourself. When this server has its code renderer set up, run every `hyperframes check` / snapshot / `render` step through it: send the `composition/` folder's files (text as `content`, small sounds and icons as `contentBase64`, large pictures or music as company Files under `assets`) to `POST /api/companies/{companyId}/code-renders` with `kind: "check"`, then `"snapshot"`, then `"render"`. The `explainer-video` skill has the API, the limits (stop and ask when one is reached) and the composition rules. The renderer has no internet: remote scripts and fonts are refused, and GSAP only works if the operator enabled it, so prefer CSS animations with `data-no-timeline`. If the API answers 503, the renderer is not set up: use the brag-slim path (`slim.md`).
 
 # /brag
 

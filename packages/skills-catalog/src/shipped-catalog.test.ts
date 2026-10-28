@@ -25,6 +25,7 @@ const EXPECTED_OPTIONAL_KEYS = [
   "paperclipai/optional/content/social-media-management",
   "paperclipai/optional/finance/bookkeeping-assistant",
   "paperclipai/optional/legal/contract-register",
+  "paperclipai/optional/media/explainer-video",
   "paperclipai/optional/media/media-studio-generation",
   "paperclipai/optional/operations/calendar-scheduling",
   "paperclipai/optional/people/hiring-pipeline",
