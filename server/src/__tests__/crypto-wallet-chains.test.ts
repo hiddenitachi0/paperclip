@@ -1,5 +1,5 @@
 import { createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   base58Decode,
   base58Encode,
@@ -168,6 +168,8 @@ const libsAvailable = await loadCryptoLibs()
 
 describe.skipIf(!libsAvailable)("Hyperliquid signing with the signing library installed", () => {
   it("matches the official SDK's L1 action signature vectors (mainnet and testnet)", async () => {
+    // The mainnet vector needs the server-wide real-money lock open (see crypto-real-money-lock.test.ts).
+    vi.stubEnv("PAPERCLIP_CRYPTO_REAL_MONEY", "allowed");
     const libs = await loadCryptoLibs();
     const key = hexToBytes("0123456789012345678901234567890123456789012345678901234567890123");
     const hex32 = (v: bigint) => `0x${v.toString(16).padStart(64, "0")}`;
@@ -183,6 +185,7 @@ describe.skipIf(!libsAvailable)("Hyperliquid signing with the signing library in
       "0x17b8b32f086e8cdede991f1e2c529f5dd5297cbe8128500e00cbaf766204a613",
       28,
     ]);
+    vi.unstubAllEnvs();
   });
 
   it("hashes EIP-712 data like the spec's Ether Mail example", async () => {

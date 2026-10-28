@@ -21,6 +21,7 @@ import {
 import type { FleetHealth, FleetSchedulerRescues } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
 import { readServerSecret } from "../server-secrets.js";
+import { isCryptoRealMoneyAllowed } from "../services/crypto-real-money-lock.js";
 
 function shouldExposeFullHealthDetails(
   // "service" is deliberately absent from the full-details branch below: a
@@ -288,6 +289,7 @@ export function healthRoutes(
       bootstrapInviteActive,
       features: {
         companyDeletionEnabled: opts.companyDeletionEnabled,
+        cryptoRealMoneyLocked: !isCryptoRealMoneyAllowed(),
       },
       serverInfo,
       ...(devServer ? { devServer } : {}),
