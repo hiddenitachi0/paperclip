@@ -476,6 +476,81 @@ d("storyline cast (database)", () => {
       expect(captured.videos).toHaveLength(2);
     });
 
+    it("a film started under the rule and paused since is checked again on resume (new shot, new link, re-render)", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed();
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      const storylines = videoStorylineService(db);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+      await storylines.setShotCast(companyId, storylineId, shotId, ["c1"], ACTOR);
+      await approve(shotId);
+      const render = videoStorylineRenderService(db);
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(1);
+      // The settings the client sees never carry the marker, and the cast edits below keep it.
+      expect((await storylines.getStoryline(companyId, storylineId)).pictureSettings).toEqual({});
+      // The film pauses (budget cap, failed shot): its first shot is back to be rendered.
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      await db.update(videoShots).set({ status: "draft" }).where(eq(videoShots.id, shotId));
+
+      // A shot added and approved while paused has no pick: the resume is refused before any paid call.
+      const added = await addShot(companyId, storylineId, sceneId, 1, "Maja waves goodbye");
+      await approve(added);
+      await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 2 first."),
+      });
+      // So is a re-render of the first shot, which would resume the chain into it.
+      await expect(render.reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 2 first."),
+      });
+      expect(captured.videos).toHaveLength(1);
+      const [stillPaused] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+      expect(stillPaused!.status).toBe("paused");
+
+      // Confirmed: it resumes.
+      await storylines.setShotCast(companyId, storylineId, added, ["c1"], ACTOR);
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(2);
+    });
+
+    it("a film with no linked person that links one while paused is checked on resume once it was started under the rule", async () => {
+      const { companyId, storylineId, shotId } = await seed({ prompt: "Alice opens the door" });
+      const storylines = videoStorylineService(db);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Alice" }] }, ACTOR);
+      await approve(shotId);
+      const render = videoStorylineRenderService(db);
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      await db.update(videoShots).set({ status: "draft" }).where(eq(videoShots.id, shotId));
+      const alice = await savedPerson(companyId, "alice");
+      await saveIdentities(companyId, [alice]);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Alice", identityId: alice.id }] }, ACTOR);
+      await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Confirm who is in shot 1 first."),
+      });
+      expect(captured.videos).toHaveLength(1);
+    });
+
+    it("a paused film from before the rule stays exempt however many times it resumes", async () => {
+      const { companyId, storylineId, shotId, sceneId } = await seed();
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      await videoStorylineService(db).setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }] }, ACTOR);
+      await approve(shotId);
+      const render = videoStorylineRenderService(db);
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      // It pauses again (no marker was added), and is resumed again, even with a new unconfirmed shot.
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      await db.update(videoShots).set({ status: "draft" }).where(eq(videoShots.id, shotId));
+      await approve(await addShot(companyId, storylineId, sceneId, 1, "Maja leaves"));
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      expect(captured.videos).toHaveLength(2);
+    });
+
     it("stills and video prompts say only the confirmed people are in the shot", async () => {
       const { companyId, storylineId, shotId, sceneId } = await seed({ prompt: "Maja hands Bo the keys" });
       const empty = await addShot(companyId, storylineId, sceneId, 1, "An empty street");

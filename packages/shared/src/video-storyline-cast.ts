@@ -187,6 +187,32 @@ export function videoShotCast(
   return { castIds: detectVideoShotCast(text, cast.members, identityNames), picked: false };
 }
 
+/**
+ * picture_settings key set by the server when a render chain is started under
+ * the rule "each shot still to render has its cast confirmed" (startRender or a
+ * re-render that starts the chain). A paused film WITHOUT it was already
+ * rendering or paused when the rule shipped, so resuming it is exempt (it
+ * finishes as before); a paused film WITH it must pass the check again,
+ * because shots, cast and approvals can change while it is paused. Never
+ * accepted from a client (the picture settings schema is strict) and never
+ * returned to one.
+ */
+export const VIDEO_CAST_ENFORCED_KEY = "castConfirmationEnforced";
+
+/** True when a render chain was started under the cast-confirmation rule (see VIDEO_CAST_ENFORCED_KEY). */
+export function videoCastConfirmationEnforced(pictureSettings: unknown): boolean {
+  if (!pictureSettings || typeof pictureSettings !== "object") return false;
+  return (pictureSettings as Record<string, unknown>)[VIDEO_CAST_ENFORCED_KEY] === true;
+}
+
+/**
+ * Must starting or resuming a render of a film in `status` check the cast?
+ * Everything except a paused film that predates the rule.
+ */
+export function videoCastCheckRequiredAtStart(status: string, pictureSettings: unknown): boolean {
+  return status !== "paused" || videoCastConfirmationEnforced(pictureSettings);
+}
+
 /** Does the film have at least one cast member linked to a saved person? Only then must each shot's cast be confirmed. */
 export function videoCastHasLinkedPeople(cast: Pick<VideoStorylineCast, "members">): boolean {
   return cast.members.some((m) => !!m.identityId);

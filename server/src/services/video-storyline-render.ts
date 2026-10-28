@@ -11,7 +11,9 @@ import {
   estimateVideoStorylineCostCents,
   readVideoStorylineCast,
   videoRenderDurationSeconds,
+  videoCastCheckRequiredAtStart,
   videoShotCast,
+  VIDEO_CAST_ENFORCED_KEY,
   unconfirmedVideoCastMessage,
   unconfirmedVideoCastShots,
   videoShotOnlyCastLine,
@@ -329,6 +331,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
   }
 
+  /** SQL for picture_settings with the cast-rule marker added, leaving the rest of the column as it is under the lock. */
+  function markCastEnforced() {
+    return sql`coalesce(${videoStorylines.pictureSettings}, '{}'::jsonb) || ${JSON.stringify({ [VIDEO_CAST_ENFORCED_KEY]: true })}::jsonb` as unknown as typeof videoStorylines.$inferSelect["pictureSettings"];
+  }
+
   /**
    * The shot's linked cast members' pictures for the video call: per person
    * the face crop, the canonical render and the body crop (the approved
@@ -575,14 +582,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Who is in a shot is a person's choice, not a guess from names in the
     // text: a film with a person linked to its cast needs every shot still to
     // render confirmed first. Only here, at start -- never in beginShotRender,
-    // so a film that is rendering (the chain continues) or paused (it was
-    // started, so it passed this or predates it) finishes or resumes normally.
-    if (storyline.status !== "paused") {
-      const unconfirmed = unconfirmedVideoCastShots(
-        readVideoStorylineCast(storyline.pictureSettings),
-        renderableShots.filter((s) => s.status !== "done"),
-      );
-      if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
+    // so a film that is rendering (the chain continues) finishes normally. A
+    // paused film is exempt only when it predates this rule (no marker, see
+    // VIDEO_CAST_ENFORCED_KEY): one that was started under the rule and paused
+    // since (budget cap, failed shot) may have gained shots or cast, so it is
+    // checked like a new start. Checked again under the row lock below.
+    if (videoCastCheckRequiredAtStart(storyline.status, storyline.pictureSettings)) {
+      assertVideoCastConfirmed(storyline, renderableShots.filter((s) => s.status !== "done"));
     }
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
@@ -675,9 +681,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
         throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
       }
+      // Re-check against the cast as it is under the lock (a cast edit may have
+      // committed since the read above), and mark the film as started under the rule.
+      const castCheck = videoCastCheckRequiredAtStart(locked.status, locked.pictureSettings);
+      if (castCheck) assertVideoCastConfirmed(locked, renderableShots.filter((s) => s.status !== "done"));
       await tx
         .update(videoStorylines)
         .set({
+          ...(castCheck ? { pictureSettings: markCastEnforced() } : {}),
           status: "rendering",
           budgetCapCents: effectiveBudgetCapCents,
           estimatedTotalCents: estimateResult.estimatedTotalCents,
@@ -753,12 +764,16 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // always checked; when the film is not already rendering or paused, this
     // re-render flips it to "rendering" and the chain then renders every other
     // pending shot, so those must be confirmed too.
-    const chainStarts = storyline.status !== "rendering" && storyline.status !== "paused";
-    const chainShots = chainStarts
-      ? (await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)))
-          .filter((s) => s.id !== shot.id && s.status !== "done" && s.storyboardStatus !== "dropped" && s.clipKind === "generated")
-      : [];
-    assertVideoCastConfirmed(storyline, [shot, ...chainShots].sort((x, y) => x.orderIndex - y.orderIndex));
+    // A paused film that predates the rule, and one already rendering, continue their existing chain.
+    const castShots = async (row: typeof videoStorylines.$inferSelect, reader: Pick<Db, "select">) => {
+      const chainStarts = row.status !== "rendering" && videoCastCheckRequiredAtStart(row.status, row.pictureSettings);
+      const chainShots = chainStarts
+        ? (await reader.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)))
+            .filter((s) => s.id !== shot.id && s.status !== "done" && s.storyboardStatus !== "dropped" && s.clipKind === "generated")
+        : [];
+      return { chainStarts, shots: [shot, ...chainShots].sort((x, y) => x.orderIndex - y.orderIndex) };
+    };
+    assertVideoCastConfirmed(storyline, (await castShots(storyline, db)).shots);
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
     // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
@@ -811,10 +826,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           updatedAt: nowOf(),
         })
         .where(eq(videoShots.id, shotId));
+      // Re-check under the lock (the cast or the shots may have changed since the read above); a re-render
+      // that starts the chain marks the film as started under the rule.
+      const lockedCast = await castShots(locked, tx);
+      assertVideoCastConfirmed(locked, lockedCast.shots);
       await tx
         .update(videoStorylines)
         .set({
           ...(lockedRefund > 0 ? { spentCents: Math.max(0, locked.spentCents - lockedRefund) } : {}),
+          ...(lockedCast.chainStarts ? { pictureSettings: markCastEnforced() } : {}),
           ...(locked.status !== "rendering" ? { status: "rendering", errorMessage: null } : {}),
           updatedAt: nowOf(),
         })
