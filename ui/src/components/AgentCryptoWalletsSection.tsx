@@ -3,11 +3,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CRYPTO_CHAINS,
   CRYPTO_CHAIN_INFO,
+  CRYPTO_FAUCET_HINTS_AS_OF,
+  CRYPTO_FAUCET_HINTS_CHANGE_NOTE,
   CRYPTO_RISK_EXPLANATIONS,
   DEFAULT_CRYPTO_AGENT_LIMITS,
   DEFAULT_CRYPTO_WALLET_LIMITS,
+  CRYPTO_TESTNET_ONLY_LABEL,
+  CRYPTO_TESTNET_SEND_WARNING,
   HYPERLIQUID_HARD_MAX_LEVERAGE,
   cryptoNetworkLabel,
+  cryptoPaymentLink,
   describeCryptoTxStatus,
   formatChainAmount,
   type CryptoAgentLimits,
@@ -195,6 +200,7 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
   });
 
   const archived = wallet.status === "archived";
+  const paymentLink = cryptoPaymentLink(wallet.chain, wallet.network, wallet.address);
   const destinations = destinationsQuery.data ?? [];
 
   return (
@@ -207,6 +213,11 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
             {networkBadge(wallet)}
           </div>
           <p className="break-all font-mono text-xs">{wallet.address}</p>
+          {wallet.network === "testnet" ? (
+            <p className="text-xs font-medium text-destructive" data-testid="crypto-testnet-warning">
+              {CRYPTO_TESTNET_SEND_WARNING}
+            </p>
+          ) : null}
           <p className={`text-xs ${wallet.status === "active" ? "text-muted-foreground" : "text-destructive"}`}>
             {statusText(wallet)} · {cryptoNetworkLabel(wallet.chain, wallet.network)} · key {wallet.keyOrigin === "imported" ? "imported" : "made by Paperclip"}
           </p>
@@ -257,6 +268,26 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
               {wallet.chain === "hyperliquid" ? " on Hyperliquid (deposit USDC to this address through Hyperliquid's own site)" : ""}.{" "}
               {wallet.network === "testnet" ? info.testnetFaucetHint : "This is the main network: only send what you are ready to let this agent use."}
             </p>
+            {wallet.network === "testnet" ? (
+              <>
+                {info.testnetFaucetNotes.map((note) => (
+                  <p key={note} className="text-muted-foreground">
+                    {note}
+                  </p>
+                ))}
+                <p className="text-xs text-muted-foreground" data-testid="crypto-faucet-stamp">
+                  As of {CRYPTO_FAUCET_HINTS_AS_OF}. {CRYPTO_FAUCET_HINTS_CHANGE_NOTE}
+                </p>
+              </>
+            ) : null}
+            {paymentLink ? (
+              <p className="text-xs text-muted-foreground">
+                Payment link{wallet.network === "testnet" ? ` (${CRYPTO_TESTNET_ONLY_LABEL})` : ""}:{" "}
+                <a href={paymentLink} className="break-all font-mono underline" data-testid="crypto-payment-link">
+                  {paymentLink}
+                </a>
+              </p>
+            ) : null}
             <p className="text-muted-foreground">{info.whatAgentsCanDo}</p>
           </div>
 

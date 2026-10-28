@@ -16,6 +16,11 @@ const apiMocks = vi.hoisted(() => ({
   issuesGet: vi.fn(),
   pendingInteractions: vi.fn(),
   stalledTasks: vi.fn(),
+  getSession: vi.fn(),
+}));
+
+vi.mock("../api/auth", () => ({
+  authApi: { getSession: apiMocks.getSession },
 }));
 
 vi.mock("../api/heartbeats", () => ({
@@ -119,6 +124,7 @@ function resetMocks() {
   apiMocks.issuesGet.mockResolvedValue(null);
   apiMocks.pendingInteractions.mockResolvedValue([]);
   apiMocks.stalledTasks.mockResolvedValue(stalledResult([]));
+  apiMocks.getSession.mockResolvedValue({ session: { userId: "user-filip" }, user: { id: "user-filip" } });
 }
 
 async function renderNow(container: HTMLDivElement) {
@@ -277,6 +283,100 @@ describe("DashboardNow — work nobody is moving", () => {
 
     expect(container.querySelectorAll('[data-testid="now-stalled-task"]')).toHaveLength(0);
     expect(container.textContent).toContain("Nothing needs you right now.");
+
+    act(() => root.unmount());
+  });
+});
+
+describe("DashboardNow — tasks assigned to you", () => {
+  let container: HTMLDivElement;
+
+  function assignedIssue(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "issue-a",
+      identifier: "NOR-1500",
+      title: "Pick the cover photo for the spring campaign",
+      status: "todo",
+      assigneeUserId: "user-filip",
+      assigneeAgentId: null,
+      hiddenAt: null,
+      updatedAt: "2026-10-28T08:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  // The page asks for assigned tasks with assigneeUserId "me"; every other
+  // issue query gets the plain board list.
+  function mockAssigned(assigned: unknown[], board: unknown[] = []) {
+    apiMocks.issuesList.mockImplementation(async (_companyId: string, filters?: { assigneeUserId?: string }) =>
+      filters?.assigneeUserId === "me" ? assigned : board,
+    );
+  }
+
+  beforeEach(() => {
+    resetMocks();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    container.remove();
+  });
+
+  it("shows an open task assigned to the signed-in person with its title and a link", async () => {
+    mockAssigned([assignedIssue()]);
+
+    const root = await renderNow(container);
+
+    const rows = container.querySelectorAll('[data-testid="now-assigned-task"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.getAttribute("to")).toBe("/issues/NOR-1500");
+    expect(rows[0]?.textContent).toContain("Pick the cover photo for the spring campaign");
+    expect(rows[0]?.textContent).toContain("Assigned to you");
+    expect(container.textContent).not.toContain("Nothing needs you right now.");
+
+    act(() => root.unmount());
+  });
+
+  it("counts assigned tasks in the Needs-you total", async () => {
+    mockAssigned(
+      [assignedIssue(), assignedIssue({ id: "issue-b", identifier: "NOR-1501", status: "in_review" })],
+      [{ id: "x1" }, { id: "x2" }, { id: "x3" }],
+    );
+
+    const root = await renderNow(container);
+
+    expect(container.textContent).toContain("Showing 2 of 3 open");
+
+    act(() => root.unmount());
+  });
+
+  it("does not show finished, parked or someone else's tasks", async () => {
+    mockAssigned([
+      assignedIssue({ id: "done-1", status: "done" }),
+      assignedIssue({ id: "backlog-1", status: "backlog" }),
+      assignedIssue({ id: "other-1", assigneeUserId: "user-someone-else" }),
+      assignedIssue({ id: "agent-1", assigneeUserId: null, assigneeAgentId: "agent-9" }),
+    ]);
+
+    const root = await renderNow(container);
+
+    expect(container.querySelectorAll('[data-testid="now-assigned-task"]')).toHaveLength(0);
+    expect(container.textContent).toContain("Nothing needs you right now.");
+
+    act(() => root.unmount());
+  });
+
+  it("does not list a task twice when another source already shows it", async () => {
+    mockAssigned([assignedIssue({ id: "issue-1" }), assignedIssue({ id: "issue-b", identifier: "NOR-1501" })]);
+    apiMocks.stalledTasks.mockResolvedValue(stalledResult([stalledTask({ issueId: "issue-1" })]));
+
+    const root = await renderNow(container);
+
+    expect(container.querySelectorAll('[data-testid="now-stalled-task"]')).toHaveLength(1);
+    const rows = container.querySelectorAll('[data-testid="now-assigned-task"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.getAttribute("to")).toBe("/issues/NOR-1501");
 
     act(() => root.unmount());
   });

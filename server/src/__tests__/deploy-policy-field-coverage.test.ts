@@ -51,7 +51,9 @@ const FULLY_POPULATED_POLICY = {
   sftpPort: 22,
   sftpUsername: "deployer",
   sftpRemotePath: "/var/www/site",
-  sftpAllowlist: ["dist/index.html"],
+  sftpAllowlist: ["dist/index.html", "Apps/"],
+  sftpExclude: ["Apps/data/"],
+  sftpHostKeySha256: "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8",
   releaseRetentionCount: 10,
 } as const;
 

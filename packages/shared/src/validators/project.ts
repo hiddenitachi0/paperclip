@@ -141,6 +141,16 @@ export const deployPolicySchema = z
      */
     sftpAllowlist: z.array(z.string()).optional(),
     /**
+     * Paths removed from the resolved allowlist: exact repo-relative files, or
+     * a folder written with a trailing "/".
+     */
+    sftpExclude: z.array(z.string()).optional(),
+    /**
+     * Base64 SHA-256 of the SFTP host's public key (no "SHA256:" prefix),
+     * passed to curl as --hostpubsha256 on every SFTP call.
+     */
+    sftpHostKeySha256: z.string().optional(),
+    /**
      * DUR-4162: how many past releases deploy history keeps for this
      * project. Unset means the default of 10 applies (see
      * DEFAULT_RELEASE_RETENTION_COUNT in server/src/services/deploy-history.ts).
