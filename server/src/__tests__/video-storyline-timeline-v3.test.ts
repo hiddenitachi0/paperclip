@@ -242,6 +242,72 @@ d("storyline timeline v3", () => {
       expect((await storylineRow(fresh.storylineId)).status).toBe("rendering");
       expect((await storylineRow(busy.storylineId)).status).toBe("rendering");
     });
+
+    describe("a shot stranded queued/rendering with no job (DUR-4938)", () => {
+      const long = () => new Date(Date.now() - STALLED_RENDER_GRACE_MS - 60_000);
+
+      for (const filmStatus of ["draft", "paused"] as const) {
+        it(`is cleared by the sweep on a ${filmStatus} film, after which a render starts`, async () => {
+          const film = await seed({ shots: 1 });
+          await db.update(videoStorylines).set({ status: filmStatus }).where(eq(videoStorylines.id, film.storylineId));
+          await db.update(videoShots).set({ status: "queued", updatedAt: long() }).where(eq(videoShots.id, film.shotIds[0]!));
+
+          await videoStorylineRenderService(db).releaseStalledRenders();
+
+          const shot = await shotRow(film.shotIds[0]!);
+          expect(shot.status).toBe("failed");
+          expect(shot.errorMessage).toContain("never started");
+          expect((await storylineRow(film.storylineId)).status).toBe(filmStatus);
+
+          const stub = stubProvider(async () => ({ externalId: "wf-1", model: "ltx25", provider: "sogni" }));
+          const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+          await render.startRender(film.companyId, film.storylineId, ACTOR, {});
+          expect(stub.starts).toBe(1);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("rendering");
+        });
+      }
+
+      it("leaves a fresh one, and one with a running job, alone", async () => {
+        const film = await seed({ shots: 2 });
+        await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, film.storylineId));
+        await db.update(videoShots).set({ status: "queued" }).where(eq(videoShots.id, film.shotIds[0]!));
+        await db.update(videoShots).set({ status: "rendering", updatedAt: long() }).where(eq(videoShots.id, film.shotIds[1]!));
+        await db.insert(videoShotRenderJobs).values({ companyId: film.companyId, storylineId: film.storylineId, shotId: film.shotIds[1]!, provider: "sogni", model: "m", externalId: "wf", status: "running" });
+
+        await videoStorylineRenderService(db).releaseStalledRenders();
+
+        expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
+        expect((await shotRow(film.shotIds[1]!)).status).toBe("rendering");
+      });
+
+      it("is cleared by cancel on a paused film", async () => {
+        const film = await seed({ shots: 2 });
+        await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, film.storylineId));
+        await db.update(videoShots).set({ status: "queued", updatedAt: long() }).where(eq(videoShots.id, film.shotIds[0]!));
+
+        const render = videoStorylineRenderService(db, { buildProvider: () => stubProvider(async () => ({ externalId: "x", model: "m", provider: "sogni" })).provider, resolveApiKey: async () => "key" });
+        await render.cancelRender(film.companyId, film.storylineId, ACTOR);
+
+        const shot = await shotRow(film.shotIds[0]!);
+        expect(shot.status).toBe("failed");
+        expect(shot.errorMessage).toContain("never started");
+        expect((await storylineRow(film.storylineId)).status).toBe("cancelled");
+      });
+
+      it("cancel leaves a fresh queued shot alone, so an in-flight start cannot be restarted and paid twice", async () => {
+        const film = await seed({ shots: 2 });
+        await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, film.storylineId));
+        await db.update(videoShots).set({ status: "queued" }).where(eq(videoShots.id, film.shotIds[0]!));
+
+        const stub = stubProvider(async () => ({ externalId: "x", model: "m", provider: "sogni" }));
+        const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+        await render.cancelRender(film.companyId, film.storylineId, ACTOR);
+
+        expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
+        await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 409 });
+        expect(stub.starts).toBe(0);
+      });
+    });
   });
 
   describe("delete", () => {
