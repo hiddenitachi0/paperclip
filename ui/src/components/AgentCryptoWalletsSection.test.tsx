@@ -100,4 +100,36 @@ describe("AgentCryptoWalletsSection", () => {
     expect(unfreeze.title).toMatch(/Only the owner/);
     root.unmount();
   });
+
+  it("shows dated funding hints, the real-coins warning and a payment link that names the network", async () => {
+    api.settings.mockResolvedValue({ companyId: "c1", mainnetEnabled: false, mainnetEnabledAt: null, allWalletsFrozen: false, frozenReason: null, rpcEndpoints: {} });
+    const eth = "0x1111111111111111111111111111111111111111";
+    api.list.mockResolvedValue([{ ...wallet, chain: "ethereum", address: eth }]);
+    api.agentLimits.mockResolvedValue({ perTransactionUsd: 25, dailyUsd: 50, totalUsd: 200, approvalAboveUsd: 10 });
+    api.destinations.mockResolvedValue([]);
+    api.transactions.mockResolvedValue([]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <AgentCryptoWalletsSection companyId="c1" agentId="a1" />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    expect(container.querySelector("[data-testid=crypto-testnet-warning]")?.textContent).toBe("Do not send real coins here. They cannot be recovered.");
+    const toggle = [...container.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Funding"))!;
+    await act(async () => {
+      toggle.click();
+    });
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("pk910");
+    expect(text).toContain("Never use a faucet that needs real ETH on this address");
+    expect(container.querySelector("[data-testid=crypto-faucet-stamp]")?.textContent).toBe("As of 27 Oct 2026. Faucets change often.");
+    expect(container.querySelector("[data-testid=crypto-payment-link]")?.getAttribute("href")).toBe(`ethereum:${eth}@11155111`);
+    root.unmount();
+  });
 });
