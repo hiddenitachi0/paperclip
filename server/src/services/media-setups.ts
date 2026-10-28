@@ -66,6 +66,12 @@ import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoSt
  * Agents and plugin workers see LoRA links without their query string, and a
  * link with a key in it is never saved.
  *
+ * Approval is for a recipe: changing an approved setup's kind, service,
+ * model, edit model, mode, LoRAs or params moves it back to draft (agents
+ * stop seeing it, the approver is cleared) unless the same request approves
+ * it again, under that person's name. A recipe or status change that races
+ * another edit is refused (409) rather than approving a recipe nobody saw.
+ *
  * Starters: on first use each company gets the D4 starter setups and the two
  * starter LoRAs, once (deleting them later does not bring them back). The
  * claim is media_project_defaults.setups_seeded_at, set in the same
@@ -196,6 +202,37 @@ function setupForCheck(row: Pick<SetupRow, "kind" | "provider" | "modelId" | "mo
     loras: row.loras ?? [],
     params: row.params ?? {},
   };
+}
+
+/** JSON with sorted keys, null and missing fields alike: for comparing a recipe. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/**
+ * Whether an edit changes what the setup makes: kind, service, model, edit
+ * model, mode (as stored, so a mode the model id already says is no change),
+ * the LoRAs with their strengths and order, or the params. Name, notes, tags
+ * and the like are not the recipe.
+ */
+function recipeDiffers(existing: SetupRow, next: MediaSetupForCheck, nextMode: MediaSetupMode | null): boolean {
+  const loras = (list: Array<{ loraId: string; strength: number }>) => list.map((pick) => ({ loraId: pick.loraId, strength: pick.strength }));
+  return (
+    existing.kind !== next.kind ||
+    existing.provider !== next.provider ||
+    existing.modelId !== next.modelId ||
+    (existing.editModelId ?? null) !== (next.editModelId ?? null) ||
+    (existing.mode ?? null) !== (nextMode ?? null) ||
+    stableJson(loras(existing.loras ?? [])) !== stableJson(loras(next.loras)) ||
+    stableJson(existing.params ?? {}) !== stableJson(next.params)
+  );
 }
 
 function toTrialView(row: TrialRow): MediaModelSetupTrial {
@@ -630,14 +667,24 @@ export function mediaSetupsService(db: Db) {
     if ((recipeChanged || approving) && check.problems.length > 0) refuse(check.problems);
     const userId = userIdOf(actor);
     const now = new Date();
-    const statusFields =
-      input.status === undefined || input.status === existing.status
+    // An approval is for the recipe the approver saw. When the recipe really
+    // changes (not the same values sent back), an approved setup goes back to
+    // draft and agents stop seeing it, unless this request approves it again:
+    // then the approval is this person's, now.
+    const approvalStale = recipeChanged && recipeDiffers(existing, merged, check.mode) && (existing.status === "approved" || existing.approvedByUserId !== null);
+    const nextStatus = input.status ?? (approvalStale && existing.status === "approved" ? "draft" : existing.status);
+    const statusFields = approvalStale
+      ? nextStatus === "approved"
+        ? { status: nextStatus, approvedByUserId: userId, approvedAt: now }
+        : { status: nextStatus, approvedByUserId: null, approvedAt: null }
+      : input.status === undefined || input.status === existing.status
         ? {}
         : input.status === "approved"
           ? { status: input.status, approvedByUserId: userId, approvedAt: now }
           : input.status === "draft"
             ? { status: input.status, approvedByUserId: null, approvedAt: null }
             : { status: input.status };
+    const returnedToDraft = approvalStale && existing.status === "approved" && nextStatus === "draft";
     // Storylines copy a setup's kind (which slot), provider and model. When
     // one of those is sent, the storylines that use the setup follow in the
     // same transaction, so none keeps rendering the old model under the
@@ -648,6 +695,22 @@ export function mediaSetupsService(db: Db) {
     // after the edit also leaves every safe-for-work storyline that uses it.
     const copyFieldSent = input.kind !== undefined || input.provider !== undefined || input.modelId !== undefined;
     const { row, synced } = await withCompanyScope(db, companyId, async (tx) => {
+      // The approval decision above was made on the row as read before this
+      // transaction. A recipe or status change saved in between could leave
+      // someone's approval on a recipe they never saw, so such a request is
+      // refused instead (any edit bumps updated_at). The lock is the setup
+      // row, the same row the update takes, so the lock order is unchanged.
+      if (recipeChanged || input.status !== undefined) {
+        const [current] = await tx
+          .select({ updatedAt: mediaModelSetups.updatedAt })
+          .from(mediaModelSetups)
+          .where(and(eq(mediaModelSetups.id, setupId), eq(mediaModelSetups.companyId, companyId)))
+          .for("update");
+        if (!current) throw notFound(SETUP_NOT_FOUND);
+        if (current.updatedAt.getTime() !== existing.updatedAt.getTime()) {
+          throw conflict("This setup was changed by someone else while your change was being saved. Open it again and make your change once more.");
+        }
+      }
       const [updated] = await tx
         .update(mediaModelSetups)
         .set({
@@ -692,6 +755,8 @@ export function mediaSetupsService(db: Db) {
         fields: Object.keys(input),
         status: row.status,
         contentRating: row.contentRating,
+        ...(approvalStale ? { recipeChanged: true, previousApprovedByUserId: existing.approvedByUserId } : {}),
+        ...(returnedToDraft ? { returnedToDraft: true } : {}),
         ...(synced.length > 0
           ? {
               storylinesFollowed: synced.filter((s) => s.outcome === "copied").map((s) => s.storylineId),

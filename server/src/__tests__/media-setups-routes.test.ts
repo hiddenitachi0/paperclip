@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -459,6 +459,107 @@ d("media setup register routes", () => {
       expect(workerReads[3]!.loras[0]!.ref).toBe(bare);
       expect(JSON.stringify(workerReads)).toContain(bare);
       expect(JSON.stringify(workerReads)).not.toMatch(/format=SafeTensor/);
+    });
+  });
+
+  describe("approval", () => {
+    it("moves an approved setup back to draft when its recipe changes, and keeps it when only names or notes change", async () => {
+      const companyId = await seedCompany();
+      const ownerId = randomUUID();
+      const adminId = randomUUID();
+      const owner = appFor({ board: [companyId], role: "owner", userId: ownerId });
+      const admin = appFor({ board: [companyId], role: "admin", userId: adminId });
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      const natural = await setupByName(owner, companyId, "Natural");
+      const motion = natural.loras[0] as { loraId: string; strength: number };
+      const patch = (app: express.Express, body: Record<string, unknown>) => request(app).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send(body);
+
+      expect((await patch(owner, { status: "approved" })).body).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+
+      // Not the recipe: still approved, under the owner's name.
+      expect((await patch(admin, { notes: "calm", favorite: true, name: "Natural walk" })).body).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+      // The same recipe sent back (a form that sends every field): still approved.
+      const same = await patch(admin, {
+        kind: "video",
+        provider: "sogni",
+        modelId: natural.modelId,
+        mode: natural.mode,
+        editModelId: null,
+        loras: [{ loraId: motion.loraId, strength: motion.strength }],
+        params: { promptExpansion: false, seed: null },
+      });
+      expect(same.status).toBe(200);
+      expect(same.body).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+
+      // A different strength: back to draft, nobody's approval, and agents stop seeing it.
+      const edited = await patch(admin, { loras: [{ loraId: motion.loraId, strength: 0.7 }] });
+      expect(edited.status).toBe(200);
+      expect(edited.body).toMatchObject({ status: "draft", approvedByUserId: null, approvedAt: null });
+      expect((await request(agent).get(`/api/companies/${companyId}/media/setups/${natural.id}`)).status).toBe(404);
+      expect((await listSetups(agent, companyId)).setups.map((s) => s.id)).not.toContain(natural.id);
+      const logs = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityId, natural.id)));
+      const returned = logs.find((log) => (log.details as Record<string, unknown> | null)?.returnedToDraft === true);
+      expect(returned).toMatchObject({ action: "media.setup_updated", actorId: adminId });
+      expect(returned!.details).toMatchObject({ status: "draft", previousApprovedByUserId: ownerId });
+
+      // A model change sent together with "approved" is approved by the person who sent it.
+      expect((await patch(owner, { status: "approved" })).body).toMatchObject({ status: "approved", approvedByUserId: ownerId });
+      const reapproved = await patch(admin, { modelId: "minimax-h3-fl2va-fp8_flf2v_turbo", status: "approved" });
+      expect(reapproved.status).toBe(200);
+      expect(reapproved.body).toMatchObject({ status: "approved", approvedByUserId: adminId, modelId: "minimax-h3-fl2va-fp8_flf2v_turbo" });
+
+      // A params change on an approved setup: back to draft too.
+      expect((await patch(owner, { params: { promptExpansion: true } })).body).toMatchObject({ status: "draft", approvedByUserId: null });
+    });
+
+    it("refuses an approval that races a recipe edit, so it never lands on a recipe nobody saw", async () => {
+      const companyId = await seedCompany();
+      const ownerId = randomUUID();
+      const owner = appFor({ board: [companyId], role: "owner", userId: ownerId });
+      const natural = await setupByName(owner, companyId, "Natural");
+      const motion = natural.loras[0] as { loraId: string; strength: number };
+      const patch = (body: Record<string, unknown>) => request(owner).patch(`/api/companies/${companyId}/media/setups/${natural.id}`).send(body);
+
+      // Another edit changes the strength and holds the row until the approval waits for it.
+      let release!: () => void;
+      const mayCommit = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let markEdited!: () => void;
+      const edited = new Promise<void>((resolve) => {
+        markEdited = resolve;
+      });
+      const other = db.transaction(async (tx) => {
+        await tx
+          .update(mediaModelSetups)
+          .set({ loras: [{ loraId: motion.loraId, strength: 0.9 }], updatedAt: new Date() })
+          .where(eq(mediaModelSetups.id, natural.id));
+        markEdited();
+        await mayCommit;
+      });
+      await edited;
+      const approval = patch({ status: "approved" }).then((res) => res);
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const [row] = (await db.execute(sql`
+          SELECT count(*)::int AS waiting
+          FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%media_model_setups%'
+        `)) as unknown as { waiting: number }[];
+        if ((row?.waiting ?? 0) > 0) break;
+        if (Date.now() > deadline) throw new Error("the approval never waited for the setup row");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      release();
+      await other;
+
+      const refused = await approval;
+      expect(refused.status).toBe(409);
+      expect(refused.body.error).toMatch(/changed by someone else/);
+      const [after] = await db.select().from(mediaModelSetups).where(eq(mediaModelSetups.id, natural.id));
+      expect(after).toMatchObject({ status: "draft", approvedByUserId: null, loras: [{ loraId: motion.loraId, strength: 0.9 }] });
+      // Sent again, the approval is for the recipe as it now is.
+      expect((await patch({ status: "approved" })).body).toMatchObject({ status: "approved", approvedByUserId: ownerId, loras: [expect.objectContaining({ strength: 0.9 })] });
     });
   });
 

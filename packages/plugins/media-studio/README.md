@@ -288,6 +288,9 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   `api_key`, `sig`, `X-Amz-Signature`, ...) is refused with a plain message, so no key is ever stored. Agents and
   plugin workers (`ctx.mediaLibrary`) only ever get a link without its query string; the full link stays on the
   board's own pages.
+- An approval is for a recipe. Changing an approved setup's kind, service, model, edit model, mode, LoRAs or params
+  moves it back to draft and clears the approver (agents stop seeing it), unless the same request approves it again
+  under that person's name. Name, notes, tags and favourite do not touch the approval.
 - The worker reads them through `ctx.mediaLibrary` (capability `media.library.read`, read-only): `listSetups`,
   `getSetup`, `getProjectDefaults`, `listLoras` and `resolve` (checked on the server against the company's own
   LoRAs). Pass `approvedOnly: true` on every path an agent drives. The Create tab, tools and Identities are moved
