@@ -2,6 +2,9 @@ import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@p
 import {
   SAFE_FOR_WORK_AVOID,
   classifyLoras,
+  evaluateLora,
+  isFalFlaggedError,
+  personalLoraNeedsFilterOff,
   lorasForModel,
   madeForText,
   type LoraFitCheck,
@@ -204,6 +207,24 @@ async function runGeneration(
   const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
   ctx.logger.info(`media-studio: generating via ${impl.name}`);
   return impl.generate(input);
+}
+
+/**
+ * An agent's picture. When Fal's own safety check flags it, the picture is thrown away but Fal still bills the
+ * request, so its cost is recorded against the agent before the error goes on (DUR-4898, security review F1).
+ */
+async function runAgentGeneration(
+  ctx: PluginContext,
+  input: GenerationInput,
+  runCtx: { companyId: string; runId: string },
+  issueId: string | null,
+): Promise<GenerationResult> {
+  try {
+    return await runGeneration(ctx, input, runCtx.companyId, runCtx);
+  } catch (err) {
+    if (isFalFlaggedError(err)) await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: "fal", model: err.model, usage: err.usage, issueId });
+    throw err;
+  }
 }
 
 /** A whole number 0..MAX_SEED, from a number or a numeric string the model sent; otherwise undefined. */
@@ -984,6 +1005,9 @@ async function prepareSogni(
           return { error: `The look "${look.name}" has more than ${SOGNI_MAX_LORAS} LoRAs. An owner or admin needs to remove some.` };
         }
         let picks = look.loras.map(({ id, strength }) => ({ id, strength }));
+        // A filter-bypass LoRA is never used, even when Sogni's list cannot be read to check the rest (DUR-4898).
+        const refusedPick = picks.map((p) => evaluateLora({ id: p.id }, "mature")).find((v) => v.alwaysRefused);
+        if (refusedPick) return { error: `The look "${look.name}" cannot be used: ${refusedPick.message}` };
         const loras = await knownLoras(ctx, cfg, catalog, picks.some((p) => p.id.startsWith("personal-")));
         if (loras.error) return { error: `The look "${look.name}" cannot be used: ${loras.error}` };
         // A look keeps its LoRAs when its model changes, so some may be made
@@ -1370,15 +1394,21 @@ export async function prepareGeneration(
     const prepared = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes, identityModel);
     if ("error" in prepared) return prepared;
     // The identity's LoRA (imported into Sogni and ready) for a model of its family.
-    // Sogni marks personal LoRAs as needing its content filter off, and only a
-    // look an owner/admin saved with the filter off turns it off, so the LoRA
-    // rides along only then (the same rule as a look's own personal LoRAs).
+    // DUR-4898: Sogni flags each LoRA on its own (ui.nsfw = "needs the filter
+    // off"). With the filter on, the person's LoRA rides along when Sogni's flag
+    // for it says it does not need the filter off; a LoRA flagged (or one whose
+    // flag cannot be read) is left out and the reference pictures keep the
+    // person. The filter itself is only ever off through a look an owner/admin
+    // saved that way.
     const trained = identity ? pickTrained(identity, "sogni", look?.identityTrained?.sogni) : null;
     const lora = trained ? { sogniLoraId: trained.ref, strength: trained.strength ?? 0.8, triggerWord: trained.triggerWord ?? "", baseModel: identity?.lora?.baseModel ?? "krea-2" } : null;
     if (lora) {
       const used = input.model ?? identityModel;
-      if (input.safeContentFilter !== false) {
-        notes.push(`The LoRA of "${identity!.name}" was not used: Sogni only runs your own LoRAs with its content filter off, which only a look an owner or admin saved that way can do. The reference pictures still keep the person the same.`);
+      const ownList = input.safeContentFilter !== false ? (await knownLoras(ctx, cfg, catalog, true)).known : null;
+      if (input.safeContentFilter !== false && personalLoraNeedsFilterOff(ownList?.find((l) => l.id === lora.sogniLoraId))) {
+        notes.push(`The LoRA of "${identity!.name}" was not used: Sogni says it only runs with its content filter off, and this picture keeps the filter on. The reference pictures still keep the person the same.`);
+      } else if (evaluateLora({ id: lora.sogniLoraId, personal: true }, "mature").alwaysRefused) {
+        notes.push(`The LoRA of "${identity!.name}" was not used: it switches off Sogni's safety filter and is never allowed.`);
       } else if (loraFitsModel(lora.baseModel, used) && prepared.usesOwnModel) {
         const picks = input.loras ?? [];
         if (!picks.some((p) => p.id === lora.sogniLoraId) && picks.length < SOGNI_MAX_LORAS) {
@@ -1511,6 +1541,11 @@ async function lookLorasToSave(
 ): Promise<LookLora[]> {
   if (picks.length === 0) return [];
   if (picks.length > SOGNI_MAX_LORAS) throw new Error(`A look can use at most ${SOGNI_MAX_LORAS} LoRAs; this has ${picks.length}. Remove some.`);
+  // A filter-bypass LoRA can never be saved on a look, even when Sogni's list cannot be read to check the rest (DUR-4898).
+  for (const pick of picks) {
+    const verdict = evaluateLora({ id: pick.id }, "mature");
+    if (verdict.alwaysRefused && verdict.message) throw new Error(verdict.message);
+  }
   const seen = new Set<string>();
   for (const pick of picks) {
     if (seen.has(pick.id)) throw new Error(`The LoRA "${pick.id}" is in the list twice. Keep it once.`);
@@ -1846,7 +1881,7 @@ const plugin = definePlugin({
         }
 
         try {
-          const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
+          const result = await runAgentGeneration(ctx, input, runCtx, issueId || null);
           await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           const seed = typeof result.seed === "number" ? result.seed : null;
@@ -2301,6 +2336,8 @@ const plugin = definePlugin({
       try {
         return await run(reservation.reservationId);
       } catch (err) {
+        // Fal billed a picture its own check flagged: the reservation stays (settled at the real price by `run`), never given back.
+        if (isFalFlaggedError(err)) throw err;
         try {
           await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId);
         } catch (releaseErr) {
@@ -2421,12 +2458,20 @@ const plugin = definePlugin({
       const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
       return withEditSpend("variation", context, raw, async (reservationId) => {
         try {
-          const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+          let result: GenerationResult;
+          try {
+            result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+          } catch (err) {
+            if (isFalFlaggedError(err)) await settleFalEditSpend(context.companyId as string, reservationId, err.model, err.usage);
+            throw err;
+          }
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           // Kontext takes one or more reference images but makes one output image -- priced as 1 image.
           await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_REFERENCE_MODEL, { images: 1 });
           return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
         } catch (err) {
+          // Kept as it is: withEditSpend leaves a flagged picture's (already settled) reservation alone.
+          if (isFalFlaggedError(err)) throw err;
           throw new Error(errorText(err));
         }
       });
@@ -2540,7 +2585,13 @@ const plugin = definePlugin({
       return withEditSpend("inpaint", context, raw, async (reservationId) => {
         try {
           const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
-          const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+          let result: GenerationResult;
+          try {
+            result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+          } catch (err) {
+            if (isFalFlaggedError(err)) await settleFalEditSpend(context.companyId as string, reservationId, err.model, err.usage);
+            throw err;
+          }
           const { contentBase64: editedBase64 } = await toAttachmentBytes(ctx, result);
           const composited = await compositeMaskedEdit({
             original: bytesFromDataUrl(imageDataUrl, "The picture"),
@@ -2550,6 +2601,8 @@ const plugin = definePlugin({
           await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_FILL_MODEL, { images: 1 });
           return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
         } catch (err) {
+          // Kept as it is: withEditSpend leaves a flagged picture's (already settled) reservation alone.
+          if (isFalFlaggedError(err)) throw err;
           throw new Error(errorText(err));
         }
       });
@@ -3118,7 +3171,7 @@ export async function runQuickPicture(
   try {
     made = await withQuickTimeout(
       (async () => {
-        const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
+        const result = await runAgentGeneration(ctx, input, runCtx, issueId || null);
         await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
         return { result, ...(await toAttachmentBytes(ctx, result)) };
       })(),

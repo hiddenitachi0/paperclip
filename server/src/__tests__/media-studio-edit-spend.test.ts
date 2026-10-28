@@ -155,13 +155,14 @@ describe("worker: paid edits go through the reservation", () => {
         : ({ allowed: true as const, reservationId: "res-1" }),
     );
     const release = vi.fn(async () => {});
-    (harness.ctx as any).billing = { reserveMediaStudioDirectSpend: reserve, releaseMediaStudioDirectSpend: release };
+    const settle = vi.fn(async () => ({ settled: true as const }));
+    (harness.ctx as any).billing = { reserveMediaStudioDirectSpend: reserve, releaseMediaStudioDirectSpend: release, settleMediaStudioDirectSpend: settle };
     const fetchSpy = vi.fn(async () => {
       throw new Error("provider exploded");
     });
     (harness.ctx.http as any).fetch = fetchSpy;
     (harness.ctx.secrets as any).resolve = async () => "secret-value";
-    return { harness, reserve, release, fetchSpy };
+    return { harness, reserve, release, settle, fetchSpy };
   }
   const as = { companyId: COMPANY, actor: { type: "user" as const, userId: "user-1" } };
 
@@ -180,6 +181,37 @@ describe("worker: paid edits go through the reservation", () => {
     await expect(harness.performAction("edit.inpaint", { imageDataUrl: PNG, maskDataUrl: MASK, mode: "remove" }, as)).rejects.toThrow();
     expect(reserve).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledWith(COMPANY, "res-1");
+  });
+
+  it("a picture Fal's own check flagged is refused but its reservation is settled at the Fal price, not released (DUR-4898 F1)", async () => {
+    const { harness, release, settle, fetchSpy } = await setup();
+    fetchSpy.mockImplementation((async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ images: [{ url: "https://v3.fal.media/black.jpg", width: 1000, height: 1000 }], has_nsfw_concepts: [true] }),
+      text: async () => "",
+    })) as never);
+    await expect(harness.performAction("edit.fal", { imageDataUrl: PNG, prompt: "x" }, as)).rejects.toThrow(/safety check flagged/);
+    expect(release).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(COMPANY, { reservationId: "res-1", endpointId: "fal-ai/flux-pro/kontext/multi", usage: { images: 1, megapixels: 1 } });
+  });
+
+  it("an inpaint (remove/replace) Fal flags is refused but settled at the Fal price, not released (DUR-4898 F1 twin)", async () => {
+    const { harness, release, settle, fetchSpy } = await setup();
+    fetchSpy.mockImplementation((async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ images: [{ url: "https://v3.fal.media/black.jpg", width: 1000, height: 1000 }], has_nsfw_concepts: [true] }),
+      text: async () => "",
+    })) as never);
+    for (const mode of ["remove", "replace"] as const) {
+      await expect(
+        harness.performAction("edit.inpaint", { imageDataUrl: PNG, maskDataUrl: MASK, mode, prompt: "x" }, as),
+      ).rejects.toThrow(/safety check flagged/);
+    }
+    expect(release).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledTimes(2);
+    expect(settle).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ reservationId: "res-1", usage: expect.objectContaining({ images: 1 }) }));
   });
 
   it("passes the client's override to the host; the plugin itself never asserts admin", async () => {

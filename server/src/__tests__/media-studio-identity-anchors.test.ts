@@ -116,6 +116,8 @@ interface Fake {
   workflowArtifacts: number;
   editedPicture: Buffer;
   falStatus: string;
+  /** The next fal.run picture answer is one Fal's own safety check flagged. */
+  falFlagged?: boolean;
 }
 
 async function setup(config: Record<string, unknown> = {}): Promise<{ harness: TestHarness; fake: Fake }> {
@@ -185,7 +187,7 @@ async function setup(config: Record<string, unknown> = {}): Promise<{ harness: T
       if (u.pathname.endsWith("/status")) return json(200, { status: fake.falStatus });
       return json(200, { lora_file: { url: "https://v3.fal.media/files/lora.safetensors" }, config_file: { url: "https://v3.fal.media/files/c.json" } });
     }
-    if (u.host === "fal.run") return json(200, { images: [{ url: "https://v3.fal.media/files/placed.png", content_type: "image/png" }] });
+    if (u.host === "fal.run") return json(200, { images: [{ url: "https://v3.fal.media/files/placed.png", content_type: "image/png", width: 1000, height: 1000 }], ...(fake.falFlagged ? { has_nsfw_concepts: [true] } : {}) });
     if (u.host === "v3.fal.media") return new Response(new Uint8Array(fake.editedPicture), { status: 200, headers: { "Content-Type": "image/png" } });
     // Hugging Face.
     if (u.host === "huggingface.co") {
@@ -839,6 +841,19 @@ describe("training set: generate anywhere, keep provenance, mix batches", () => 
     expect(fake.calls.some((c) => c.url === "https://fal.run/fal-ai/flux-2-pro/edit")).toBe(true);
   });
 
+  it("a candidate Fal's own check flagged is refused but its reserved spend is settled at the Fal price, not given back (DUR-4898 F1)", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    fake.falFlagged = true;
+    const release = vi.spyOn(harness.ctx.billing, "releaseMediaStudioDirectSpend");
+    const settle = vi.spyOn(harness.ctx.billing, "settleMediaStudioDirectSpend");
+    await expect(
+      harness.performAction("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner),
+    ).rejects.toThrow(/safety check flagged/);
+    expect(release).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ endpointId: "fal-ai/flux-2-pro/edit", usage: { images: 1, megapixels: 1 } }));
+  });
+
   it("downloads the ticked pictures as a zip with captions and a README of where each came from", async () => {
     const { harness } = await setup();
     await ageModel(harness);
@@ -1065,6 +1080,44 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     const old = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Old" });
     if ("error" in old) throw new Error(old.error);
     expect(old.input.loras).toEqual([{ id: "personal-old", strength: 0.5 }]);
+  });
+
+  it("DUR-4898: with the filter on, the person's LoRA rides along only when Sogni's own flag for it says it does not need the filter off", async () => {
+    const { harness } = await setup();
+    const identity = await makeIdentity(harness);
+    await harness.performAction("lora.attach", { identityId: identity.id, sogniLoraId: "personal-abc", strength: 0.7, triggerWord: "majaberg" }, owner);
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "looks" }, [
+      { id: "on", name: "Filtered", style: "", model: null, seed: null, referenceFileIds: [], identityId: identity.id, updatedAt: "x" },
+    ]);
+    const real = harness.ctx.http.fetch;
+    let flagged = true;
+    harness.ctx.http.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (new URL(url).pathname === "/v1/loras/personal/catalog") {
+        return json(200, { data: { loras: [{ loraId: "personal-abc", name: "Maja LoRA", modelIds: [], ui: { min: 0, max: 1, default: 0.7, step: 0.05, nsfw: flagged, sexual: false } }], models: [], constraints: {} } });
+      }
+      return real(url, init);
+    }) as typeof harness.ctx.http.fetch;
+
+    const blocked = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Filtered" });
+    if ("error" in blocked) throw new Error(blocked.error);
+    expect(blocked.input.safeContentFilter).toBe(true);
+    expect(blocked.input.loras ?? []).toHaveLength(0);
+    expect(blocked.notes.join(" ")).toMatch(/only runs with its content filter off.*reference pictures still keep the person the same/);
+
+    flagged = false;
+    const allowed = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Filtered" });
+    if ("error" in allowed) throw new Error(allowed.error);
+    expect(allowed.input.safeContentFilter).toBe(true);
+    expect(allowed.input.loras).toEqual([{ id: "personal-abc", strength: 0.7 }]);
+  });
+
+  it("DUR-4898: a filter-bypass LoRA is refused for a person's pictures, whatever else is true", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    await expect(
+      harness.performAction("trainingSet.generate", { identityId: identity.id, service: "sogni", loras: [{ id: "krea2-filter-bypass-3", strength: 1 }], prompt: "p" }, owner),
+    ).rejects.toThrow(/never allowed/);
+    expect(fake.calls.some((c) => c.url.includes("/v1/creative-agent/workflows"))).toBe(false);
   });
 });
 

@@ -48,6 +48,7 @@ import {
 import { conflict, notFound, unprocessable, HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
+import { assertFilmModelAllowed, filmContentMode, filmVideoPrompt } from "./film-content-rules.js";
 import { logActivity } from "./activity-log.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { refreshStorylineMediaSpend, releaseStorylineMediaSpend, reserveStorylineMediaSpend, settleSogniStorylineSpend, storylineTransitionSpendCode } from "./storyline-media-ledger.js";
@@ -928,6 +929,9 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (running) throw conflict("A version of this transition is already being made. Wait for it to finish.");
 
     const quote = takeQuote(storyline, row);
+    // DUR-4898: a safe-for-work film never makes a bridge with a mature/uncensored model (before anything is reserved).
+    const mode = filmContentMode(storyline);
+    assertFilmModelAllowed(quote.option.model, mode);
     if (input.confirmCostCents !== undefined && quote.cents > input.confirmCostCents) {
       throw conflict(`This now costs about ${dollars(quote.cents)}, more than the ${dollars(input.confirmCostCents)} you saw. Check it and press again.`);
     }
@@ -1044,7 +1048,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       const provider = buildProvider(providerId, apiKey, quote.option.model);
       const handle = await provider.start({
         kind: "video",
-        prompt,
+        prompt: filmVideoPrompt(mode, prompt),
         model: quote.option.model,
         startImage,
         endImage,
@@ -1113,6 +1117,41 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     });
     // Nothing was charged: the ledger row stops counting (it is kept, at 0).
     if (released) await releaseStorylineMediaSpend(db, take.companyId, storylineTransitionSpendCode(take.id));
+  }
+
+  /**
+   * Fal's own check flagged a finished transition clip: it is thrown away (never stored, approved or chained), but
+   * Fal bills the request. Record the real cost, settle the held money at it and keep it counted in spentCents,
+   * instead of releasing it to 0 (DUR-4898, security review F1).
+   */
+  async function failFlaggedTake(take: TakeRow, storyline: StorylineRow, message: string, apiKey: string): Promise<void> {
+    const recorded = await recordFalCostEvent(db, storylineSafeFetch, {
+      companyId: take.companyId,
+      apiKey,
+      agentId: storyline.createdByAgentId,
+      createdByUserId: take.createdByUserId ?? (storyline.createdByAgentId ? null : storyline.createdByUserId),
+      model: take.model,
+      usage: { seconds: Math.round(take.durationMs / 1000) },
+      estimateCents: take.reservedCents,
+      billingCode: "video-storyline-transition",
+      settleBillingCode: storylineTransitionSpendCode(take.id),
+    });
+    const costCents = recorded?.costCents ?? take.reservedCents;
+    await withCompanyScope(db, take.companyId, async (tx) => {
+      const [current] = await tx.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.id, take.id)).for("update");
+      if (!current || current.status !== "generating") return;
+      await tx
+        .update(videoTransitionTakes)
+        .set({ status: "failed", error: message.slice(0, 1_000), costCents, completedAt: nowOf(), updatedAt: nowOf() })
+        .where(eq(videoTransitionTakes.id, take.id));
+      const delta = costCents - current.reservedCents;
+      if (delta !== 0) {
+        await tx
+          .update(videoStorylines)
+          .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} + ${delta})`, updatedAt: nowOf() })
+          .where(eq(videoStorylines.id, take.storylineId));
+      }
+    });
   }
 
   async function useTake(companyId: string, storylineId: string, transitionId: string, takeId: string, actor: VideoStorylineActor): Promise<VideoTransitionSummary> {
@@ -1299,7 +1338,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
           continue;
         }
         if (outcome.status === "failed") {
-          await failTake(take, outcome.error);
+          if (outcome.flagged && take.provider === "fal") await failFlaggedTake(take, storyline, outcome.error, apiKey);
+          else await failTake(take, outcome.error);
           failed += 1;
           continue;
         }

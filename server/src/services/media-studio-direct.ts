@@ -37,6 +37,7 @@ import {
   type MediaStudioDirectPictureResult,
 } from "./media-studio-direct-providers.js";
 import { FalVideoProvider } from "./video-provider-clients.js";
+import { isFalFlaggedError } from "@paperclipai/plugin-sdk/media";
 
 /**
  * DUR-4329: Media Studio's Create tab direct generation -- a board
@@ -136,7 +137,7 @@ async function mediaResultBytes(result: MediaStudioDirectMediaResult, prefix: st
 }
 
 interface PollableProvider {
-  poll(handle: MediaStudioDirectJobHandle): Promise<{ status: "running" | "done" | "failed"; progress?: string; error?: string; result?: MediaStudioDirectMediaResult }>;
+  poll(handle: MediaStudioDirectJobHandle): Promise<{ status: "running" | "done" | "failed"; progress?: string; error?: string; flagged?: boolean; result?: MediaStudioDirectMediaResult }>;
   cancel(handle: MediaStudioDirectJobHandle): Promise<void>;
 }
 
@@ -158,7 +159,8 @@ async function pollUntilDone(provider: PollableProvider, handle: MediaStudioDire
     throw unprocessable("This did not finish in time. Try again in a moment.");
   }
   if (outcome.status === "failed") {
-    throw unprocessable(`Could not make this: ${outcome.error ?? "unknown error"}`);
+    // `billed`: Fal's own check threw the result away but Fal still bills it, so the caller keeps the cost (DUR-4898).
+    throw Object.assign(unprocessable(`Could not make this: ${outcome.error ?? "unknown error"}`), outcome.flagged ? { billed: true } : {});
   }
   if (!outcome.result) throw new Error("Provider reported done with no result");
   return outcome.result;
@@ -381,6 +383,19 @@ export function mediaStudioDirectService(
     });
   }
 
+  /**
+   * Fal's own check flagged the result: it is thrown away (nothing is saved), but Fal still bills the request, so
+   * the reservation stays as a cost event at the real price instead of being given back (DUR-4898, security review F1).
+   */
+  async function settleFlaggedReservation(companyId: string, costEventId: string, apiKey: string, model: string, usage: FalUsage, estimateCents: number): Promise<void> {
+    const actual = await resolveActualFalCost(companyId, apiKey, model, usage, estimateCents);
+    await db
+      .update(costEvents)
+      .set({ provider: "fal", biller: "fal", model, costCents: actual.costCents, costMicroUsd: actual.costMicroUsd, costSource: actual.costSource })
+      .where(eq(costEvents.id, costEventId));
+    await refreshCompanyMonthlySpend(companyId);
+  }
+
   /** Finishes a reservation once the provider call succeeded: refreshes the cost event's provider/model to what the provider actually used (the reservation was made with the requested model, before generation), writes the direct-creation record, and logs the activity. */
   async function finalizeReservedCreation(
     companyId: string,
@@ -510,8 +525,10 @@ export function mediaStudioDirectService(
       model: input.model ?? "pending",
       billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
     });
+    let falKey: string | null = null;
     try {
       const apiKey = await resolveFalApiKey(companyId, actor.userId);
+      falKey = apiKey;
       const provider = new FalDirectPictureProvider(apiKey, safeFetch);
       const result = await provider.generate({ prompt: input.prompt, model: input.model, seed: input.seed });
       const { contentBase64, contentType } = await pictureResultBytes(result);
@@ -535,6 +552,10 @@ export function mediaStudioDirectService(
 
       return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, seed: result.seed, provider: result.provider, model: result.model };
     } catch (err) {
+      if (isFalFlaggedError(err) && falKey) {
+        await settleFlaggedReservation(companyId, reservation.costEventId, falKey, err.model, { images: err.usage.images, ...(err.usage.megapixels !== undefined ? { megapixels: err.usage.megapixels } : {}) }, estimate.estimatedCostCents);
+        throw unprocessable(err.message);
+      }
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
     }
@@ -547,10 +568,14 @@ export function mediaStudioDirectService(
       model: input.model ?? "pending",
       billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
     });
+    let falKey: string | null = null;
+    let startedModel: string | null = null;
     try {
       const apiKey = await resolveFalApiKey(companyId, actor.userId);
+      falKey = apiKey;
       const provider = new FalVideoProvider(apiKey, safeFetch);
       const handle = await provider.start({ kind: "video", prompt: input.prompt, model: input.model, durationSeconds: input.durationSeconds, seed: input.seed });
+      startedModel = handle.model;
       const result = await pollUntilDone(provider, handle as MediaStudioDirectJobHandle, VIDEO_POLL_TIMEOUT_MS);
       const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
@@ -567,7 +592,11 @@ export function mediaStudioDirectService(
 
       return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
-      await releaseReservation(companyId, reservation.costEventId);
+      if ((err as { billed?: boolean }).billed && falKey && startedModel) {
+        await settleFlaggedReservation(companyId, reservation.costEventId, falKey, startedModel, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
+      } else {
+        await releaseReservation(companyId, reservation.costEventId);
+      }
       throw err;
     }
   }

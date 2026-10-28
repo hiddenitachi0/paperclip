@@ -19,7 +19,7 @@ import {
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { SogniLoraCatalogCache } from "@paperclipai/plugin-sdk/media";
+import { isFalFlaggedError, personalLoraNeedsFilterOff, SogniLoraCatalogCache } from "@paperclipai/plugin-sdk/media";
 import {
   FalImageProvider,
   SOGNI_STILL_DEFAULT_MODEL,
@@ -55,6 +55,7 @@ import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import { assertFilmModelAllowed, filmContentFilter, filmContentMode, filmLoras, filmPictureText } from "./film-content-rules.js";
 import { assemblePrompt, type CharacterSheet } from "./media-studio-look-prompt.js";
 import {
   castIdentityNames,
@@ -251,6 +252,8 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     }
     // A Higgsfield look is never quietly turned into a Fal or Sogni picture.
     if (target.refusal) throw unprocessable(target.refusal);
+    // A safe-for-work film never uses a mature/uncensored model (checked again below for the model a reference-picture still really uses).
+    assertFilmModelAllowed(target.model, filmContentMode(storyline));
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
     const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId);
     // Who is in this shot, and the saved people (identities) they are linked to.
@@ -313,16 +316,25 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     const referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
+    const mode = filmContentMode(storyline);
     const input: ImageGenerationInput = {
       prompt: storyboardPrompt(cast.onlyLine ? `${shot.prompt}\n\n${cast.onlyLine}` : shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
     };
     if (target.providerId === "sogni") {
       input.model = referenceImages.length > 0 ? sogniEditModelOrDefault(target.model) : target.model ? sogniStepModel(target.model, "generate_image") : undefined;
+      assertFilmModelAllowed(input.model, mode);
+      // The filter is on in a safe-for-work film, whatever the look says (a look with it off is only honoured in a mature film).
+      const filter = filmContentFilter(mode, look ? look.safeContentFilter : null);
+      input.safeContentFilter = filter.safeContentFilter;
+      if (filter.note) notes.push(filter.note);
       if (look) {
         // The LoRAs must fit the model this picture is really made with (the editing model when it has reference pictures).
         const modelUsed = input.model ?? (referenceImages.length > 0 ? SOGNI_STILL_REFERENCE_MODEL : SOGNI_STILL_DEFAULT_MODEL);
-        const fit = fitLorasToModel(look, modelUsed, look.loras.length > 0 ? await knownLoras() : null);
+        const known = look.loras.length > 0 ? await knownLoras() : null;
+        const ruled = filmLoras(look.loras, mode, known);
+        notes.push(...ruled.notes);
+        const fit = fitLorasToModel({ name: look.name, loras: ruled.loras }, modelUsed, known);
         if (fit.note) notes.push(fit.note);
         if (fit.loras.length > 0) input.loras = fit.loras;
         if (referenceImages.length > 0) {
@@ -334,7 +346,6 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
           if (look.guidance !== null) input.guidance = look.guidance;
           if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
         }
-        input.safeContentFilter = look.safeContentFilter;
       }
     } else {
       // Fal.ai uses the look's style words and character description only.
@@ -343,6 +354,9 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       // With reference pictures Fal always uses FLUX Kontext (multi), which is what carries faces over.
       if (target.model && referenceImages.length === 0) input.model = target.model;
     }
+    if (target.providerId === "fal") assertFilmModelAllowed(input.model, mode);
+    // Safe-for-work words: in the prompt for edit_image and Fal; in "things to avoid" for Sogni's generate_image.
+    Object.assign(input, filmPictureText(mode, { prompt: input.prompt, negativePrompt: input.negativePrompt }, target.providerId === "sogni" && referenceImages.length === 0));
 
     return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes });
   }
@@ -370,6 +384,20 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       const aspect = storyline.aspect === "9:16" || storyline.aspect === "1:1" || storyline.aspect === "16:9" ? storyline.aspect : undefined;
       imageResult = await provider.generate(aspect ? { ...input, aspect } : input);
     } catch (err) {
+      // Fal's own check flagged the picture: it is thrown away (never stored, approved or chained), but Fal still
+      // bills the request, so its cost is recorded before the refusal (DUR-4898, security review F1).
+      if (isFalFlaggedError(err) && target.providerId === "fal") {
+        await recordFalCostEvent(db, safeImageFetch, {
+          companyId,
+          apiKey,
+          agentId: actor.agentId,
+          createdByUserId: actor.agentId ? null : actor.actorId,
+          model: err.model,
+          usage: err.usage,
+          estimateCents: estimate.estimatedTotalCents,
+          billingCode: "video-storyline-still",
+        });
+      }
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     const { buffer, contentType } = await downloadImageBytes(imageResult);
@@ -512,6 +540,9 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     // A look that shows a saved person puts that person's character fields and face/body pictures only on shots they are in.
     const scoped = await lookOnShot(companyId, target, shot, cast);
     const look = scoped.look;
+    const mode = filmContentMode(storyline);
+    const filter = filmContentFilter(mode, look ? look.safeContentFilter : null);
+    const known = target.providerId === "sogni" ? await knownLoras() : null;
     const plan = planCastStill({
       people: cast.people,
       service: target.providerId,
@@ -520,8 +551,12 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       lookRoles: look?.referenceRoles ?? [],
       extraIds: [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds],
       cap: MAX_STILL_REFERENCES,
-      safeContentFilter: look ? look.safeContentFilter : true,
+      safeContentFilter: filter.safeContentFilter,
+      // Sogni's own flag for the person's LoRA; unknown counts as "needs the filter off".
+      loraNeedsFilterOff: (id) => personalLoraNeedsFilterOff(known?.find((l) => l.id === id)),
     });
+    assertFilmModelAllowed(plan.model, mode);
+    if (filter.note) plan.notes.push(filter.note);
     const notes = [...cast.notes, ...plan.notes];
     if (scoped.note) notes.push(scoped.note);
     // One at a time so each picture keeps its place (and its person).
@@ -562,16 +597,22 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     const input: ImageGenerationInput = { prompt, referenceImages: sent.map((p) => p.dataUri!), model: plan.model };
     if (target.providerId === "sogni") {
       // The look's LoRAs must fit the editing model this picture is made with; the person's own LoRA is added after.
-      const fit = look && look.loras.length > 0 ? fitLorasToModel(look, plan.model, await knownLoras()) : null;
+      const ruled = look ? filmLoras(look.loras, mode, known) : null;
+      if (ruled) notes.push(...ruled.notes);
+      const fit = look && ruled && ruled.loras.length > 0 ? fitLorasToModel({ name: look.name, loras: ruled.loras }, plan.model, known) : null;
       if (fit?.note) notes.push(fit.note);
       const loras = [...(fit?.loras ?? [])];
-      if (plan.lora && !loras.some((l) => l.id === plan.lora!.id) && loras.length < 8) {
+      // The person's own LoRA goes through the same deny rules (a filter-bypass LoRA stops the picture; a flagged one is left out).
+      const own = plan.lora ? filmLoras([{ id: plan.lora.id }], mode, known) : null;
+      if (own) notes.push(...own.notes);
+      if (plan.lora && own && own.loras.length > 0 && !loras.some((l) => l.id === plan.lora!.id) && loras.length < 8) {
         loras.push({ id: plan.lora.id, strength: plan.lora.strength });
         if (plan.lora.triggerWord && !prompt.includes(plan.lora.triggerWord)) prompt = `${plan.lora.triggerWord}, ${prompt}`;
         input.prompt = prompt;
         notes.push(`${people[0]?.member.name ?? "The person"}'s own LoRA was used to keep them the same.`);
       }
       if (loras.length > 0) input.loras = loras;
+      input.safeContentFilter = filter.safeContentFilter;
       if (look) {
         if (sent.length > 0) {
           // Made from reference pictures: Sogni's editor has no place for seed, guidance or "things to avoid"; they are not sent, and the note says so.
@@ -582,12 +623,13 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
           if (look.guidance !== null) input.guidance = look.guidance;
           if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
         }
-        input.safeContentFilter = look.safeContentFilter;
       }
     } else {
       const ignored = falIgnoresNote(look);
       if (ignored) notes.push(ignored);
     }
+    // Every cast picture is made from reference pictures: edit_image on Sogni (no negative field), Kontext/FLUX edit on Fal.
+    Object.assign(input, filmPictureText(mode, { prompt: input.prompt, negativePrompt: input.negativePrompt }, false));
     return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: people.map((p) => p.member.id), notes });
   }
 

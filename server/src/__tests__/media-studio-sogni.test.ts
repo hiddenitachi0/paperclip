@@ -938,6 +938,15 @@ describe("media-studio looks with Sogni models and LoRAs", () => {
     expect(none.personal).toBe("owners-only");
   });
 
+  it("DUR-4898: a look cannot be saved with a filter-bypass LoRA, with the filter on or off", async () => {
+    await setup();
+    for (const safeContentFilter of [true, false]) {
+      await expect(
+        save({ name: "Bypass", style: "", model: "krea-2-turbo", loras: [{ id: "krea2-filter-bypass-3", strength: 1 }], safeContentFilter }),
+      ).rejects.toThrow(/never allowed/);
+    }
+  });
+
   it("adds the account's own LoRAs for an owner when the plan allows them", async () => {
     await setup({ personal: { status: 200, body: PERSONAL_LORA_CATALOG } });
     const loras = await harness.performAction<any>("sogni.loras", { modelId: "krea-2-turbo" }, owner);
@@ -1463,6 +1472,14 @@ describe("LoRA fit for a model (sogni-catalog classifyLoras)", () => {
     expect(madeForText(["A", "B"])).toBe("A and B");
     expect(madeForText(["A", "B", "C"])).toBe("A, B and C");
     expect(madeForText(["A", "B", "C", "D", "E"])).toBe("A, B, C and 2 more");
+  });
+
+  it("DUR-4898: checkSogniLoras refuses a filter-bypass LoRA with the filter on or off, listed or not", () => {
+    const krea = { id: "krea2_turbo_fp8_scaled", name: "Krea 2 Turbo" };
+    for (const contentFilterOn of [true, false]) {
+      expect(checkSogniLoras(krea, [{ id: "krea2-filter-bypass-3", strength: 1 }], known, { contentFilterOn })).toMatch(/never allowed/);
+      expect(checkSogniLoras(krea, [{ id: "krea2-filter-bypass-9", strength: 1 }], known, { contentFilterOn })).toMatch(/never allowed/);
+    }
   });
 
   it("checkSogniLoras still refuses another model's LoRA unless told to allow it (saving allows it)", () => {

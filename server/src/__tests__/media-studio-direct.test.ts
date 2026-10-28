@@ -374,6 +374,27 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(JSON.stringify(events)).not.toContain("fal-test");
     });
 
+    it("a picture Fal's own safety check flagged is refused and saved nowhere, but its cost stays on the books at Fal's price (DUR-4898 F1)", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+      mockedExecute
+        .mockResolvedValueOnce(fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg", width: 1024, height: 768 }], has_nsfw_concepts: [true] }))
+        .mockResolvedValueOnce(fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux/schnell", unit_price: 0.003, unit: "megapixels", currency: "USD" }] }));
+
+      await expect(
+        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "a cat", provider: "fal" }),
+      ).rejects.toMatchObject({ status: 422, message: expect.stringContaining("safety check flagged") });
+
+      // Nothing saved or listed as a creation, but the cost event was settled at the real price, not deleted.
+      expect(await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.companyId, companyId))).toHaveLength(0);
+      const events = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ costMicroUsd: 2359, costCents: 1, model: "fal-ai/flux/schnell" });
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(1);
+    });
+
     it("keeps the estimate (cost_source estimate) when Fal's price cannot be fetched", async () => {
       const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
       const secretId = await seedFalSecret(companyId);

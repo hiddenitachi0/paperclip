@@ -26,6 +26,8 @@
 // Kept deliberately identical in behavior to the plugin's copies; mirror any
 // change to providers.ts's FalProvider / audio.ts's FalAudioProvider here.
 
+import { FalFlaggedError, falFlaggedUsage, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
+
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface MediaStudioDirectAudioInput {
@@ -98,16 +100,18 @@ export class FalDirectPictureProvider {
       prompt: input.prompt,
       image_size: "landscape_4_3",
       num_images: 1,
-      enable_safety_checker: true,
     };
     if (typeof input.seed === "number") body.seed = input.seed;
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
       method: "POST",
       headers: falAuthHeaders(this.apiKey),
-      body: JSON.stringify(body),
+      // The safety fields go last: nothing above can turn a check off (DUR-4898).
+      body: JSON.stringify({ ...body, ...falSafetyFields(model) }),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }>; seed?: number };
+    // Fal still bills a flagged picture: the error carries the usage so the caller records the cost before refusing.
+    if (falResultFlagged(data)) throw new FalFlaggedError(model, falFlaggedUsage(data));
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
