@@ -33,7 +33,7 @@ import { extractLastFrameDataUri } from "./video-ffmpeg.js";
 import { sogniStorageFetch } from "./image-provider-clients.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type ScopedTx, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import { companyMediaStudioKeyRef, mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import {
@@ -62,7 +62,8 @@ export { estimateShotRenderCents, resolveShotRenderTarget, shotClipTiming };
  * Drives shots strictly in `orderIndex` order: shot N is only started once
  * shot N-1 is `done` (or there is no shot N-1). On a shot failure, the chain
  * stops (storyline -> "paused") rather than cascading -- see reRenderShot
- * for how a single bad shot gets retried without touching the rest.
+ * for how a single bad shot gets retried without touching the rest (it renders
+ * that one shot and never starts or resumes the chain; only startRender does).
  */
 
 const RENDER_API_FETCH_TIMEOUT_MS = 30_000;
@@ -532,6 +533,43 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
   }
 
+  /**
+   * The approval-threshold gate startRender and a single-shot re-render share: null when `totalCents` is within the
+   * company's threshold (or none is set) or a board-approved card already covers exactly that total.
+   */
+  async function missingRenderApproval(companyId: string, storylineId: string, totalCents: number): Promise<{ thresholdCents: number } | null> {
+    const thresholdCents = await settings.getApprovalThresholdCents(companyId);
+    if (thresholdCents === null || totalCents <= thresholdCents) return null;
+    const approved = await approvals.findApprovedVideoRenderApproval(companyId, storylineId, totalCents);
+    return approved ? null : { thresholdCents };
+  }
+
+  /** File one open card for the storyline (never a second), then refuse. The stamped fields come from here, never the caller. */
+  async function refuseForApproval(
+    companyId: string,
+    title: string,
+    storylineId: string,
+    actor: VideoStorylineActor,
+    info: { thresholdCents: number; totalCents: number; shotCount: number; summary: string; refusal: string },
+  ): Promise<never> {
+    const open = await approvals.findOpenVideoRenderApproval(companyId, storylineId);
+    if (!open) {
+      const payload = videoRenderRequestPayloadSchema.parse({
+        kind: "video_render",
+        storylineId,
+        shotCount: info.shotCount,
+        estimatedTotalCents: info.totalCents,
+        thresholdCents: info.thresholdCents,
+        title: `Render "${title}"`,
+        summary: info.summary,
+      });
+      await approvals.create(companyId, { type: "request_board_approval", requestedByAgentId: actor.agentId, payload, status: "pending" });
+    }
+    throw unprocessable(info.refusal);
+  }
+
+  const RENDER_IN_FLIGHT_MESSAGE = "A shot of this storyline is still rendering. Wait for it to finish before starting the render.";
+
   async function startRender(companyId: string, storylineId: string, actor: VideoStorylineActor, input: StartVideoStorylineRenderInput) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -546,6 +584,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Phase 2: only AI shots render (and cost money); the company's own
     // videos and photos are prepared by ffmpeg, free.
     const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
+
+    // DUR-4930 (security review B1): a single-shot re-render leaves the film in draft/paused with its shot queued or
+    // rendering. A startRender now would pick that shot (it is not "done") and call the provider a second time for
+    // it, with two chains then rendering every shot twice past the cap. Wait for the re-render to settle instead.
+    if (shots.some((s) => s.clipKind === "generated" && (s.status === "queued" || s.status === "rendering"))) {
+      throw conflict(RENDER_IN_FLIGHT_MESSAGE);
+    }
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
     // still needs to render must already be approved. Checked here, upfront
@@ -593,27 +638,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Mirrors browser-service.ts's purchase-clearance gate: file once, then
     // refuse until the board decides, never trusting the caller's own words
     // for the stamped fields.
-    const thresholdCents = await settings.getApprovalThresholdCents(companyId);
-    if (thresholdCents !== null && estimateResult.estimatedTotalCents > thresholdCents) {
-      const approved = await approvals.findApprovedVideoRenderApproval(companyId, storylineId, estimateResult.estimatedTotalCents);
-      if (!approved) {
-        const open = await approvals.findOpenVideoRenderApproval(companyId, storylineId);
-        if (!open) {
-          const payload = videoRenderRequestPayloadSchema.parse({
-            kind: "video_render",
-            storylineId,
-            shotCount: estimateResult.shotCount,
-            estimatedTotalCents: estimateResult.estimatedTotalCents,
-            thresholdCents,
-            title: `Render "${storyline.title}"`,
-            summary: `Rendering this storyline is estimated at ${estimateResult.estimatedTotalCents} cents across ${estimateResult.shotCount} shots, over this company's ${thresholdCents}-cent approval threshold.`,
-          });
-          await approvals.create(companyId, { type: "request_board_approval", requestedByAgentId: actor.agentId, payload, status: "pending" });
-        }
-        throw unprocessable(
-          `This render's estimated cost (${estimateResult.estimatedTotalCents} cents) is over this company's ${thresholdCents}-cent approval threshold. Waiting on a board decision before it can start.`,
-        );
-      }
+    const missing = await missingRenderApproval(companyId, storylineId, estimateResult.estimatedTotalCents);
+    if (missing) {
+      await refuseForApproval(companyId, storyline.title, storylineId, actor, {
+        thresholdCents: missing.thresholdCents,
+        totalCents: estimateResult.estimatedTotalCents,
+        shotCount: estimateResult.shotCount,
+        summary: `Rendering this storyline is estimated at ${estimateResult.estimatedTotalCents} cents across ${estimateResult.shotCount} shots, over this company's ${missing.thresholdCents}-cent approval threshold.`,
+        refusal: `This render's estimated cost (${estimateResult.estimatedTotalCents} cents) is over this company's ${missing.thresholdCents}-cent approval threshold. Waiting on a board decision before it can start.`,
+      });
     }
 
     const pending = renderableShots.find((s) => s.status !== "done");
@@ -633,6 +666,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(locked.status)) {
         throw conflict(`This storyline is already ${locked.status.replace(/_/g, " ")}.`);
       }
+      // Again under the lock: a re-render may have queued a shot since the read above (DUR-4930).
+      const [inFlight] = await tx
+        .select({ id: videoShots.id })
+        .from(videoShots)
+        .where(and(eq(videoShots.storylineId, storylineId), eq(videoShots.clipKind, "generated"), inArray(videoShots.status, ["queued", "rendering"])))
+        .limit(1);
+      if (inFlight) throw conflict(RENDER_IN_FLIGHT_MESSAGE);
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, pending.id), eq(videoShots.storylineId, storylineId)));
       if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
         throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
@@ -692,6 +732,36 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return hasAutomaticPin(shot) ? { ...shot, providerId: null, model: null } : shot;
   }
 
+  /**
+   * Money a shot that is `queued` or `rendering` will cost when it settles, which spentCents does not hold yet (it only
+   * rises when a shot settles). A single-shot re-render must count it, or a burst of re-renders each sees the same
+   * settled spend and walks past the cap and the approval threshold (DUR-4930). An animated photo is already counted
+   * in spentCents through its reserved ledger row, so it is left out here rather than counted twice. `exceptShotId` is
+   * the shot being re-rendered, never counted against itself.
+   */
+  async function inFlightShotEstimateCents(
+    runner: Db | ScopedTx,
+    storyline: Pick<typeof videoStorylines.$inferSelect, "id" | "providerId" | "model">,
+    companyId: string,
+    exceptShotId: string,
+  ): Promise<number> {
+    const inFlight = await runner
+      .select()
+      .from(videoShots)
+      .where(and(eq(videoShots.storylineId, storyline.id), inArray(videoShots.status, ["queued", "rendering"]), ne(videoShots.id, exceptShotId)));
+    const generated = inFlight.filter((s) => s.clipKind === "generated");
+    if (generated.length === 0) return 0;
+    const held = await runner
+      .select({ shotId: videoMediaSpend.shotId })
+      .from(videoMediaSpend)
+      .where(and(eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.storylineId, storyline.id), eq(videoMediaSpend.status, "reserved")));
+    const heldShotIds = new Set(held.map((row) => row.shotId));
+    return estimateShotRenderCents(
+      storyline,
+      generated.filter((s) => !heldShotIds.has(s.id)).map(withoutAutomaticPin),
+    ).estimatedTotalCents;
+  }
+
   async function reRenderShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -711,19 +781,46 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (shot.storyboardStatus !== "approved") {
       throw unprocessable(`Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
     }
+    // Spend-cap gap (DUR-4915): like startRender, a paid render needs a budget cap the person chose -- a missing cap
+    // is not "no limit".
+    if (storyline.budgetCapCents === null) {
+      throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
+    }
     const refundCents = shot.actualCostCents ?? 0;
-    const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
+    // Shots already queued or rendering have not settled into spentCents yet: count what they will cost (DUR-4930).
+    const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, shotId);
+    const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents) + inFlightCents;
     // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
     // estimate and the render use the same target.
     const shotEstimate = estimateShotRenderCents(storyline, [withoutAutomaticPin(shot)]);
-    if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    if (spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
-    // Security review (replace-import TOCTOU): queue the shot and flip the
-    // storyline to "rendering" under the storyline row lock a "replace"
-    // import also takes, re-checking the shot is still there and idle.
+    // Spend-cap gap (DUR-4915, security review): a re-render on a film that is not already running is a fresh paid
+    // render, so it needs the same board sign-off startRender asks for once the company's approval threshold is
+    // crossed. A film that is "rendering" is a run startRender already cleared. Never-made shots have no cost to
+    // refund, so one-shot-at-a-time must not walk past the threshold.
+    const gateTotal = spentAfterRefund + shotEstimate.estimatedTotalCents;
+    const refuseRerender = (thresholdCents: number, totalCents: number) =>
+      refuseForApproval(companyId, storyline.title, storylineId, actor, {
+        thresholdCents,
+        totalCents,
+        shotCount: 1,
+        summary: `Re-rendering shot ${shot.orderIndex + 1} of this storyline takes its render spend to ${totalCents} cents, over this company's ${thresholdCents}-cent approval threshold.`,
+        refusal: `Re-rendering this shot would take this storyline's render spend to ${totalCents} cents, over this company's ${thresholdCents}-cent approval threshold. Waiting on a board decision before it can render.`,
+      });
+    if (storyline.status !== "rendering") {
+      const missing = await missingRenderApproval(companyId, storylineId, gateTotal);
+      if (missing) await refuseRerender(missing.thresholdCents, gateTotal);
+    }
+    // Security review (replace-import TOCTOU): queue the shot under the
+    // storyline row lock a "replace" import also takes, re-checking the shot is
+    // still there and idle. The storyline's own status is left alone (DUR-4915):
+    // flipping it to "rendering" would make the tick carry on through every
+    // other shot, past the approval threshold startRender enforces.
+    const lockedGate: { hit: { thresholdCents: number; totalCents: number } | null } = { hit: null };
     await withCompanyScope(db, companyId, async (tx) => {
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       if (locked.status === "stitching") {
@@ -735,13 +832,24 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       const lockedRefund = current.actualCostCents ?? 0;
       // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
       // pre-lock check), priced with the same clear rule the update below applies.
-      if (locked.budgetCapCents !== null) {
-        const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
-        const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedEstimate;
-        if (lockedTotal > locked.budgetCapCents) {
-          throw unprocessable(
-            `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
-          );
+      if (locked.budgetCapCents === null) {
+        throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
+      }
+      const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
+      const lockedInFlight = await inFlightShotEstimateCents(tx, locked, companyId, shotId);
+      const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedInFlight + lockedEstimate;
+      if (lockedTotal > locked.budgetCapCents) {
+        throw unprocessable(
+          `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
+        );
+      }
+      // The same threshold check again on the row as it is under the lock (spend, status or the threshold's card may
+      // have changed since the pre-lock check). The card is filed after the lock is released.
+      if (locked.status !== "rendering") {
+        const missing = await missingRenderApproval(companyId, storylineId, lockedTotal);
+        if (missing) {
+          lockedGate.hit = { thresholdCents: missing.thresholdCents, totalCents: lockedTotal };
+          return;
         }
       }
       await tx
@@ -767,17 +875,18 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .update(videoStorylines)
         .set({
           ...(lockedRefund > 0 ? { spentCents: Math.max(0, locked.spentCents - lockedRefund) } : {}),
-          ...(locked.status !== "rendering" ? { status: "rendering", errorMessage: null } : {}),
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storylineId));
     });
+    if (lockedGate.hit) await refuseRerender(lockedGate.hit.thresholdCents, lockedGate.hit.totalCents);
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
     try {
       await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
     } catch (err) {
-      // Paused (not "rendering" with nothing running), with the shot's own reason.
+      // A storyline that is "rendering" (a run already going) is paused rather than left with nothing running, with
+      // the shot's own reason; any other status is left as it was.
       const reason = await recordShotStartFailure(companyId, finalStoryline, refreshedShot, err, {
         status: "paused",
         errorPrefix: `Shot ${refreshedShot.orderIndex + 1} did not start again. `,
@@ -1259,11 +1368,21 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
+    // Fail closed (DUR-4915): a missing cap stops the chain, the same as a cap that is used up. The approval
+    // threshold needs no check here: only startRender puts a storyline into "rendering", and it enforces it.
     const nextEstimate = estimateShotRenderCents(storyline, [next]);
-    if (storyline.budgetCapCents !== null && spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    if (storyline.budgetCapCents === null || spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       await db
         .update(videoStorylines)
-        .set({ spentCents, status: "paused", errorMessage: `Budget cap reached before shot ${next.orderIndex + 1}. Raise the cap and start the render again to continue.`, updatedAt: nowOf() })
+        .set({
+          spentCents,
+          status: "paused",
+          errorMessage:
+            storyline.budgetCapCents === null
+              ? `No budget cap is set, so the render stopped before shot ${next.orderIndex + 1}. Set a cap and start the render again to continue.`
+              : `Budget cap reached before shot ${next.orderIndex + 1}. Raise the cap and start the render again to continue.`,
+          updatedAt: nowOf(),
+        })
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
