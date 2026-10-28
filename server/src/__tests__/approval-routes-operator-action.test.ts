@@ -303,6 +303,18 @@ describe("operator_action approvals", () => {
       expect(res.body.error).toContain("DATABASE_URL is not one of the settings");
     }, TEST_TIMEOUT);
 
+    it("refuses the real-money lock variable even when the box's list names it (DUR-4996)", async () => {
+      const listed = structuredClone(CATALOG) as any;
+      listed.companies[COMPANY_A].envFiles.dashboard.keys.push("PAPERCLIP_CRYPTO_REAL_MONEY");
+      writeFileSync(catalogPath, JSON.stringify(listed));
+      const res = await request(await createApp(agentActor))
+        .post(`/api/companies/${COMPANY_A}/approvals`)
+        .send(setEnvBody({ envKey: "PAPERCLIP_CRYPTO_REAL_MONEY" }));
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain("real-money lock");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
     it("refuses a secret that the box's per-key secrets list does not allow", async () => {
       const withSecrets = structuredClone(CATALOG) as any;
       withSecrets.companies[COMPANY_A].envFiles.dashboard.secrets = { FEATURE_FLAG: ["other-secret"] };

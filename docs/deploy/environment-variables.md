@@ -30,6 +30,8 @@ While real money is forbidden the server refuses, with a 403 and a plain message
 
 The server logs one warning at boot stating the lock state (never any secret), and instance administrators see a banner while the lock is on. Changing the variable takes effect after a server restart.
 
+The variable is read from the server's real process environment (the deploy settings) only. A `PAPERCLIP_CRYPTO_REAL_MONEY` line in the instance `.env` or the working-directory `.env` is ignored (the server logs the name, never a value), because agents can write those files. Do not add it to the host-actions `envFiles` key list (`doc/operator-actions.md`) either.
+
 Before first deploying a version with this lock, check that no main-network wallets exist; see the pre-deploy check on the ship-plan card.
 
 ## Secrets
