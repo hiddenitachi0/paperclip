@@ -56,6 +56,8 @@ import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import { assertFilmModelAllowed, filmContentFilter, filmContentMode, filmLoras, filmPictureText } from "./film-content-rules.js";
+import { buildGenerationRecord, explainDroppedLoras, STILL_RECORD_ACTION, type RequestedLora } from "./generation-record.js";
+import { storedImageType } from "./image-type.js";
 import { assemblePrompt, type CharacterSheet } from "./media-studio-look-prompt.js";
 import {
   castIdentityNames,
@@ -83,6 +85,18 @@ import {
  */
 
 type ShotRow = typeof videoShots.$inferSelect;
+
+/** What a storyboard picture's "How was this made?" record needs beyond the request itself. */
+interface StillRecordFacts {
+  castIds: string[];
+  notes: string[];
+  /** The LoRAs wanted before any were left out (the look's, and the saved person's own). */
+  requestedLoras: RequestedLora[];
+  /** The reference pictures chosen, in the order they were sent. */
+  references: Array<{ fileId: string | null; role: string }>;
+  /** Chosen reference pictures that could not be read, so were not sent. */
+  referencesNotSent: number;
+}
 
 /** The linked cast members in one shot (see storyline-cast.ts). */
 interface ShotCastPeople {
@@ -358,7 +372,13 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     // Safe-for-work words: in the prompt for edit_image and Fal; in "things to avoid" for Sogni's generate_image.
     Object.assign(input, filmPictureText(mode, { prompt: input.prompt, negativePrompt: input.negativePrompt }, target.providerId === "sogni" && referenceImages.length === 0));
 
-    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes });
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, {
+      castIds: [],
+      notes,
+      requestedLoras: look?.loras ?? [],
+      references: refs.ids.map((fileId, i) => ({ fileId, role: refs.roles[i] ?? "other" })),
+      referencesNotSent: refs.ids.length - referenceImages.length,
+    });
   }
 
   /** Makes the picture, records its cost, stores it and marks the shot's picture as waiting for review. */
@@ -373,7 +393,7 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     target: StoryboardPictureTarget,
     cfg: Record<string, unknown>,
     input: ImageGenerationInput,
-    castInfo: { castIds: string[]; notes: string[] },
+    castInfo: StillRecordFacts,
   ): Promise<VideoStoryboardShotSummary> {
     const shotId = shot.id;
     const estimate = { estimatedTotalCents: estimateCents };
@@ -400,7 +420,10 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       }
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const { buffer, contentType } = await downloadImageBytes(imageResult);
+    const downloaded = await downloadImageBytes(imageResult);
+    const { buffer } = downloaded;
+    // The stored type and extension say what the bytes are, not what the service's header claimed.
+    const { contentType, extension } = storedImageType(buffer, downloaded.contentType);
 
     if (target.providerId === "sogni") {
       // Sogni reports credits; converted with the instance's credit price, once per shot picture.
@@ -429,7 +452,7 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     const stored = await getStorageService().putFile({
       companyId,
       namespace: `video-storylines/${storyline.id}/stills`,
-      originalFilename: `shot-${String(shot.orderIndex).padStart(6, "0")}-still.jpg`,
+      originalFilename: `shot-${String(shot.orderIndex).padStart(6, "0")}-still.${extension}`,
       contentType,
       body: buffer,
     });
@@ -455,12 +478,35 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       .returning();
     if (!row) throw new Error("Video shot still update returned no row");
 
+    // DUR-4902: what this picture was made with, so a picture that drifted can be explained later.
+    const withReferences = (input.referenceImages?.length ?? 0) > 0;
+    const sentLoras = input.loras ?? [];
+    const known = castInfo.requestedLoras.length > 0 && target.providerId === "sogni" ? await knownLoras() : null;
+    const generation = buildGenerationRecord({
+      kind: "still",
+      prompt: input.prompt,
+      provider: imageResult.provider,
+      model: withReferences ? target.model : imageResult.model,
+      editModel: withReferences ? imageResult.model : null,
+      sent: imageResult.sent,
+      loras: sentLoras,
+      lorasDropped: explainDroppedLoras({ requested: castInfo.requestedLoras, sent: sentLoras, mode: filmContentMode(storyline), model: imageResult.model, known }),
+      contentRating: filmContentMode(storyline),
+      references: castInfo.references,
+      referencesNotSent: castInfo.referencesNotSent,
+      estimatedCostCents: estimate.estimatedTotalCents,
+      actualCostCents: row.stillActualCostCents,
+      providerCredits: imageResult.sogniCredits ?? null,
+      notes: castInfo.notes,
+      knownSecrets: [apiKey],
+      now,
+    });
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      action: "video_shot.still_generated",
+      action: STILL_RECORD_ACTION,
       entityType: "video_shot",
       entityId: shotId,
       details: {
@@ -470,6 +516,7 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
         model: imageResult.model,
         lookId: look?.id ?? null,
         ...(castInfo.castIds.length > 0 ? { castIds: castInfo.castIds } : {}),
+        generation,
       },
     });
     return castInfo.notes.length > 0 ? { ...toStoryboardShotSummary(row), notes: castInfo.notes } : toStoryboardShotSummary(row);
@@ -630,7 +677,13 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     }
     // Every cast picture is made from reference pictures: edit_image on Sogni (no negative field), Kontext/FLUX edit on Fal.
     Object.assign(input, filmPictureText(mode, { prompt: input.prompt, negativePrompt: input.negativePrompt }, false));
-    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: people.map((p) => p.member.id), notes });
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, {
+      castIds: people.map((p) => p.member.id),
+      notes,
+      requestedLoras: [...(look?.loras ?? []), ...(plan.lora ? [{ id: plan.lora.id, strength: plan.lora.strength }] : [])],
+      references: sent.map((p) => ({ fileId: p.id, role: p.role })),
+      referencesNotSent: missing.length,
+    });
   }
 
   async function approveShot(
