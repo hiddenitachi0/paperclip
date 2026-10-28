@@ -11,7 +11,6 @@ import {
   checkMediaSetup,
   effectiveMediaLoraContentTag,
   inferMediaLoraFamily,
-  mediaLoraContentFloor,
   pickMediaSetupParams,
   summarizeMediaSetupTrials,
   type CreateMediaLoraInput,
@@ -44,6 +43,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { mediaContentRules } from "./media-content-rules.js";
 import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoStorylineService, type ScopedTx } from "./video-storylines.js";
 
 /**
@@ -58,6 +58,10 @@ import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoSt
  * Who may do what is decided in the routes: owners and admins write; members
  * read; agents read approved setups only (`reader.agent`) and never write,
  * except picking an approved setup for a storyline.
+ *
+ * Content: every check uses the Media Studio safety module's rules
+ * (media-content-rules.ts). A LoRA the module refuses in every film is never
+ * saved or used; a storyline only takes setups its content rating allows.
  *
  * Starters: on first use each company gets the D4 starter setups and the two
  * starter LoRAs, once (deleting them later does not bring them back). The
@@ -134,8 +138,9 @@ export function loraForCheck(row: LoraRow): MediaLoraForCheck {
 }
 
 export function toMediaLoraView(row: LoraRow): MediaLora {
-  const effective = effectiveMediaLoraContentTag(loraForCheck(row));
-  const floor = mediaLoraContentFloor(row);
+  const lora = loraForCheck(row);
+  const effective = effectiveMediaLoraContentTag(lora, mediaContentRules);
+  const floor = mediaContentRules.loraFloor(lora);
   return {
     id: row.id,
     companyId: row.companyId,
@@ -241,6 +246,10 @@ export function mediaSetupsService(db: Db) {
       const start = Date.now();
       const loraIds = new Map<string, string>();
       for (const [index, starter] of MEDIA_STARTER_LORAS.entries()) {
+        // The safety module has the last word on starters too: one it refuses
+        // in every film is not seeded, one it holds mature is seeded as mature.
+        const contentTag = effectiveMediaLoraContentTag({ ...starter, providerNsfw: false, providerSexual: false }, mediaContentRules);
+        if (contentTag === "refused") continue;
         const now = new Date(start + index);
         const [inserted] = await tx
           .insert(mediaLoras)
@@ -253,7 +262,7 @@ export function mediaSetupsService(db: Db) {
             notes: starter.notes,
             family: starter.family,
             compatibleModelIds: [...starter.compatibleModelIds],
-            contentTag: starter.contentTag,
+            contentTag,
             strengthMin: starter.strengthMin,
             strengthMax: starter.strengthMax,
             strengthDefault: starter.strengthDefault,
@@ -276,12 +285,26 @@ export function mediaSetupsService(db: Db) {
           )[0]?.id;
         if (id) loraIds.set(starter.key, id);
       }
+      const seededLoras =
+        loraIds.size > 0
+          ? await tx
+              .select()
+              .from(mediaLoras)
+              .where(and(eq(mediaLoras.companyId, companyId), inArray(mediaLoras.id, [...loraIds.values()])))
+          : [];
+      const seededLibrary = new Map(seededLoras.map((row) => [row.id, loraForCheck(row)]));
 
       const defaults: Partial<Record<MediaSetupKind, string>> = {};
       for (const [index, starter] of MEDIA_STARTER_SETUPS.entries()) {
         const loras = starter.loras
           .map((pick) => ({ loraId: loraIds.get(pick.starterLoraKey), strength: pick.strength }))
           .filter((pick): pick is { loraId: string; strength: number } => Boolean(pick.loraId));
+        // Rated by the same check as any other setup, never assumed safe for work.
+        const check = checkMediaSetup(
+          { kind: starter.kind, provider: starter.provider, modelId: starter.modelId, mode: starter.mode, editModelId: null, loras, params: { ...starter.params } },
+          seededLibrary,
+          mediaContentRules,
+        );
         // One millisecond apart, so the list keeps the starters' own order.
         const now = new Date(start + index);
         const [inserted] = await tx
@@ -297,7 +320,7 @@ export function mediaSetupsService(db: Db) {
             modelId: starter.modelId,
             loras,
             params: { ...starter.params },
-            contentRating: "sfw",
+            contentRating: check.contentRating,
             status: "draft",
             tags: [...starter.tags],
             notes: starter.notes,
@@ -368,7 +391,7 @@ export function mediaSetupsService(db: Db) {
   }
 
   function toSetupView(row: SetupRow, lib: ReadonlyMap<string, MediaLoraForCheck>, trials: TrialRow[]): MediaModelSetup {
-    const check = checkMediaSetup(setupForCheck(row), lib);
+    const check = checkMediaSetup(setupForCheck(row), lib, mediaContentRules);
     const billing: MediaBillingCoverage = check.billing;
     return {
       id: row.id,
@@ -390,7 +413,7 @@ export function mediaSetupsService(db: Db) {
           ref: lora?.ref ?? null,
           source: lora?.source ?? null,
           triggerWords: lora?.triggerWords ?? [],
-          contentTag: lora ? effectiveMediaLoraContentTag(lora) : null,
+          contentTag: lora ? effectiveMediaLoraContentTag(lora, mediaContentRules) : null,
         };
       }),
       // Only the allowed settings, ever; a stored key outside the list shows in `problems`.
@@ -468,7 +491,7 @@ export function mediaSetupsService(db: Db) {
   async function resolveSetup(companyId: string, setupId: string, reader: MediaSetupsReader): Promise<MediaResolvedSetup> {
     const row = await getSetupRow(companyId, setupId, reader);
     const lib = await library(companyId);
-    const check = checkMediaSetup(setupForCheck(row), lib);
+    const check = checkMediaSetup(setupForCheck(row), lib, mediaContentRules);
     const problems = [...check.problems];
     if (row.status === "archived") problems.unshift("This setup is archived. Pick another one, or bring it back first.");
     return {
@@ -506,7 +529,7 @@ export function mediaSetupsService(db: Db) {
   }
 
   async function checkSetup(companyId: string, input: MediaSetupForCheck): Promise<MediaSetupCheckResult> {
-    const check = checkMediaSetup(input, await library(companyId));
+    const check = checkMediaSetup(input, await library(companyId), mediaContentRules);
     return {
       ok: check.problems.length === 0,
       problems: check.problems,
@@ -530,7 +553,7 @@ export function mediaSetupsService(db: Db) {
       throw unprocessable(`A company can have at most ${MEDIA_SETUP_MAX_PER_COMPANY} model setups. Delete or archive one you no longer use first.`);
     }
     await assertSetupNameFree(companyId, input.name, null);
-    const check = checkMediaSetup(input, await library(companyId));
+    const check = checkMediaSetup(input, await library(companyId), mediaContentRules);
     if (check.problems.length > 0) refuse(check.problems);
     const now = new Date();
     const userId = userIdOf(actor);
@@ -589,7 +612,7 @@ export function mediaSetupsService(db: Db) {
       loras: input.loras ?? existing.loras,
       params: input.params ?? existing.params,
     });
-    const check = checkMediaSetup(merged, await library(companyId));
+    const check = checkMediaSetup(merged, await library(companyId), mediaContentRules);
     // Renaming, notes or archiving never trip over a problem that came later
     // (a LoRA refused after saving); changing the recipe or approving does.
     if ((recipeChanged || approving) && check.problems.length > 0) refuse(check.problems);
@@ -609,7 +632,8 @@ export function mediaSetupsService(db: Db) {
     // setup's name. The sync compares each storyline's copy with the row as
     // written here (not with `existing`, read before the lock), so two edits
     // of the same setup at once still leave every copy matching the setup.
-    // Mode, LoRAs and params are not copied.
+    // Mode, LoRAs and params are not copied. A setup that is rated mature
+    // after the edit also leaves every safe-for-work storyline that uses it.
     const copyFieldSent = input.kind !== undefined || input.provider !== undefined || input.modelId !== undefined;
     const { row, synced } = await withCompanyScope(db, companyId, async (tx) => {
       const [updated] = await tx
@@ -637,7 +661,8 @@ export function mediaSetupsService(db: Db) {
         .where(and(eq(mediaModelSetups.id, setupId), eq(mediaModelSetups.companyId, companyId)))
         .returning();
       if (!updated) throw notFound(SETUP_NOT_FOUND);
-      return { row: updated, synced: copyFieldSent ? await syncStorylinesToSetup(tx, companyId, updated) : [] };
+      const sync = copyFieldSent || updated.contentRating === "mature";
+      return { row: updated, synced: sync ? await syncStorylinesToSetup(tx, companyId, updated) : [] };
     });
     // A different video model changes what each clip costs, so the cached estimate follows.
     for (const sync of synced) {
@@ -683,10 +708,11 @@ export function mediaSetupsService(db: Db) {
   }
 
   /**
-   * The sync rule after a setup's kind, provider or model was edited (inside
-   * updateSetup's transaction, with the setup row already updated and so
-   * locked). Each storyline slot that uses the setup and whose copy no
-   * longer matches it either:
+   * The sync rule after a setup's kind, provider or model was edited, or the
+   * setup is rated mature (inside updateSetup's transaction, with the setup
+   * row already updated and so locked). A safe-for-work storyline loses the
+   * pick of a mature setup and keeps the model it has. Each other storyline
+   * slot that uses the setup and whose copy no longer matches it either:
    *   - gets the new provider and model copied, when it can be edited now
    *     and the setup still fits its slot; or
    *   - loses the pick and keeps the model it has, shown as "custom (not
@@ -707,6 +733,7 @@ export function mediaSetupsService(db: Db) {
         providerId: videoStorylines.providerId,
         model: videoStorylines.model,
         pictureSettings: videoStorylines.pictureSettings,
+        contentRating: videoStorylines.contentRating,
       })
       .from(videoStorylines)
       .where(and(eq(videoStorylines.companyId, companyId), or(eq(videoStorylines.imageSetupId, setup.id), eq(videoStorylines.videoSetupId, setup.id))))
@@ -716,19 +743,22 @@ export function mediaSetupsService(db: Db) {
     const now = new Date();
     for (const storyline of users) {
       const picture = (storyline.pictureSettings ?? {}) as { providerId?: unknown; model?: unknown };
+      const tooMature = setup.contentRating === "mature" && storyline.contentRating !== "mature";
       const videoStale =
         storyline.videoSetupId === setup.id &&
-        !(setup.kind === "video" && storyline.providerId === setup.provider && storyline.model === setup.modelId);
+        (tooMature || !(setup.kind === "video" && storyline.providerId === setup.provider && storyline.model === setup.modelId));
       const imageStale =
         storyline.imageSetupId === setup.id &&
-        !(setup.kind === "image" && picture.providerId === setup.provider && picture.model === setup.modelId);
+        (tooMature || !(setup.kind === "image" && picture.providerId === setup.provider && picture.model === setup.modelId));
       if (!videoStale && !imageStale) continue;
       const editable = isStorylineEditable(storyline);
+      const mature = tooMature ? "The setup is now rated mature, and the storyline is safe for work." : null;
       const busy = editable ? null : `The storyline is ${storyline.status.replace(/_/g, " ")}, so it keeps the model it is made with.`;
       const providerFits = STORYLINE_PROVIDERS.includes(setup.provider);
       const videoReason =
-        busy ?? (setup.kind !== "video" ? "The setup is no longer a video setup." : !providerFits ? "Storyline clips are made with Fal or Sogni only." : null);
+        mature ?? busy ?? (setup.kind !== "video" ? "The setup is no longer a video setup." : !providerFits ? "Storyline clips are made with Fal or Sogni only." : null);
       const imageReason =
+        mature ??
         busy ??
         (setup.kind !== "image"
           ? "The setup is no longer a picture setup."
@@ -784,7 +814,7 @@ export function mediaSetupsService(db: Db) {
 
   async function createLora(companyId: string, input: CreateMediaLoraInput, actor: MediaSetupsActor): Promise<MediaLora> {
     await ensureStarters(companyId);
-    const problems = checkMediaLoraFields(input);
+    const problems = checkMediaLoraFields(input, mediaContentRules);
     if (problems.length > 0) refuse(problems);
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -855,7 +885,7 @@ export function mediaSetupsService(db: Db) {
       recommendedMin: fields.recommendedMin !== undefined ? fields.recommendedMin : existing.recommendedMin,
       recommendedMax: fields.recommendedMax !== undefined ? fields.recommendedMax : existing.recommendedMax,
     };
-    const problems = checkMediaLoraFields(merged);
+    const problems = checkMediaLoraFields(merged, mediaContentRules);
     if (problems.length > 0) refuse(problems);
     if (archived === false && existing.archivedAt) await assertLoraRefFree(companyId, existing.provider, existing.ref, loraId);
     const now = new Date();
@@ -1051,18 +1081,27 @@ export function mediaSetupsService(db: Db) {
     const image = input.imageSetupId ? await assertPickableSetup(companyId, input.imageSetupId, "image", reader, "picture setup") : null;
     const video = input.videoSetupId ? await assertPickableSetup(companyId, input.videoSetupId, "video", reader, "video setup") : null;
     const lib = await library(companyId);
+    // The storyline's content rating decides what it may use, with the safety
+    // module's rules as in every film: a LoRA refused in every film never
+    // (a problem), and in a safe-for-work storyline nothing mature or not yet
+    // reviewed.
+    const safeForWork = storyline.contentRating !== "mature";
     for (const setup of [image, video]) {
       if (!setup) continue;
-      const problems = checkMediaSetup(setupForCheck(setup), lib).problems;
-      if (problems.length > 0) refuse([`"${setup.name}" cannot be used right now.`, ...problems]);
+      const check = checkMediaSetup(setupForCheck(setup), lib, mediaContentRules);
+      if (check.problems.length > 0) refuse([`"${setup.name}" cannot be used right now.`, ...check.problems]);
+      if (safeForWork && check.contentRating === "mature") {
+        refuse([`"${setup.name}" is rated mature, and this storyline is safe for work, so it can only use setups rated safe for work.`, ...check.matureReasons]);
+      }
     }
     if (image && image.provider !== "fal" && image.provider !== "sogni") {
       throw unprocessable(`"${image.name}" uses ${image.provider}; a storyline's pictures are made with Fal or Sogni. Pick a Fal or Sogni picture setup.`);
     }
     await withCompanyScope(db, companyId, async (tx) => {
       // Lock order: the setup rows first, then the storyline, the same as
-      // updateSetup. A setup whose kind, provider, model or status changed
-      // since the checks above is refused rather than copied stale.
+      // updateSetup. A setup edited since the checks above (any change bumps
+      // updated_at), or a storyline whose rating changed, is refused rather
+      // than copied stale.
       const picked = [image, video].filter((setup): setup is SetupRow => Boolean(setup));
       if (picked.length > 0) {
         const current = await tx
@@ -1073,13 +1112,23 @@ export function mediaSetupsService(db: Db) {
           .for("share");
         for (const setup of picked) {
           const now = current.find((row) => row.id === setup.id);
-          if (!now || now.kind !== setup.kind || now.provider !== setup.provider || now.modelId !== setup.modelId || now.status !== setup.status) {
+          if (
+            !now ||
+            now.kind !== setup.kind ||
+            now.provider !== setup.provider ||
+            now.modelId !== setup.modelId ||
+            now.status !== setup.status ||
+            now.updatedAt.getTime() !== setup.updatedAt.getTime()
+          ) {
             throw conflict(`"${setup.name}" was changed while it was being picked. Check it and pick it again.`);
           }
         }
       }
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStorylineEditable(locked);
+      if (locked.contentRating !== storyline.contentRating) {
+        throw conflict("The storyline's content rating was changed while the setups were being picked. Pick them again.");
+      }
       await tx
         .update(videoStorylines)
         .set({

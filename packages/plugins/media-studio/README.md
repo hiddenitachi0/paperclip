@@ -279,7 +279,11 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   Every company starts with editable drafts: Natural (MiniMax H3 + Better Motion 0.6), Natural face & speech
   (H3 + Natural Face & Speech 0.6), Action (H3 + Better Motion 0.8), Romantic / calm (Wan 3 start + end, no
   LoRA) and Stills (Krea 2). Owners and admins edit them under `/api/companies/:id/media/...`; agents only see
-  approved ones. Wan 3 takes no LoRA anywhere, and filter-bypass LoRAs can never be saved.
+  approved ones. Wan 3 takes no LoRA anywhere.
+- Setups and LoRAs are checked with the same safety module as every film (`evaluateLora` / `evaluateModel` in
+  `@paperclipai/plugin-sdk/media`, applied by `server/src/services/media-content-rules.ts`): a LoRA it refuses in
+  every film (filter bypass in any spelling, age sliders such as `krea2-age`) can never be saved or used, a part it
+  holds mature rates the setup mature, and a safe-for-work storyline only takes setups rated safe for work.
 - The worker reads them through `ctx.mediaLibrary` (capability `media.library.read`, read-only): `listSetups`,
   `getSetup`, `getProjectDefaults`, `listLoras` and `resolve` (checked on the server against the company's own
   LoRAs). Pass `approvedOnly: true` on every path an agent drives. The Create tab, tools and Identities are moved

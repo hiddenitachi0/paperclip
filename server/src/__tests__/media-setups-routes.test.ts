@@ -20,6 +20,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const { errorHandler } = await import("../middleware/index.js");
 const { mediaSetupRoutes } = await import("../routes/media-setups.js");
 const { mediaSetupsService } = await import("../services/media-setups.js");
+const { mediaLibraryHostService } = await import("../services/media-library-host.js");
 const { videoStorylineService } = await import("../services/video-storylines.js");
 const { videoStorylineSettingsService } = await import("../services/video-storyline-settings.js");
 
@@ -350,6 +351,62 @@ d("media setup register routes", () => {
       const list = await request(app).get(`/api/companies/${companyId}/media/loras`);
       expect((list.body.loras as Array<{ id: string }>).map((l) => l.id)).not.toContain(link.body.id);
     });
+
+    it("uses the safety module: never saves the age slider, unfilter or jailbreak LoRAs, and a row written outside the API stays unusable", async () => {
+      const companyId = await seedCompany();
+      const app = appFor({ board: [companyId] });
+      const agent = appFor({ agentId: randomUUID(), companyId });
+      for (const [ref, name] of [
+        ["krea2-age", "Age"],
+        ["krea2-unfilter", "Unfilter"],
+        ["krea2-jailbreak", "Jailbreak"],
+      ] as const) {
+        const res = await request(app).post(`/api/companies/${companyId}/media/loras`).send({ provider: "sogni", source: "catalog", ref, name, family: "krea2", contentTag: "sfw" });
+        expect(res.status, ref).toBe(422);
+        expect(res.body.error, ref).toMatch(/never be saved/);
+      }
+      const saved = await db.select().from(mediaLoras).where(eq(mediaLoras.companyId, companyId));
+      expect(saved.map((row) => row.ref).sort()).toEqual(["h3-better-motion", "h3-natural-face-speech"]);
+
+      // A row written outside the API, tagged "sfw": refused for everyone and hidden from agents.
+      const [age] = await db
+        .insert(mediaLoras)
+        .values({ companyId, provider: "sogni", source: "catalog", ref: "krea2-age", name: "Age", family: "krea2", contentTag: "sfw" })
+        .returning();
+      const view = await request(app).get(`/api/companies/${companyId}/media/loras/${age!.id}`);
+      expect(view.body).toMatchObject({ contentTag: "sfw", effectiveContentTag: "refused" });
+      expect(view.body.contentNote).toMatch(/could make a person look under-age/);
+      expect((await request(agent).get(`/api/companies/${companyId}/media/loras/${age!.id}`)).status).toBe(404);
+      expect(((await request(agent).get(`/api/companies/${companyId}/media/loras`)).body.loras as Array<{ id: string }>).map((l) => l.id)).not.toContain(age!.id);
+      const library = await mediaLibraryHostService(db, (id) => id ?? companyId).listLoras({ companyId });
+      expect(library.map((l) => l.id)).not.toContain(age!.id);
+
+      // A setup cannot take it, and one written outside the API is not usable.
+      const stills = await setupByName(app, companyId, "Stills (Krea 2)");
+      const withAge = await request(app).patch(`/api/companies/${companyId}/media/setups/${stills.id}`).send({ loras: [{ loraId: age!.id, strength: 0.6 }] });
+      expect(withAge.status).toBe(422);
+      expect(withAge.body.error).toMatch(/changes how old a person looks/);
+      const check = await request(app)
+        .post(`/api/companies/${companyId}/media/setups/check`)
+        .send({ kind: "image", name: "x", provider: "sogni", modelId: "krea2_turbo_fp8_scaled", loras: [{ loraId: age!.id, strength: 0.6 }], params: { promptExpansion: false } });
+      expect(check.status).toBe(200);
+      expect(check.body.ok).toBe(false);
+      await db.update(mediaModelSetups).set({ loras: [{ loraId: age!.id, strength: 0.6 }], status: "approved" }).where(eq(mediaModelSetups.id, stills.id));
+      const resolved = await request(agent).get(`/api/companies/${companyId}/media/setups/${stills.id}/resolve`);
+      expect(resolved.body.usable).toBe(false);
+      expect(resolved.body.problems.join(" ")).toMatch(/under-age/);
+      expect((await request(app).patch(`/api/companies/${companyId}/media/setups/${stills.id}`).send({ status: "draft" })).status).toBe(200);
+      expect((await request(app).patch(`/api/companies/${companyId}/media/setups/${stills.id}`).send({ status: "approved" })).status).toBe(422);
+
+      // The nsfw model rule: a setup on such a model is rated mature, with the module's reason.
+      const nsfwModel = await request(app)
+        .post(`/api/companies/${companyId}/media/setups`)
+        .send({ kind: "image", name: "Late night", provider: "sogni", modelId: "krea2_nsfw_fp8", params: { promptExpansion: false } });
+      expect(nsfwModel.status).toBe(201);
+      expect(nsfwModel.body.contentRating).toBe("mature");
+      expect(nsfwModel.body.matureReasons.join(" ")).toMatch(/made for mature pictures/);
+    });
+
   });
 
   describe("who may do what", () => {
@@ -612,6 +669,52 @@ d("media setup register routes", () => {
         (log) => log.entityId === natural.id && ((log.details as Record<string, unknown>)?.storylinesUnlinked as string[] | undefined)?.includes(busy!.id),
       );
       expect(movedLog?.details).toMatchObject({ storylinesFollowed: [draft!.id], storylinesUnlinked: [busy!.id] });
+    });
+
+    it("lets a safe-for-work storyline use only setups rated safe for work, and unlinks one that turns mature", async () => {
+      const companyId = await seedCompany();
+      await videoStorylineSettingsService(db).setEnabled(companyId, true);
+      const owner = appFor({ board: [companyId] });
+      const agent = appFor({ agentId: await seedAgent(companyId), companyId });
+      const spicy = await request(owner)
+        .post(`/api/companies/${companyId}/media/setups`)
+        .send({ kind: "video", name: "Spicy", provider: "sogni", modelId: "wan3.0-spicy-video", params: { promptExpansion: false }, status: "approved" });
+      expect(spicy.status).toBe(201);
+      expect(spicy.body.contentRating).toBe("mature");
+      const [office] = await db.insert(videoStorylines).values({ companyId, title: "Office" }).returning();
+      const [late] = await db.insert(videoStorylines).values({ companyId, title: "Late", contentRating: "mature" }).returning();
+
+      for (const app of [owner, agent]) {
+        const refused = await request(app).put(`/api/companies/${companyId}/media/storylines/${office!.id}/setups`).send({ videoSetupId: spicy.body.id });
+        expect(refused.status).toBe(422);
+        expect(refused.body.error).toMatch(/"Spicy" is rated mature, and this storyline is safe for work/);
+        expect(refused.body.error).toMatch(/made for mature pictures/);
+      }
+      expect((await request(owner).put(`/api/companies/${companyId}/media/storylines/${late!.id}/setups`).send({ videoSetupId: spicy.body.id })).status).toBe(200);
+
+      // A setup a safe-for-work storyline uses turns mature (a LoRA not reviewed yet): the storyline lets go of it and keeps its model.
+      const natural = await setupByName(owner, companyId, "Natural");
+      expect((await request(owner).put(`/api/companies/${companyId}/media/storylines/${office!.id}/setups`).send({ videoSetupId: natural.id })).status).toBe(200);
+      const realism = await request(owner)
+        .post(`/api/companies/${companyId}/media/loras`)
+        .send({ provider: "sogni", source: "catalog", ref: "h3-realism-people", name: "Realism People", family: "h3", strengthMin: 0, strengthMax: 2 });
+      expect(realism.status).toBe(201);
+      const motion = natural.loras[0] as { loraId: string; strength: number };
+      const mature = await request(owner)
+        .patch(`/api/companies/${companyId}/media/setups/${natural.id}`)
+        .send({ loras: [{ loraId: motion.loraId, strength: motion.strength }, { loraId: realism.body.id, strength: 0.6 }] });
+      expect(mature.status).toBe(200);
+      expect(mature.body.contentRating).toBe("mature");
+      const [after] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, office!.id));
+      expect(after).toMatchObject({ videoSetupId: null, providerId: "sogni", model: "minimax-h3-fl2va-fp8_flf2v" });
+      const [unlinked] = await db
+        .select()
+        .from(activityLog)
+        .where(and(eq(activityLog.entityId, office!.id), eq(activityLog.action, "video_storyline.setup_unlinked")));
+      expect(unlinked!.details).toMatchObject({ setupId: natural.id, reason: "The setup is now rated mature, and the storyline is safe for work." });
+      // The mature storyline keeps its mature setup.
+      const [lateAfter] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, late!.id));
+      expect(lateAfter!.videoSetupId).toBe(spicy.body.id);
     });
 
     it("needs video storylines switched on and refuses another company's storyline", async () => {

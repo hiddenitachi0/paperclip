@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  MEDIA_STARTER_LORAS,
   MEDIA_STARTER_SETUPS,
-  checkMediaLoraFields,
-  checkMediaSetup,
+  checkMediaLoraFields as checkLoraFieldsWith,
+  checkMediaSetup as checkSetupWith,
   createMediaLoraSchema,
   createMediaSetupSchema,
   createMediaSetupTrialSchema,
@@ -13,9 +12,27 @@ import {
   pickMediaSetupParams,
   summarizeMediaSetupTrials,
   updateMediaSetupSchema,
+  type MediaContentRules,
   type MediaLoraForCheck,
   type MediaSetupForCheck,
 } from "./media-setups.js";
+
+// The real content rules are the Media Studio safety module's, which this
+// package cannot import; the server passes them in, and
+// server/src/__tests__/media-content-rules.test.ts checks setups and LoRAs
+// against them (krea2-age, filter bypass in any spelling, nsfw models, the
+// starters). These stand-ins only test how a check uses a rule's answer.
+const rules: MediaContentRules = {
+  loraFloor: (lora) =>
+    lora.ref === "test-never"
+      ? { tag: "refused", reason: `The LoRA "${lora.name ?? lora.ref}" is never allowed.` }
+      : lora.ref === "test-mature" || lora.providerNsfw
+        ? { tag: "mature", reason: `The LoRA "${lora.name ?? lora.ref}" is mature by the rules.` }
+        : null,
+  modelMatureReason: (modelId) => (modelId.includes("spicy") ? `The model "${modelId}" is made for mature pictures.` : null),
+};
+const checkMediaSetup = (setup: MediaSetupForCheck, library: ReadonlyMap<string, MediaLoraForCheck>) => checkSetupWith(setup, library, rules);
+const checkMediaLoraFields = (lora: Parameters<typeof checkLoraFieldsWith>[0]) => checkLoraFieldsWith(lora, rules);
 
 function lora(overrides: Partial<MediaLoraForCheck> = {}): MediaLoraForCheck {
   return {
@@ -82,11 +99,10 @@ describe("media setups: capability table", () => {
     expect(mediaModelCapability("fal", "fal-ai/kling-video/v4/image-to-video").takesLoras).toBe(false);
   });
 
-  it("tags mature models by id", () => {
-    expect(mediaModelCapability("sogni", "wan3.0-spicy-video").matureTags).toContain("spicy");
-    expect(mediaModelCapability("sogni", "dark_beast_krea2_fp8").matureTags).toContain("off-required");
-    expect(mediaModelCapability("sogni", "seedance-2-5-uncensored").matureTags).toContain("uncensored");
-    expect(mediaModelCapability("sogni", "krea2_turbo_fp8_scaled").matureTags).toEqual([]);
+  it("keeps no content rules of its own", () => {
+    // Whether a model is mature is the safety module's call (MediaContentRules).
+    expect(mediaModelCapability("sogni", "ltx23-eros")).toMatchObject({ family: "ltx", takesLoras: false });
+    expect(Object.keys(mediaModelCapability("sogni", "wan3.0-spicy-video"))).not.toContain("matureTags");
   });
 });
 
@@ -156,47 +172,28 @@ describe("media setups: checking a setup", () => {
     expect(result.contentRating).toBe("mature");
     expect(result.matureReasons.join(" ")).toMatch(/not been reviewed/);
 
-    const flagged = lora({ ref: "h3-vbvr-video-reasoning", name: "VBVR", contentTag: "sfw" });
-    expect(checkMediaSetup(setup({ loras: [{ loraId: flagged.id, strength: 0.8 }] }), library(flagged)).contentRating).toBe("mature");
+    // The rules' floor wins over a person's "sfw", and its reason is the one shown.
+    const ruled = lora({ ref: "test-mature", name: "Ruled", contentTag: "sfw" });
+    const ruledResult = checkMediaSetup(setup({ loras: [{ loraId: ruled.id, strength: 0.8 }] }), library(ruled));
+    expect(ruledResult.contentRating).toBe("mature");
+    expect(ruledResult.matureReasons).toEqual(['The LoRA "Ruled" is mature by the rules.']);
 
     const refused = lora({ contentTag: "refused" });
     expect(checkMediaSetup(setup({ loras: [{ loraId: refused.id, strength: 0.6 }] }), library(refused)).problems.join(" ")).toMatch(/refused/);
+    const never = lora({ ref: "test-never", name: "Never", contentTag: "sfw" });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: never.id, strength: 0.6 }] }), library(never)).problems).toEqual(['The LoRA "Never" is never allowed. Remove it.']);
 
-    expect(checkMediaSetup(setup({ modelId: "wan3.0-spicy-video" }), library()).contentRating).toBe("mature");
+    const spicy = checkMediaSetup(setup({ modelId: "wan3.0-spicy-video" }), library());
+    expect(spicy.contentRating).toBe("mature");
+    expect(spicy.matureReasons).toEqual(['The model "wan3.0-spicy-video" is made for mature pictures.']);
+    expect(checkMediaSetup(setup({ kind: "image", modelId: "krea2_turbo_fp8_scaled", editModelId: "spicy-edit" }), library()).contentRating).toBe("mature");
   });
 
   it("needs prompt expansion set explicitly", () => {
     expect(checkMediaSetup(setup({ params: {} }), library()).problems.join(" ")).toMatch(/prompt expansion/);
   });
 
-  it("accepts every starter setup with the starter LoRAs, all safe for work", () => {
-    const rows = MEDIA_STARTER_LORAS.map((starter, index) =>
-      lora({
-        id: `00000000-0000-4000-8000-00000000000${index}`,
-        ref: starter.ref,
-        name: starter.name,
-        compatibleModelIds: [...starter.compatibleModelIds],
-        contentTag: starter.contentTag,
-        strengthMin: starter.strengthMin,
-        strengthMax: starter.strengthMax,
-      }),
-    );
-    const byKey = new Map(MEDIA_STARTER_LORAS.map((starter, index) => [starter.key, rows[index]!.id]));
-    for (const starter of MEDIA_STARTER_SETUPS) {
-      const result = checkMediaSetup(
-        setup({
-          kind: starter.kind,
-          provider: starter.provider,
-          modelId: starter.modelId,
-          mode: starter.mode,
-          loras: starter.loras.map((pick) => ({ loraId: byKey.get(pick.starterLoraKey)!, strength: pick.strength })),
-          params: starter.params,
-        }),
-        library(...rows),
-      );
-      expect(result.problems, starter.name).toEqual([]);
-      expect(result.contentRating, starter.name).toBe("sfw");
-    }
+  it("lists the D4 starters (checked against the real rules in the server's media-content-rules test)", () => {
     expect(MEDIA_STARTER_SETUPS.map((s) => s.name)).toEqual(["Natural", "Natural face & speech", "Action", "Romantic / calm", "Stills (Krea 2)"]);
     expect(MEDIA_STARTER_SETUPS.find((s) => s.key === "action")!.loras).toEqual([{ starterLoraKey: "sogni-h3-better-motion", strength: 0.8 }]);
     expect(MEDIA_STARTER_SETUPS.find((s) => s.key === "romantic-calm")!.loras).toEqual([]);
@@ -219,16 +216,16 @@ describe("media setups: LoRA library rules", () => {
     recommendedMax: 0.8,
   };
 
-  it("never saves a filter-bypass LoRA", () => {
-    expect(checkMediaLoraFields({ ...base, ref: "krea2-filter-bypass-3", name: "Bypass" }).join(" ")).toMatch(/never be saved/);
-    expect(checkMediaLoraFields({ ...base, ref: "krea2-something", name: "Filter Bypass 4" }).join(" ")).toMatch(/never be saved/);
-    expect(effectiveMediaLoraContentTag({ ref: "krea2-filter-bypass-2", contentTag: "sfw" })).toBe("refused");
+  it("never saves a LoRA the rules refuse in every film, and says why", () => {
+    expect(checkMediaLoraFields({ ...base, ref: "test-never", name: "Never" })).toEqual(['The LoRA "Never" is never allowed. It can never be saved.']);
+    expect(checkMediaLoraFields({ ...base, ref: "test-never", name: "Never", contentTag: "mature" }).join(" ")).toMatch(/never be saved/);
+    expect(effectiveMediaLoraContentTag({ provider: "sogni", source: "catalog", ref: "test-never", contentTag: "sfw" }, rules)).toBe("refused");
   });
 
-  it("does not let a flagged or anatomy LoRA be tagged safe for work", () => {
-    expect(checkMediaLoraFields({ ...base, ref: "krea2-breast", name: "Breast" }).join(" ")).toMatch(/cannot be tagged safe for work/);
+  it("does not let a LoRA the rules hold mature be tagged safe for work", () => {
+    expect(checkMediaLoraFields({ ...base, ref: "test-mature", name: "Ruled" }).join(" ")).toMatch(/cannot be tagged safe for work; tag it mature/);
     expect(checkMediaLoraFields({ ...base, providerNsfw: true }).join(" ")).toMatch(/cannot be tagged safe for work/);
-    expect(checkMediaLoraFields({ ...base, ref: "krea2-breast", name: "Breast", contentTag: "mature" })).toEqual([]);
+    expect(checkMediaLoraFields({ ...base, ref: "test-mature", name: "Ruled", contentTag: "mature" })).toEqual([]);
   });
 
   it("keeps links on Fal and ids on Sogni, and checks the strength scale", () => {

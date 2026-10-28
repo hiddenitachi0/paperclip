@@ -17,16 +17,19 @@ import { z } from "zod";
  *   - Strengths are native multipliers (Sogni recommends 0.4-0.8, default
  *     0.6), never percentages, and always explicit: Sogni runs a LoRA at 1.0
  *     when the strength is left out.
- *   - Filter-bypass LoRAs are refused everywhere; a mature or not yet reviewed
- *     part raises the setup's content rating to mature.
+ *   - LoRAs the safety module refuses in every film (filter bypass, age
+ *     sliders) can never be saved or used; a mature or not yet reviewed part
+ *     raises the setup's content rating to mature.
  *   - Params come from an allow-list (MEDIA_SETUP_PARAM_KEYS): a setup never
  *     carries a provider safety switch, so it can never turn a filter off.
  *   - A video setup may only use Fal or Sogni (the storyline CHECKs).
  *
- * The content rules mirror the deny rules of the Media Studio safety module
- * (plugin-sdk/media) for the parts a setup is made of. When that module is on
- * custom, the server should take them from there; until then the lists below
- * are the source for setups.
+ * The content rules are the Media Studio safety module's (`evaluateLora` and
+ * `evaluateModel` in @paperclipai/plugin-sdk/media), the same rules every film
+ * uses. This package cannot import that module (the SDK depends on this
+ * package), so it keeps no rule list of its own: every check that needs the
+ * rules takes them as a `MediaContentRules` argument, and the server passes
+ * the module's rules in (server/src/services/media-content-rules.ts).
  */
 
 // ─── Values ──────────────────────────────────────────────────────────────────
@@ -115,8 +118,6 @@ export interface MediaModelCapability {
   loraFamily: string | null;
   /** The plain sentence shown when LoRAs are picked for a model that takes none. */
   noLoraReason: string | null;
-  /** Our own mature tags for the model (off-required, mature, uncensored, spicy). */
-  matureTags: string[];
   billing: MediaBillingCoverage;
   /** True when the model is in the table; an unknown model is allowed but takes no LoRA. */
   known: boolean;
@@ -129,23 +130,9 @@ const FAL_NO_LORA = "This Fal model takes no LoRA. Fal models that take LoRAs en
 const HIGGSFIELD_NO_LORA = "Higgsfield takes no LoRAs; it keeps a person with a trained Soul ID instead. Remove the LoRAs.";
 const COMFYUI_NO_LORA = "LoRAs on a ComfyUI server cannot be saved in a setup yet. Remove the LoRAs.";
 
-const DARK_BEAST = /dark[_-]?beast/i;
-const ID_UNCENSORED = /(^|[^a-z0-9])uncensored($|[^a-z0-9])/i;
-const ID_SPICY = /(^|[^a-z0-9])spicy($|[^a-z0-9])/i;
-const ID_EROS = /(^|[^a-z0-9])(10)?eros($|[^a-z0-9])/i;
-
-/** Our own mature tags for a model id (the same id rules as the Media Studio safety module). */
-export function mediaModelMatureTags(modelId: string): string[] {
-  const out = new Set<string>();
-  if (DARK_BEAST.test(modelId)) out.add("off-required");
-  if (ID_EROS.test(modelId)) {
-    out.add("mature");
-    out.add("spicy");
-  }
-  if (ID_SPICY.test(modelId)) out.add("spicy");
-  if (ID_UNCENSORED.test(modelId)) out.add("uncensored");
-  return [...out];
-}
+// 10Eros (ltx23-22b-10eros-..., alias ltx23-eros) is an LTX model. This only
+// picks the family; whether it may be used is the safety module's call.
+const LTX_EROS_ALIAS = /(^|[^a-z0-9])(10)?eros($|[^a-z0-9])/i;
 
 function h3Mode(id: string): MediaSetupMode | null {
   if (id.includes("flf2v") || id.includes("flfa2v")) return "flf2v";
@@ -155,11 +142,7 @@ function h3Mode(id: string): MediaSetupMode | null {
   return null;
 }
 
-function capability(
-  provider: MediaSetupProvider,
-  partial: Partial<MediaModelCapability> & Pick<MediaModelCapability, "label" | "billing">,
-  modelId: string,
-): MediaModelCapability {
+function capability(provider: MediaSetupProvider, partial: Partial<MediaModelCapability> & Pick<MediaModelCapability, "label" | "billing">): MediaModelCapability {
   return {
     provider,
     family: null,
@@ -171,7 +154,6 @@ function capability(
     noLoraReason: null,
     known: true,
     ...partial,
-    matureTags: mediaModelMatureTags(modelId),
   };
 }
 
@@ -186,16 +168,15 @@ function isWan3(id: string): boolean {
 export function mediaModelCapability(provider: MediaSetupProvider, modelId: string): MediaModelCapability {
   const id = modelId.trim().toLowerCase();
   if (provider === "higgsfield") {
-    return capability(provider, { family: "soul", label: "Higgsfield", kinds: ["image"], noLoraReason: HIGGSFIELD_NO_LORA, billing: "higgsfield-credits" }, id);
+    return capability(provider, { family: "soul", label: "Higgsfield", kinds: ["image"], noLoraReason: HIGGSFIELD_NO_LORA, billing: "higgsfield-credits" });
   }
   if (provider === "comfyui") {
-    return capability(provider, { label: "ComfyUI", noLoraReason: COMFYUI_NO_LORA, billing: "local", known: false }, id);
+    return capability(provider, { label: "ComfyUI", noLoraReason: COMFYUI_NO_LORA, billing: "local", known: false });
   }
   if (isWan3(id)) {
     return capability(
       provider,
       { family: "wan3", label: "Wan 3", kinds: ["video"], noLoraReason: WAN3_NO_LORA, billing: provider === "sogni" ? "sogni-premium" : "fal-pay-per-use" },
-      id,
     );
   }
   if (provider === "sogni") {
@@ -203,7 +184,6 @@ export function mediaModelCapability(provider: MediaSetupProvider, modelId: stri
       return capability(
         provider,
         { family: "h3", label: "MiniMax H3", kinds: ["video"], mode: h3Mode(id), takesLoras: true, maxLoras: MEDIA_SETUP_MAX_LORAS, loraFamily: "h3", billing: "sogni-unlimited" },
-        id,
       );
     }
     if (id.includes("krea2")) {
@@ -219,29 +199,27 @@ export function mediaModelCapability(provider: MediaSetupProvider, modelId: stri
           loraFamily: "krea2",
           billing: "sogni-credits",
         },
-        id,
       );
     }
     if (id.startsWith("moss")) {
       return capability(
         provider,
         { family: "moss", label: "MOSS", kinds: ["image"], mode: "t2i", takesLoras: true, maxLoras: MEDIA_SETUP_MAX_LORAS, loraFamily: "moss", billing: "sogni-credits" },
-        id,
       );
     }
-    if (/^ltx/.test(id) || ID_EROS.test(id)) {
-      return capability(provider, { family: "ltx", label: "LTX", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-unlimited" }, id);
+    if (/^ltx/.test(id) || LTX_EROS_ALIAS.test(id)) {
+      return capability(provider, { family: "ltx", label: "LTX", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-unlimited" });
     }
     if (/^wan_v2\.2|^wan-?2\.?2|^wan22/.test(id)) {
-      return capability(provider, { family: "wan22", label: "Wan 2.2", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-unlimited" }, id);
+      return capability(provider, { family: "wan22", label: "Wan 2.2", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-unlimited" });
     }
     if (id.startsWith("seedance")) {
-      return capability(provider, { family: "seedance", label: "Seedance", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-premium" }, id);
+      return capability(provider, { family: "seedance", label: "Seedance", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-premium" });
     }
     if (id.startsWith("happyhorse")) {
-      return capability(provider, { family: "happyhorse", label: "HappyHorse", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-premium" }, id);
+      return capability(provider, { family: "happyhorse", label: "HappyHorse", kinds: ["video"], noLoraReason: SOGNI_NO_LORA, billing: "sogni-premium" });
     }
-    return capability(provider, { label: "Sogni model", noLoraReason: SOGNI_NO_LORA, billing: "unknown", known: false }, id);
+    return capability(provider, { label: "Sogni model", noLoraReason: SOGNI_NO_LORA, billing: "unknown", known: false });
   }
   // Fal: exact endpoint ids.
   if (id.startsWith("minimax/h3-max")) {
@@ -255,7 +233,6 @@ export function mediaModelCapability(provider: MediaSetupProvider, modelId: stri
         noLoraReason: "This H3 Max endpoint takes a start and an end picture but no LoRA. For LoRAs on Fal use minimax/h3/text-to-video/lora or minimax/h3/reference-to-video/lora.",
         billing: "fal-pay-per-use",
       },
-      id,
     );
   }
   const falLora = id.endsWith("/lora") || id.includes("-lora") || id.includes("_lora") || id === "fal-ai/wan-flf2v";
@@ -292,10 +269,9 @@ export function mediaModelCapability(provider: MediaSetupProvider, modelId: stri
     return capability(
       provider,
       { family, label: family ? `Fal ${family}` : "Fal model", kinds: [video ? "video" : "image"], mode, takesLoras: true, maxLoras: MEDIA_SETUP_MAX_LORAS, loraFamily: family, billing: "fal-pay-per-use" },
-      id,
     );
   }
-  return capability(provider, { label: "Fal model", noLoraReason: FAL_NO_LORA, billing: "fal-pay-per-use", known: false }, id);
+  return capability(provider, { label: "Fal model", noLoraReason: FAL_NO_LORA, billing: "fal-pay-per-use", known: false });
 }
 
 /** For the capabilities endpoint: the families the table knows, in plain words. */
@@ -324,50 +300,44 @@ export const MEDIA_CAPABILITY_FAMILIES: readonly MediaCapabilityFamily[] = [
   { provider: "higgsfield", family: "soul", label: "Higgsfield Soul", kinds: ["image"], takesLoras: false, note: "Pictures only; keeps a person with a Soul ID, not a LoRA.", billing: "higgsfield-credits" },
 ];
 
-// ─── Content rules for LoRAs ─────────────────────────────────────────────────
+// ─── Content rules ───────────────────────────────────────────────────────────
 
-/** Filter-bypass LoRAs: refused in every film, on every path, and never saved. */
-export const MEDIA_FILTER_BYPASS_LORA_IDS: readonly string[] = ["krea2-filter-bypass-2", "krea2-filter-bypass-3"];
-/** Anatomy sliders Sogni leaves unflagged: never tagged safe for work. */
-export const MEDIA_ANATOMY_SLIDER_LORA_IDS: readonly string[] = ["krea2-breast", "krea2-chest-firmness", "krea2-nipple-projection"];
-/** Flagged when Sogni's list was reviewed (24 Oct 2026); held by id in case the flag is dropped. */
-export const MEDIA_FLAGGED_LORA_IDS: readonly string[] = ["krea2-aberrant", "krea2-realism-engine", "h3-vbvr-video-reasoning"];
-const FILTER_BYPASS = /filter[\s._\-‐-―−]*bypass/i;
-const MYSTIC_X = /mystic[\s_-]*x/i;
-
+/** The fields of a LoRA the content rules look at. */
 export interface MediaLoraRuleInput {
+  provider: MediaLoraProvider;
+  source: MediaLoraSource;
+  /** Sogni id ("h3-better-motion", "personal-...") or, on Fal, the https link. */
   ref: string;
   name?: string | null;
+  /** The provider marks it not safe for work (Sogni ui.nsfw). */
   providerNsfw?: boolean;
+  /** The provider marks it sexual (Sogni ui.sexual). */
   providerSexual?: boolean;
 }
 
-export function isFilterBypassMediaLora(lora: Pick<MediaLoraRuleInput, "ref" | "name">): boolean {
-  const ref = lora.ref.trim().toLowerCase();
-  if (MEDIA_FILTER_BYPASS_LORA_IDS.includes(ref)) return true;
-  return FILTER_BYPASS.test(lora.ref) || FILTER_BYPASS.test(lora.name ?? "");
+/** The lowest tag the rules allow a LoRA, and why, in one plain sentence. */
+export interface MediaLoraContentFloor {
+  /** refused: never allowed, in any film. mature: never in a safe-for-work film. */
+  tag: "refused" | "mature";
+  reason: string;
 }
 
 /**
- * The lowest content tag a LoRA may carry, from the rules: "refused" for a
- * filter-bypass LoRA, "mature" when the provider flags it or it is an anatomy
- * slider, a flagged id or a Mystic X LoRA; null when a person decides.
+ * The content rules every setup check applies to its parts: the Media Studio
+ * safety module's `evaluateLora` and `evaluateModel`, passed in by the server
+ * (see the note at the top of this file). Nothing in this package decides
+ * what is refused or mature by itself.
  */
-export function mediaLoraContentFloor(lora: MediaLoraRuleInput): { tag: "refused" | "mature"; reason: string } | null {
-  const label = lora.name?.trim() || lora.ref;
-  if (isFilterBypassMediaLora(lora)) return { tag: "refused", reason: `The LoRA "${label}" switches off the provider's safety filter and is never allowed.` };
-  const ref = lora.ref.trim().toLowerCase();
-  if (lora.providerNsfw) return { tag: "mature", reason: `The LoRA "${label}" is marked not safe for work by its provider.` };
-  if (lora.providerSexual) return { tag: "mature", reason: `The LoRA "${label}" is marked sexual by its provider.` };
-  if (MEDIA_FLAGGED_LORA_IDS.includes(ref)) return { tag: "mature", reason: `The LoRA "${label}" was marked not safe for work when Sogni's list was reviewed.` };
-  if (MEDIA_ANATOMY_SLIDER_LORA_IDS.includes(ref)) return { tag: "mature", reason: `The LoRA "${label}" changes body anatomy.` };
-  if (MYSTIC_X.test(lora.ref) || MYSTIC_X.test(lora.name ?? "")) return { tag: "mature", reason: `The LoRA "${label}" belongs to the Mystic X family.` };
-  return null;
+export interface MediaContentRules {
+  /** The rule floor of a LoRA; null when the rules leave it to a person's review. */
+  loraFloor(lora: MediaLoraRuleInput): MediaLoraContentFloor | null;
+  /** Why a model cannot be used in a safe-for-work film; null when it can. */
+  modelMatureReason(modelId: string): string | null;
 }
 
 /** The tag that counts: the stored tag, raised to the rule floor. */
-export function effectiveMediaLoraContentTag(lora: MediaLoraRuleInput & { contentTag: MediaContentTag }): MediaContentTag {
-  const floor = mediaLoraContentFloor(lora);
+export function effectiveMediaLoraContentTag(lora: MediaLoraRuleInput & { contentTag: MediaContentTag }, rules: MediaContentRules): MediaContentTag {
+  const floor = rules.loraFloor(lora);
   if (floor?.tag === "refused" || lora.contentTag === "refused") return "refused";
   if (floor?.tag === "mature" && lora.contentTag !== "mature") return "mature";
   return lora.contentTag;
@@ -525,11 +495,12 @@ export function checkMediaLoraFields(lora: {
   strengthDefault: number;
   recommendedMin: number | null;
   recommendedMax: number | null;
-}): string[] {
+}, rules: MediaContentRules): string[] {
   const problems: string[] = [];
-  const label = lora.name.trim() || lora.ref;
-  if (isFilterBypassMediaLora(lora)) {
-    problems.push(`The LoRA "${label}" switches off the provider's safety filter, so it can never be saved.`);
+  // Refused in every film (filter bypass, age sliders): never saved at all.
+  const floor = rules.loraFloor(lora);
+  if (floor?.tag === "refused") {
+    problems.push(`${floor.reason} It can never be saved.`);
     return problems;
   }
   if (lora.provider === "sogni" && lora.source === "url") {
@@ -557,9 +528,8 @@ export function checkMediaLoraFields(lora: {
   if (lora.recommendedMin !== null && lora.recommendedMax !== null && lora.recommendedMin > lora.recommendedMax) {
     problems.push("The recommended range starts above where it ends.");
   }
-  const floor = mediaLoraContentFloor(lora);
   if (floor?.tag === "mature" && lora.contentTag === "sfw") {
-    problems.push(`${floor.reason} It cannot be tagged safe for work.`);
+    problems.push(`${floor.reason} It cannot be tagged safe for work; tag it mature.`);
   }
   return problems;
 }
@@ -589,10 +559,10 @@ export interface MediaSetupCheck {
 }
 
 /**
- * Check a setup against the capability table and the company's LoRA library
- * (`library` holds this company's rows only, by id).
+ * Check a setup against the capability table, the company's LoRA library
+ * (`library` holds this company's rows only, by id) and the content rules.
  */
-export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<string, MediaLoraForCheck>): MediaSetupCheck {
+export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<string, MediaLoraForCheck>, rules: MediaContentRules): MediaSetupCheck {
   const problems: string[] = [];
   const matureReasons: string[] = [];
   const cap = mediaModelCapability(setup.provider, setup.modelId);
@@ -608,10 +578,9 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
   }
   problems.push(...mediaSetupParamProblems(setup.params));
 
-  if (cap.matureTags.length > 0) matureReasons.push(`The model "${setup.modelId}" is made for mature pictures (${cap.matureTags.join(", ")}).`);
-  if (setup.editModelId) {
-    const editTags = mediaModelMatureTags(setup.editModelId);
-    if (editTags.length > 0) matureReasons.push(`The edit model "${setup.editModelId}" is made for mature pictures (${editTags.join(", ")}).`);
+  for (const modelId of [setup.modelId, setup.editModelId]) {
+    const reason = modelId ? rules.modelMatureReason(modelId) : null;
+    if (reason) matureReasons.push(reason);
   }
 
   const triggerWords: string[] = [];
@@ -633,9 +602,10 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
       continue;
     }
     const label = lora.name?.trim() || lora.ref;
-    const tag = effectiveMediaLoraContentTag(lora);
+    const floor = rules.loraFloor(lora);
+    const tag = effectiveMediaLoraContentTag(lora, rules);
     if (tag === "refused") {
-      problems.push(`The LoRA "${label}" is refused and can never be used. Remove it.`);
+      problems.push(floor?.tag === "refused" ? `${floor.reason} Remove it.` : `The LoRA "${label}" is refused and can never be used. Remove it.`);
       continue;
     }
     if (lora.provider !== setup.provider) {
@@ -662,7 +632,7 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
         `The strength of "${label}" must be ${bounds.minExclusive ? "above" : "at least"} ${showNumber(bounds.min)} and at most ${showNumber(bounds.max)} (it is ${showNumber(pick.strength)}). Strengths are multipliers, not percentages.`,
       );
     }
-    if (tag === "mature") matureReasons.push(`The LoRA "${label}" is mature.`);
+    if (tag === "mature") matureReasons.push(floor?.tag === "mature" ? floor.reason : `The LoRA "${label}" is tagged mature.`);
     if (tag === "unreviewed") matureReasons.push(`The LoRA "${label}" has not been reviewed yet, so it counts as mature.`);
     for (const word of lora.triggerWords) if (word && !triggerWords.includes(word)) triggerWords.push(word);
   }
