@@ -33,6 +33,8 @@ import { DecisionReasonDialog } from "../components/DecisionReasonDialog";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { describeRunActivity } from "../lib/run-activity";
 import { classifyTaskWaiting, type TaskWaiting } from "../lib/task-waiting";
+import { ASSIGNED_TO_YOU_STATUSES, selectAssignedToYou } from "../lib/assigned-to-you";
+import { authApi } from "../api/auth";
 import { Button } from "@/components/ui/button";
 import {
   approvalLabel,
@@ -205,6 +207,28 @@ export function DashboardNow() {
   const stalledTasks = stalled?.tasks ?? [];
   const stalledTotalCount = stalled?.totalCount ?? 0;
 
+  // Plain tasks handed to the signed-in person: the sixth source. They have no
+  // run, approval, question or blocker attached, so nothing above would ever
+  // show them. The server narrows the list to the signed-in person ("me").
+  const { data: assignedToMe } = useQuery({
+    queryKey: [...queryKeys.issues.list(selectedCompanyId!), "now-assigned-to-me"],
+    queryFn: () =>
+      issuesApi.list(selectedCompanyId!, {
+        assigneeUserId: "me",
+        status: ASSIGNED_TO_YOU_STATUSES,
+        includeBlockedInboxAttention: true,
+        includeBlockedBy: true,
+      }),
+    enabled: !!selectedCompanyId,
+    refetchInterval: NOW_POLL_INTERVAL_MS,
+  });
+  const { data: session } = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+    staleTime: 60_000,
+  });
+  const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
+
   // Total open issues across every status that isn't done/cancelled, purely
   // to tell the operator how much this page is *not* showing (DUR-249): the
   // Needs-you lane only ever surfaces items Paperclip can attribute to a
@@ -358,6 +382,19 @@ export function DashboardNow() {
     [blockedTasks],
   );
 
+  // Every task another source already shows, so a task is never listed (or
+  // counted) twice: blocked tasks waiting on the user, pending questions,
+  // stalled work, live runs that need a nudge, and tasks linked to approvals.
+  const assignedToYouTasks = useMemo(() => {
+    const shown = new Set<string>();
+    for (const { issue } of needsYouTasks) shown.add(issue.id);
+    for (const interaction of pendingInteractions ?? []) shown.add(interaction.issueId);
+    for (const task of stalledTasks) shown.add(task.issueId);
+    for (const run of runsByLane.needs_you) if (run.issueId) shown.add(run.issueId);
+    for (const issues of issuesByApprovalId.values()) for (const issue of issues) shown.add(issue.id);
+    return selectAssignedToYou(assignedToMe, currentUserId, shown);
+  }, [assignedToMe, currentUserId, needsYouTasks, pendingInteractions, stalledTasks, runsByLane, issuesByApprovalId]);
+
   const issuesBoardPath = selectedCompany?.issuePrefix ? `/${selectedCompany.issuePrefix}/issues` : "/issues";
 
   if (!selectedCompanyId) {
@@ -377,6 +414,7 @@ export function DashboardNow() {
     runsByLane.needs_you.length
     + actionableApprovals.length
     + needsYouTasks.length
+    + assignedToYouTasks.length
     + (pendingInteractions ?? []).length
     + stalledTotalCount;
 
@@ -387,6 +425,7 @@ export function DashboardNow() {
   const needsYouOverflow =
     Math.max(0, runsByLane.needs_you.length - LANE_ROW_LIMIT)
     + Math.max(0, needsYouTasks.length - LANE_ROW_LIMIT)
+    + Math.max(0, assignedToYouTasks.length - LANE_ROW_LIMIT)
     + Math.max(0, stalledTasks.length - LANE_ROW_LIMIT)
     + Math.max(0, stalledTotalCount - stalledTasks.length);
 
@@ -465,6 +504,9 @@ export function DashboardNow() {
                   ))}
                   {needsYouTasks.slice(0, LANE_ROW_LIMIT).map(({ issue, waiting }) => (
                     <BlockedTaskRow key={`task-${issue.id}`} issue={issue} label={waiting.label} />
+                  ))}
+                  {assignedToYouTasks.slice(0, LANE_ROW_LIMIT).map((issue) => (
+                    <AssignedToYouRow key={`assigned-${issue.id}`} issue={issue} />
                   ))}
                   {stalledTasks.slice(0, LANE_ROW_LIMIT).map((task) => (
                     <StalledTaskRow key={`stalled-${task.issueId}`} task={task} />
@@ -725,6 +767,30 @@ function BlockedTaskRow({
             {isParked ? "Parked" : "Waiting on you"}
           </span>
           {label && label !== "Parked" ? ` · ${label}` : ""}
+        </p>
+      </div>
+    </Link>
+  );
+}
+
+/** A plain task that was handed to the signed-in person. */
+function AssignedToYouRow({ issue }: { issue: Issue }) {
+  return (
+    <Link
+      to={`/issues/${issue.identifier ?? issue.id}`}
+      className="group flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+      title="Open the task"
+      data-testid="now-assigned-task"
+    >
+      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
+          {issue.title}
+        </p>
+        <p className="text-[10px] text-muted-foreground">
+          <span className="font-medium text-amber-600 dark:text-amber-400">Assigned to you</span>
+          {" · "}
+          {relativeTime(issue.updatedAt)}
         </p>
       </div>
     </Link>

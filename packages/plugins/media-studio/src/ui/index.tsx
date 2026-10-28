@@ -10,6 +10,7 @@ import { IdentitiesPanel } from "./identities-panel.js";
 import { RoomsPanel } from "./rooms-panel.js";
 import { MediaStudioSettingsTab } from "./settings-panel.js";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
+import { ContentRatingBadge, ContentRatingSwitch, useFilmRatingAccess } from "./storyline-rating.js";
 import { ScriptImportDialog, ScriptInstructionsDialog } from "./script-import.js";
 import {
   BUSY_STATUSES,
@@ -3419,6 +3420,8 @@ interface VideoStorylineSummary {
   projectId: string | null;
   title: string;
   status: string;
+  /** "sfw" (Safe for work) or "mature"; missing on older servers, which means Safe for work. */
+  contentRating?: "sfw" | "mature";
   providerId: string;
   model: string | null;
   /** The saved model setups the film uses (newer servers); null = chosen by hand. */
@@ -3761,6 +3764,7 @@ function LookReferencePicker(props: {
 
 export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
+  const ratingAccess = useFilmRatingAccess(companyId, context.userId);
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
   const listSogniVideoModels = usePluginAction(ACTION_SOGNI_VIDEO_MODELS);
   /** Sogni's video models (null until loaded); only read when a storyline uses Sogni. */
@@ -4491,7 +4495,10 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                   }}
                 >
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{s.title}</div>
-                  <div style={{ fontSize: 11, color: "#868e96" }}>{storylineStatusLabel(s.status)}</div>
+                  <div style={{ fontSize: 11, color: "#868e96", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>{storylineStatusLabel(s.status)}</span>
+                    <ContentRatingBadge rating={s.contentRating} />
+                  </div>
                 </button>
               ))}
             </div>
@@ -4522,8 +4529,18 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
                     <div style={{ minWidth: 0 }}>
                       <strong style={{ fontSize: 15 }}>{selected.title}</strong>
-                      <div style={{ fontSize: 12, color: "#868e96" }}>{storylineStatusLabel(selected.status)}</div>
+                      <div style={{ fontSize: 12, color: "#868e96", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <span>{storylineStatusLabel(selected.status)}</span>
+                        <ContentRatingBadge rating={selected.contentRating} />
+                      </div>
                     </div>
+                    <ContentRatingSwitch
+                      base={base}
+                      rating={selected.contentRating}
+                      access={ratingAccess}
+                      disabled={busy}
+                      onChanged={loadStorylines}
+                    />
                     <button type="button" style={dangerGhostBtn} disabled={busy} onClick={() => void deleteStoryline(selected.id)}>
                       Delete storyline
                     </button>
