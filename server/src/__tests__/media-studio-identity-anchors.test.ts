@@ -31,10 +31,12 @@ import {
   SOGNI_EDIT_MODELS,
   SOGNI_EDIT_MODEL_NAMES,
   isKnownSogniModel,
+  sogniCanonicalModelId,
   sogniMaxReferences,
   sogniWorkflowModel,
 } from "../../../packages/plugins/media-studio/src/sogni.js";
-import { SOGNI_OFFLINE_MODELS, lorasForModel, parseSogniLoraCatalog } from "../../../packages/plugins/media-studio/src/sogni-catalog.js";
+import { lorasForModel, parseSogniLoraCatalog } from "@paperclipai/plugin-sdk/media";
+import { SOGNI_OFFLINE_MODELS } from "../../../packages/plugins/media-studio/src/sogni-catalog.js";
 
 /**
  * Identity anchors (people), rooms and LoRA training in Media Studio. Every
@@ -1543,7 +1545,7 @@ describe("Sogni's Krea 2 Identity Edit v0.3 alpha", () => {
     // With Sogni unreachable the built-in list still offers it as a picture editor.
     expect(SOGNI_OFFLINE_MODELS.find((m) => m.id === KREA_ALPHA)).toMatchObject({ takesReferences: true, generates: false });
     // Sogni's own LoRA catalogue lists it as a Krea 2 model.
-    expect(lorasForModel(parseSogniLoraCatalog(LORA_CATALOG), KREA_ALPHA).map((l) => l.id)).toContain("krea2-detail-enhancer");
+    expect(lorasForModel(parseSogniLoraCatalog(LORA_CATALOG), sogniCanonicalModelId(KREA_ALPHA)).map((l) => l.id)).toContain("krea2-detail-enhancer");
   });
 
   it("is offered for the identity's preferred model and for candidates and training pictures, with plain names", async () => {

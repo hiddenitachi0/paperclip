@@ -2,7 +2,7 @@ import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, desc, eq, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoMediaSpend, videoScenes, videoShots, videoStorylines, videoTransitionTakes, videoTransitions, videoUploads, withCompanyScope } from "@paperclipai/db";
+import { assets, issueAttachments, videoMediaSpend, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, videoTransitionTakes, videoTransitions, videoUploads, withCompanyScope } from "@paperclipai/db";
 import {
   VIDEO_CLIP_MAX_SECONDS,
   VIDEO_CLIP_MIN_MS,
@@ -46,6 +46,7 @@ import {
 } from "./video-storyline-footage.js";
 import { refreshStorylineMediaSpend, reserveStorylineMediaSpend, storylineAnimateSpendCode } from "./storyline-media-ledger.js";
 import { estimateShotRenderCents, shotClipTiming, videoStorylineRenderService } from "./video-storyline-render.js";
+import { loadMadeClipTargets } from "./video-storyline-shot-target.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineStitchService } from "./video-storyline-stitch.js";
 import { applyShotOrder, assertStorylineEditable, lockStorylineRow, videoStorylineService, type ScopedTx, type VideoStorylineActor } from "./video-storylines.js";
@@ -517,7 +518,9 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
       if (shot.status !== "done" || !shot.resultObjectKey) {
         throw unprocessable("This AI shot isn't made yet, so there is nothing to trim. Change its length instead; it is trimmed after it is made.");
       }
-      const fullMs = shotClipTiming(storyline, shot).sourceLengthMs ?? shot.durationSeconds * 1000;
+      // A made clip keeps the length of the model that made it, whatever the film uses now.
+      const made = (await loadMadeClipTargets(db, [shot.id])).get(shot.id) ?? null;
+      const fullMs = shotClipTiming(storyline, shot, null, made).sourceLengthMs ?? shot.durationSeconds * 1000;
       const trimInMs = input.trimInMs ?? shot.sourceTrimInMs ?? 0;
       const trimOutMs = input.trimOutMs === null ? fullMs : input.trimOutMs ?? shot.sourceTrimOutMs ?? fullMs;
       const problem = checkTrim(fullMs, trimInMs, trimOutMs);
@@ -589,7 +592,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
     if (shot.status === "queued" || shot.status === "rendering") throw conflict("This clip is being made right now. Split it once it is ready.");
     const upload = shot.sourceUploadId ? await footage.getUpload(companyId, shot.sourceUploadId).catch(() => null) : null;
-    const timing = shotClipTiming(storyline, shot, upload?.durationMs ?? null);
+    const madeWith = shot.clipKind === "generated" && shot.status === "done" ? (await loadMadeClipTargets(db, [shot.id])).get(shot.id) ?? null : null;
+    const timing = shotClipTiming(storyline, shot, upload?.durationMs ?? null, madeWith);
     const at = input.atMs;
     const made = shot.clipKind === "generated" && shot.status === "done" && Boolean(shot.resultObjectKey);
     const wholeSeconds = shot.clipKind === "still" || (shot.clipKind === "generated" && !made);
@@ -661,6 +665,31 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
         .values({ ...copy, promptHistory: [], transitionIn: null, orderIndex: 2_000_000 + order.length, ...secondFields, createdAt: nowOf(), updatedAt: nowOf() })
         .returning({ id: videoShots.id });
       await tx.update(videoShots).set({ ...firstChanges, updatedAt: nowOf() }).where(eq(videoShots.id, shot.id));
+      if (made && shot.clipKind === "generated") {
+        // The second part shares the made clip, so it shares what made it: copy the done render job (the model
+        // is only on the job, never pinned on the shot) so its length and trims keep following that model.
+        const [job] = await tx
+          .select()
+          .from(videoShotRenderJobs)
+          .where(and(eq(videoShotRenderJobs.shotId, shot.id), eq(videoShotRenderJobs.status, "done")))
+          .orderBy(desc(videoShotRenderJobs.attempt), desc(videoShotRenderJobs.completedAt))
+          .limit(1);
+        if (job) {
+          await tx.insert(videoShotRenderJobs).values({
+            companyId,
+            storylineId,
+            shotId: inserted!.id,
+            attempt: job.attempt,
+            provider: job.provider,
+            model: job.model,
+            externalId: job.externalId,
+            status: "done",
+            startedAt: job.startedAt,
+            updatedAt: nowOf(),
+            completedAt: job.completedAt,
+          });
+        }
+      }
       const at = order.findIndex((o) => o.id === shot.id);
       const next = order[at + 1] ?? null;
       const withNew = [...order.slice(0, at + 1), { id: inserted!.id, sceneId: current.sceneId, orderIndex: 0 }, ...order.slice(at + 1)];
@@ -1034,7 +1063,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     try {
       const fresh = await storylines.getStorylineRow(companyId, storylineId);
       const freshShot = await storylines.getShotRow(companyId, storylineId, shot.id);
-      await render.beginShotRender(companyId, fresh, freshShot, actorId, { companyKeyOnly: true });
+      await render.beginShotRender(companyId, fresh, freshShot, actorId, { companyKeyOnly: true, alreadyQueued: true });
     } catch (err) {
       await render.releaseShotReservation(companyId, storylineId, shot.id);
       const message = err instanceof HttpError ? err.message : `The video service did not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400);

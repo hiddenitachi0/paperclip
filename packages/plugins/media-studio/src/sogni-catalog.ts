@@ -5,12 +5,8 @@
 //   Models  GET /v1/model-catalog?mediaType=image&include=parameters     [model-discovery]
 //           {data:{catalogVersion, updatedAt, count, models:[{id, sid, name, mediaType, tierId,
 //           availableNetworks, workerCounts, tags, attribution, parameters}]}}
-//   LoRAs   GET /v1/loras/comfy                                          [creative-agent-workflows]
-//           {data:{loras:[{loraId, name, description, modelIds, restrictedModelIds?, ui:{min, max,
-//           default, step, recommendedMin, recommendedMax, rangeLabels?, category, nsfw, creator,
-//           sourceUrl}}], models:[...], constraints:{maxPerRequest, minStrength, maxStrength}}}
-//           A LoRA works with the catalog model ids in modelIds, minus restrictedModelIds.
-//           ui.nsfw: the LoRA needs the Sensitive Content Filter off.
+//   LoRAs   GET /v1/loras/comfy: read, parsed, cached and fit-checked by the
+//           SDK's media module (@paperclipai/plugin-sdk/media), which the server uses too.
 //   Own     GET /v1/loras/personal/catalog (Bearer key; Unlimited plan, else 403) [personal-loras]
 //           Same row shape; strength must be above 0 and at most 1.
 //
@@ -18,6 +14,13 @@
 // when Sogni cannot be reached the last list is used, and with no list at all
 // the small built-in list below is offered in the picker.
 
+import {
+  SogniLoraCatalogCache,
+  modelContentTags,
+  parseSogniLoraCatalog,
+  type SogniLoraCatalog,
+  type SogniLoraInfo,
+} from "@paperclipai/plugin-sdk/media";
 import type { FetchImpl } from "./providers.js";
 import {
   SOGNI_API_BASE,
@@ -83,28 +86,6 @@ export interface SogniModelInfo {
   variant: boolean;
 }
 
-export interface SogniLoraInfo {
-  id: string;
-  name: string;
-  description: string;
-  category: string | null;
-  /** The account's own imported LoRA (id personal-...). */
-  personal: boolean;
-  /** Catalog model ids it works with. */
-  modelIds: string[];
-  min: number;
-  max: number;
-  default: number;
-  step: number;
-  recommendedMin: number;
-  recommendedMax: number;
-  rangeLabels: { min: string; max: string } | null;
-  /** Sogni: "requires the artist to have the Sensitive Content Filter off". */
-  needsFilterOff: boolean;
-  creator: string | null;
-  sourceUrl: string | null;
-}
-
 type Json = Record<string, unknown>;
 
 function asRecord(value: unknown): Json | null {
@@ -144,13 +125,13 @@ function range(value: unknown): SogniRange | null {
 }
 
 const EDIT_MODEL_IDS = new Set([...Object.values(SOGNI_EDIT_TOOL_KEYS), ...SOGNI_EDIT_CATALOG_ONLY]);
-const DARK_BEAST = /^dark[_-]?beast/i;
-
 function contentFilterNeed(id: string, tags: string[]): SogniModelInfo["contentFilter"] {
-  // Sogni says the Dark Beast community models only work with the filter off;
-  // "spicy" is Sogni's tag for models made for mature pictures.
-  if (DARK_BEAST.test(id)) return "off-required";
-  return tags.includes("spicy") ? "mature" : null;
+  // The rules live in the SDK's media module (shared with the server): Sogni
+  // says the Dark Beast community models only work with the filter off; the
+  // other tagged models are made for mature pictures.
+  const found = modelContentTags({ id, tags });
+  if (found.includes("off-required")) return "off-required";
+  return found.length > 0 ? "mature" : null;
 }
 
 /** See SogniModelInfo.maxReferences. */
@@ -217,71 +198,6 @@ export function parseSogniModelCatalog(json: unknown): { updatedAt: string | nul
   if (!data || !Array.isArray(data.models)) return null;
   const models = data.models.map(parseModel).filter((m): m is SogniModelInfo => m !== null);
   return { updatedAt: str(data.updatedAt), models: models.sort(byUsefulness) };
-}
-
-function parseLora(value: unknown, personal: boolean): SogniLoraInfo | null {
-  const row = asRecord(value);
-  const id = str(row?.loraId);
-  const ui = asRecord(row?.ui);
-  if (!row || !id || !ui) return null;
-  const min = num(ui.min);
-  const max = num(ui.max);
-  if (min === null || max === null || min > max) return null;
-  const restricted = new Set(Array.isArray(row.restrictedModelIds) ? row.restrictedModelIds : []);
-  const modelIds = (Array.isArray(row.modelIds) ? row.modelIds : []).filter(
-    (m): m is string => typeof m === "string" && !restricted.has(m),
-  );
-  const def = num(ui.default);
-  const recMin = num(ui.recommendedMin);
-  const recMax = num(ui.recommendedMax);
-  const labels = asRecord(ui.rangeLabels);
-  return {
-    id,
-    name: str(row.name) ?? str(ui.label) ?? id,
-    description: str(row.description) ?? "",
-    category: str(ui.category),
-    personal,
-    modelIds,
-    min,
-    max,
-    default: def !== null && def >= min && def <= max ? def : Math.min(Math.max(1, min), max),
-    step: num(ui.step) && (ui.step as number) > 0 ? (ui.step as number) : 0.05,
-    recommendedMin: recMin !== null && recMin >= min && recMin <= max ? recMin : min,
-    recommendedMax: recMax !== null && recMax >= min && recMax <= max ? recMax : max,
-    rangeLabels: str(labels?.min) && str(labels?.max) ? { min: str(labels!.min)!, max: str(labels!.max)! } : null,
-    needsFilterOff: ui.nsfw === true,
-    creator: str(ui.creator),
-    sourceUrl: httpsUrl(ui.sourceUrl),
-  };
-}
-
-export interface SogniLoraCatalog {
-  loras: SogniLoraInfo[];
-  /** Every catalog model id that takes at least one LoRA. */
-  models: string[];
-  maxPerRequest: number;
-}
-
-/** Parse GET /v1/loras/comfy or /v1/loras/personal/catalog; null when the answer is not a LoRA list. */
-export function parseSogniLoraCatalog(json: unknown, personal = false): SogniLoraCatalog | null {
-  const data = asRecord(asRecord(json)?.data);
-  if (!data || !Array.isArray(data.loras)) return null;
-  const loras = data.loras.map((row) => parseLora(row, personal)).filter((l): l is SogniLoraInfo => l !== null);
-  const constraint = num(asRecord(data.constraints)?.maxPerRequest);
-  const models = Array.isArray(data.models)
-    ? data.models.filter((m): m is string => typeof m === "string")
-    : [...new Set(loras.flatMap((l) => l.modelIds))];
-  return {
-    loras,
-    models,
-    maxPerRequest: constraint !== null && constraint > 0 ? Math.min(constraint, SOGNI_MAX_LORAS) : SOGNI_MAX_LORAS,
-  };
-}
-
-/** The LoRAs that work with one model, in Sogni's order. */
-export function lorasForModel(catalog: SogniLoraCatalog | null, modelId: string): SogniLoraInfo[] {
-  const id = sogniCanonicalModelId(modelId);
-  return (catalog?.loras ?? []).filter((lora) => lora.modelIds.includes(id));
 }
 
 const OFFLINE_NAMES: Record<string, string> = {
@@ -356,10 +272,9 @@ export class SogniCatalog {
   private readonly now: () => number;
   private modelCache: { at: number; updatedAt: string | null; models: SogniModelInfo[] } | null = null;
   private modelFailedAt = -Infinity;
-  private loraCache: { at: number; catalog: SogniLoraCatalog } | null = null;
+  private readonly loraCatalog: SogniLoraCatalogCache;
   private videoCache: { at: number; updatedAt: string | null; models: SogniVideoModelInfo[] } | null = null;
   private videoFailedAt = -Infinity;
-  private loraFailedAt = -Infinity;
 
   constructor(
     private readonly fetchImpl: FetchImpl,
@@ -368,6 +283,12 @@ export class SogniCatalog {
     this.baseUrl = (options.baseUrl ?? SOGNI_API_BASE).replace(/\/$/, "");
     this.ttlMs = options.ttlMs ?? SOGNI_CATALOG_TTL_MS;
     this.now = options.now ?? (() => Date.now());
+    // The public LoRA list lives in the SDK's media module (the server reads it too); fixed host.
+    this.loraCatalog = new SogniLoraCatalogCache({
+      fetch: this.fetchImpl,
+      ttlMs: this.ttlMs,
+      now: this.now,
+    });
   }
 
   private async getJson(path: string, apiKey?: string): Promise<{ status: number; body: unknown }> {
@@ -446,22 +367,7 @@ export class SogniCatalog {
 
   /** Sogni's public LoRAs (all models); null when they could not be read and none were read before. */
   async publicLoras(): Promise<SogniLoraCatalog | null> {
-    const cached = this.loraCache;
-    if (cached && this.fresh(cached.at)) return cached.catalog;
-    if (this.now() - this.loraFailedAt >= RETRY_AFTER_FAILURE_MS) {
-      try {
-        const { status, body } = await this.getJson("/v1/loras/comfy");
-        const parsed = status === 200 ? parseSogniLoraCatalog(body) : null;
-        if (parsed) {
-          this.loraCache = { at: this.now(), catalog: parsed };
-          return parsed;
-        }
-      } catch {
-        // Unreachable: fall through to the last list.
-      }
-      this.loraFailedAt = this.now();
-    }
-    return cached?.catalog ?? null;
+    return this.loraCatalog.get();
   }
 
   /**
@@ -676,67 +582,6 @@ export function checkSogniLoras(
     }
   }
   return null;
-}
-
-/**
- * Whether one LoRA on a look fits the look's model:
- *   "fits"         Sogni lists the model among the LoRA's models.
- *   "other-models" Sogni lists the LoRA, but only for other models (madeFor).
- *   "unknown"      Sogni's LoRA list could not be read, or Sogni does not list
- *                  this LoRA (any more) for this account, so nobody can tell.
- * Sogni's catalog has no "family" field: a LoRA's family is the set of
- * catalog models it lists (modelIds minus restrictedModelIds), so the
- * models' own names are what the owner sees ("Made for Krea 2 Turbo, ...").
- */
-export type LoraFit = "fits" | "other-models" | "unknown";
-
-export interface LoraFitCheck {
-  id: string;
-  name: string;
-  fit: LoraFit;
-  /** Names of the models Sogni lists for the LoRA (catalog ids where the name is not known). Empty for "unknown". */
-  madeFor: string[];
-  /** One plain sentence for the owner, or null when the LoRA fits. */
-  warning: string | null;
-}
-
-/** "A, B and C", or "A, B, C and 2 more" for long lists. */
-export function madeForText(names: string[], show = 3): string {
-  if (names.length === 0) return "no model Sogni offers right now";
-  if (names.length > show) return `${names.slice(0, show).join(", ")} and ${names.length - show} more`;
-  if (names.length === 1) return names[0]!;
-  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-}
-
-/**
- * Sort a look's LoRAs by whether they fit `model`. `known` null: Sogni's LoRA
- * list could not be read (every LoRA is "unknown"). `modelNames` turns
- * catalog ids into the names people know.
- */
-export function classifyLoras(
-  model: Pick<SogniModelInfo, "id" | "name">,
-  picks: Array<{ id: string; name?: string }>,
-  known: SogniLoraInfo[] | null,
-  modelNames: Record<string, string> = {},
-): LoraFitCheck[] {
-  const modelId = sogniCanonicalModelId(model.id);
-  return picks.map((pick) => {
-    const lora = known?.find((l) => l.id === pick.id) ?? null;
-    const name = lora?.name ?? pick.name ?? pick.id;
-    if (!lora) {
-      const why = known === null ? "Sogni's list of LoRAs could not be read just now, so we" : "Sogni does not list this LoRA for this account any more, so we";
-      return { id: pick.id, name, fit: "unknown", madeFor: [], warning: `${why} can't tell whether it works with ${model.name}.` };
-    }
-    if (lora.modelIds.includes(modelId)) return { id: pick.id, name, fit: "fits", madeFor: [], warning: null };
-    const madeFor = [...new Set(lora.modelIds.map((id) => modelNames[id] ?? id))];
-    return {
-      id: pick.id,
-      name,
-      fit: "other-models",
-      madeFor,
-      warning: `Made for ${madeForText(madeFor)}; ${model.name} may ignore it or give odd results.`,
-    };
-  });
 }
 
 export interface SogniOverrides {

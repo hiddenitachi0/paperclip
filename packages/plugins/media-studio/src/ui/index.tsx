@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
-import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
+import { CAST_IDENTITIES_ACTION, EMPTY_CAST, ShotCastConfirm, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { StoryWriterSection } from "./story-writer-panel.js";
@@ -418,7 +418,7 @@ type Look = {
   style: string;
   model: string | null;
   modelName?: string | null;
-  provider?: "fal" | "sogni" | null;
+  provider?: "fal" | "sogni" | "higgsfield" | null;
   seed: number | null;
   referenceFileIds: string[];
   referenceRoles?: string[];
@@ -2760,6 +2760,14 @@ type DirectKind = (typeof DIRECT_KINDS)[number];
 const DIRECT_KIND_LABELS: Record<DirectKind, string> = { picture: "Picture", video: "Video", audio: "Audio" };
 /** v1 ships Fal only; kept as a value (not a picker) so a second provider is a one-line change later. */
 const DIRECT_PROVIDER = "fal";
+
+/** A look's model when it is a Fal.ai model (Fal ids are paths such as fal-ai/flux/dev; Sogni's and Higgsfield's are not); else null. */
+export function falModelOfLook(look: Pick<Look, "model" | "provider"> | undefined): string | null {
+  const model = look?.model?.trim();
+  if (!model) return null;
+  if (look?.provider === "sogni" || look?.provider === "higgsfield") return null;
+  return model.includes("/") ? model : null;
+}
 const DIRECT_PROVIDER_LABEL = "Fal";
 const DIRECT_AUDIO_MODES = ["music", "speech"] as const;
 type DirectAudioMode = (typeof DIRECT_AUDIO_MODES)[number];
@@ -2959,11 +2967,13 @@ function DirectCreatePanel(props: {
 
   // Picking a look only pre-fills the model field here (client-side
   // convenience) -- the direct-create routes have no lookId/referenceFileIds
-  // field, so nothing about the look is sent to the server.
+  // field, so nothing about the look is sent to the server. Only a Fal model
+  // goes in the Fal box: a Sogni or Higgsfield model there would just fail.
   useEffect(() => {
     if (!lookId) return;
     const look = looks.find((l) => l.id === lookId);
-    if (look?.model) setModel(look.model);
+    const falModel = falModelOfLook(look);
+    if (falModel) setModel(falModel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookId]);
 
@@ -3597,8 +3607,9 @@ function StoryboardPictureSettings(props: {
             {value.lookId && !look && <option value={value.lookId}>A look that no longer exists</option>}
           </select>
           <span style={{ color: "#868e96" }}>
-            A look is a saved style from the Looks tab. Its style words, character description, reference pictures{provider === "sogni" ? " and LoRAs" : ""} are put on every
-            picture, the same way the Create tab uses it. You can pick a different look for one shot on its picture below.
+            A look is a saved style from the Looks tab. Its style words and setting go on every picture. If the look shows a saved person, its character description and its face, body, outfit and untagged pictures are used only
+            in shots where that person is in the cast or named in the description; a look with no saved person uses them in every shot.{provider === "sogni" ? " Its LoRAs are used only when they fit the model that makes the picture; a note says which were left out." : ""} A
+            look made for Higgsfield cannot be used here yet. The Create tab works differently: it only fills in the look's model. You can pick a different look for one shot on its picture below.
           </span>
           {value.lookId && !look && <span style={{ color: "#c92a2a" }}>That look was deleted. Pick another one, or No look, before making pictures.</span>}
         </div>
@@ -3910,6 +3921,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listCastIdentities = usePluginAction(CAST_IDENTITIES_ACTION);
   const [castIdentities, setCastIdentities] = useState<CastIdentityOption[]>([]);
   const [castIdentityError, setCastIdentityError] = useState<string | null>(null);
+  const [castIdentitiesLoaded, setCastIdentitiesLoaded] = useState(false);
   useEffect(() => {
     if (!companyId || !selectedId) return;
     let cancelled = false;
@@ -3918,6 +3930,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       .then((r) => {
         if (cancelled) return;
         setCastIdentities(castIdentityOptions(r));
+        setCastIdentitiesLoaded(true);
         setCastIdentityError(null);
       })
       .catch((e) => {
@@ -4725,6 +4738,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       sceneNotes={sortedScenes.map((sc) => sc.notes)}
                       editable={editable}
                       identities={castIdentities}
+                      identitiesLoaded={castIdentitiesLoaded}
                       identityError={castIdentityError}
                       onSaved={async () => {
                         await loadStorylines();
@@ -4776,6 +4790,22 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
+                    castConfirm={
+                      <ShotCastConfirm
+                        key={selectedId}
+                        base={base}
+                        cast={selected.cast ?? EMPTY_CAST}
+                        shots={detailFor === selectedId ? shots : []}
+                        identities={castIdentities}
+                        identitiesLoaded={castIdentitiesLoaded}
+                        identityError={castIdentityError}
+                        editable={editable}
+                        onSaved={async () => {
+                          await loadStorylines();
+                        }}
+                        onLinkPerson={() => setActiveStep("cast")}
+                      />
+                    }
                     onShotLook={(shotId, pictureLookId) =>
                       void (async () => {
                         setError(null);
