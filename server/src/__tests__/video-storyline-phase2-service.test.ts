@@ -186,7 +186,7 @@ const { videoStorylineTransitionsService } = await import("../services/video-sto
 const { videoStorylineRenderService } = await import("../services/video-storyline-render.ts");
 const { videoStorylineStitchService } = await import("../services/video-storyline-stitch.ts");
 const { secretService } = await import("../services/secrets.ts");
-const { videoStorylineRoutes } = await import("../routes/video-storylines.ts");
+const { incomingFileFromMulter, videoStorylineRoutes } = await import("../routes/video-storylines.ts");
 const { errorHandler } = await import("../middleware/index.ts");
 
 const ACTOR = { actorType: "user" as const, actorId: "filip", agentId: null };
@@ -294,6 +294,10 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     await footage.setSettings(companyId, { maxVideoMb: 1 });
     await expect(clips.createUpload(companyId, storylineId, file("video", 2 * 1024 * 1024), NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 413 });
     await expect(clips.createUpload(companyId, storylineId, { ...file("video"), contentType: "text/html", originalName: "x.html" }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 415 });
+    // D18: a file on disk is refused by its kind and the photo limit before any byte is read (the path does not even exist).
+    const missing = `/nonexistent-${randomUUID()}/upload`;
+    await expect(clips.createUpload(companyId, storylineId, { path: missing, originalName: "film.mkv", contentType: "application/octet-stream", size: 1800 * 1024 * 1024 }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 415 });
+    await expect(clips.createUpload(companyId, storylineId, { path: missing, originalName: "huge.jpg", contentType: "image/jpeg", size: 1800 * 1024 * 1024 }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 413 });
     await expect(clips.createUpload(companyId, storylineId, file("photo"), { showsPeople: true, consentLikeness: true, consentAdults: false }, ACTOR)).rejects.toMatchObject({ status: 422 });
 
     const photo = await clips.createUpload(companyId, storylineId, file("photo"), NO_PEOPLE, ACTOR);
@@ -717,6 +721,27 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     const [rawRow] = await db.select().from(videoUploads).where(eq(videoUploads.id, uploaded.body.id));
     expect(streamedFromDisk).toContain(rawRow!.rawObjectKey);
     expect(Buffer.compare(storedObjects.get(rawRow!.rawObjectKey!)!.body, video)).toBe(0);
+    // D18: a mislabelled upload is refused by its kind/limit without being read into memory first.
+    const mkv = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).attach("file", Buffer.alloc(2 * 1024 * 1024, 7), { filename: "holiday.mkv", contentType: "application/octet-stream" });
+    expect(mkv.status).toBe(415);
+    const fakeJpeg = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).attach("file", Buffer.alloc(2 * 1024 * 1024, 7), { filename: "big.jpg", contentType: "image/jpeg" });
+    expect(fakeJpeg.status).toBe(413);
+  });
+
+  it("hands a file multer wrote to disk over by its path whatever it claims to be, never as bytes in memory (D18)", () => {
+    const disk = (mimetype: string, originalname: string) =>
+      ({ fieldname: "file", originalname, encoding: "7bit", mimetype, size: 1800 * 1024 * 1024, path: "/tmp/media-work/abc", destination: "/tmp/media-work", filename: "abc" }) as Express.Multer.File;
+    for (const f of [disk("video/mp4", "a.mp4"), disk("image/jpeg", "a.jpg"), disk("application/octet-stream", "a.mkv"), disk("", "")]) {
+      const incoming = incomingFileFromMulter(f);
+      expect(incoming.path).toBe("/tmp/media-work/abc");
+      expect(incoming.buffer).toBeUndefined();
+      expect(incoming.size).toBe(1800 * 1024 * 1024);
+    }
+    expect(incomingFileFromMulter(disk("", "")).contentType).toBe("application/octet-stream");
+    expect(incomingFileFromMulter(disk("", "")).originalName).toBeNull();
+    const music = Buffer.from("RIFF");
+    const inMemory = incomingFileFromMulter({ fieldname: "file", originalname: "song.wav", encoding: "7bit", mimetype: "audio/wav", size: 4, buffer: music } as Express.Multer.File);
+    expect(inMemory).toEqual({ originalName: "song.wav", contentType: "audio/wav", size: 4, buffer: music });
   });
 
   it("cleans up unused uploads and unpicked AI bridge versions after the company's days, keeping what is used", async () => {

@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { Router, type Request, type RequestHandler } from "express";
 import multer from "multer";
 import type { Db } from "@paperclipai/db";
@@ -78,7 +78,7 @@ import { videoStorylineDirectorReviewService } from "../services/video-storyline
 import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
 import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
 import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
-import { uploadKindFor, videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
+import { videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
 import { videoStorylineFootageService } from "../services/video-storyline-footage.js";
 import { mediaFootageHardLimits, mediaWorkDir } from "../services/media-video-limits.js";
 import { videoStorylineDirectorsService } from "../services/video-storyline-directors.js";
@@ -102,6 +102,19 @@ function actorOf(req: Request): VideoStorylineActor {
     return { actorType: "agent", actorId: req.actor.agentId ?? "unknown", agentId: req.actor.agentId ?? null };
   }
   return { actorType: "user", actorId: req.actor.userId ?? "board", agentId: null };
+}
+
+/**
+ * The file multer received, as the service takes it, without reading it. A
+ * file multer wrote to disk is handed over by its path whatever its type or
+ * name claim -- a mislabelled 1.8 GB upload must not be read into memory
+ * just to be refused (D18). The service reads a photo's bytes only after its
+ * kind and the photo limit are checked; music uses memory storage with its
+ * own small multer limit, so it arrives as a buffer.
+ */
+export function incomingFileFromMulter(file: Express.Multer.File): IncomingFile {
+  const incoming = { originalName: file.originalname || null, contentType: file.mimetype || "application/octet-stream", size: file.size };
+  return file.path ? { ...incoming, path: file.path } : { ...incoming, buffer: file.buffer };
 }
 
 export function videoStorylineRoutes(rawDb: Db) {
@@ -172,10 +185,11 @@ export function videoStorylineRoutes(rawDb: Db) {
   const musicUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 5 } });
 
   /**
-   * Runs multer for one "file" field and hands the file to `use` (bytes read
-   * only after the size passed), in plain-English errors. D18: a video
-   * written to a temp file stays on disk -- the service streams it into
-   * storage -- and the temp file is removed once `use` is done.
+   * Runs multer for one "file" field and hands the file to `use`, in
+   * plain-English errors. D18: a file multer wrote to a temp file stays on
+   * disk whatever it claims to be -- the service checks its kind and its own
+   * limit before reading any bytes -- and the temp file is removed once `use`
+   * is done.
    */
   async function receiveFile<T>(upload: ReturnType<typeof multer>, req: Request, res: Response, maxBytesForRead: number, use: (file: IncomingFile) => Promise<T>): Promise<T> {
     try {
@@ -191,12 +205,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     if (!file) throw badRequest("Choose a file to upload.");
     try {
       if (file.size > maxBytesForRead) throw new HttpError(413, "This file is larger than this company allows. Make it smaller and upload it again.");
-      const incoming = { originalName: file.originalname || null, contentType: file.mimetype || "application/octet-stream", size: file.size };
-      if (file.path && uploadKindFor(incoming.contentType, incoming.originalName) === "video") {
-        return await use({ ...incoming, path: file.path });
-      }
-      const buffer = file.buffer ?? (await readFile(file.path));
-      return await use({ ...incoming, buffer });
+      return await use(incomingFileFromMulter(file));
     } finally {
       if (file.path) await rm(file.path, { force: true }).catch(() => undefined);
     }
