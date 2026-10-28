@@ -39,6 +39,7 @@ import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { runMediaJob } from "./media-job-queue.js";
+import { lockCompanyMediaStorage } from "./media-storage-quota.js";
 import { mediaWorkDir } from "./media-video-limits.js";
 import { processUploadedVideoFile, renderStillClip, prepareTrimmedClip, sniffAudioContainer, UploadProcessingError } from "./video-ffmpeg.js";
 import {
@@ -293,7 +294,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     let row: UploadRow;
     try {
       row = await withCompanyScope(db, companyId, async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
+        await lockCompanyMediaStorage(tx, companyId);
         const usedBytes = await companyStorageUsedBytes(tx, companyId);
         if (usedBytes + incoming > limits.storageQuotaBytes) {
           throw new HttpError(
@@ -978,7 +979,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const stored = await getStorageService().putFile({ companyId, namespace: STORYLINE_MUSIC_NAMESPACE, originalFilename: file.originalName ?? "music", contentType: type, body: musicBytes });
     const row = await withCompanyScope(db, companyId, async (tx) => {
       // Music counts in the same storage limit as photos and videos, under the same lock.
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
+      await lockCompanyMediaStorage(tx, companyId);
       const used = await companyStorageUsedBytes(tx, companyId);
       if (used + stored.byteSize > quota) {
         throw new HttpError(413, `This company's uploads would take ${gb(used + stored.byteSize)}, over its ${gb(quota)} storage limit. Remove files you no longer use, or ask an owner or admin to raise the limit.`);

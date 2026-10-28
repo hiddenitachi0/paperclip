@@ -81,6 +81,7 @@ import { videoStorylineTransitionsService } from "../services/video-storyline-tr
 import { videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
 import { videoStorylineFootageService } from "../services/video-storyline-footage.js";
 import { mediaFootageHardLimits, mediaWorkDir } from "../services/media-video-limits.js";
+import { withUploadSlot } from "../services/company-upload-slots.js";
 import { videoStorylineDirectorsService } from "../services/video-storyline-directors.js";
 import { videoStorylineWriterService } from "../services/video-storyline-writer.js";
 import { extractPosterJpeg } from "../services/video-ffmpeg.js";
@@ -159,29 +160,9 @@ export function videoStorylineRoutes(rawDb: Db) {
       limits: { fileSize: Math.min(maxBytes, MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb * 1024 * 1024), files: 1, fields: 10 },
     });
   }
-  /**
-   * Uploads in flight per company: photos and music are read into memory to
-   * be stored, and every upload takes disk and a slot in the media queue, so
-   * a burst of large uploads could exhaust the server (security review
-   * DUR-4745). A third one at the same time is asked to wait. (D18: videos
-   * are streamed from their temp file into storage, never read into memory.)
-   */
-  const UPLOADS_IN_FLIGHT_PER_COMPANY = 2;
-  const uploadsInFlight = new Map<string, number>();
-  async function withUploadSlot<T>(companyId: string, fn: () => Promise<T>): Promise<T> {
-    const current = uploadsInFlight.get(companyId) ?? 0;
-    if (current >= UPLOADS_IN_FLIGHT_PER_COMPANY) {
-      throw new HttpError(429, "Other uploads for this company are still going. Wait for them to finish, then try again.");
-    }
-    uploadsInFlight.set(companyId, current + 1);
-    try {
-      return await fn();
-    } finally {
-      const left = (uploadsInFlight.get(companyId) ?? 1) - 1;
-      if (left <= 0) uploadsInFlight.delete(companyId);
-      else uploadsInFlight.set(companyId, left);
-    }
-  }
+  // Uploads in flight per company (security review DUR-4745): a third one at
+  // the same time is asked to wait. The count is shared with large videos on
+  // tasks and in Files (company-upload-slots.ts, D18 security review F2).
   const musicUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 5 } });
 
   /**

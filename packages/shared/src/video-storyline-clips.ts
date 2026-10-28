@@ -317,9 +317,12 @@ export interface MediaFootageSettings {
   maxPhotoMb: number;
   maxVideoSeconds: number;
   /**
-   * D18: the largest finished film, or video saved to the company's Files
-   * (made by Media Studio or uploaded), in megabytes. Other files keep the
-   * company's ordinary attachment limit.
+   * D18: the largest finished film, in megabytes. Videos on a task or in the
+   * company's Files (made by Media Studio or uploaded) may also go up to it,
+   * but only when the server's operator switched that on
+   * (PAPERCLIP_LARGE_VIDEO_ATTACHMENTS) and Media Studio is switched on for
+   * the company; they then count against `storageQuotaBytes`. Every other
+   * file keeps the company's ordinary attachment limit.
    */
   maxVideoFileMb: number;
   cleanupDays: number;
@@ -356,10 +359,11 @@ export const MEDIA_FOOTAGE_DEFAULTS: MediaFootageSettings = {
 };
 
 export const MEDIA_FOOTAGE_EXPLANATIONS: Record<keyof MediaFootageSettings, string> = {
-  storageQuotaBytes: "How much space this company's uploaded photos and videos may take in total, across all storylines.",
+  storageQuotaBytes:
+    "How much space this company's uploaded photos and videos may take in total, across all storylines. Videos on tasks or in Files that are larger than the company's normal file limit count here too.",
   maxVideoMb: "The largest video file one person can upload, in megabytes.",
   maxVideoFileMb:
-    "The largest finished film, or video saved to the company's Files, that is kept, in megabytes. Long films are stored on the server's own disk. Other files keep the company's normal file limit.",
+    "The largest finished film that is kept, in megabytes. If the server's operator has allowed large videos on tasks and in Files, it is also the largest video kept there. Long films are stored on the server's own disk. Other files keep the company's normal file limit.",
   maxPhotoMb: "The largest photo one person can upload, in megabytes.",
   maxVideoSeconds: "The longest video that can be uploaded, in seconds. Each clip in a film is at most 60 seconds; use a longer video by adding it more than once with different trims.",
   cleanupDays: "Uploads that are not used in any film, and AI transition versions nobody picked, are deleted after this many days to free space. The ones you use are always kept.",

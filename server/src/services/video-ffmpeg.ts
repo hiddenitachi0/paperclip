@@ -1318,16 +1318,44 @@ export function untrustedInputArgs(format: "mov" | "matroska" | null): string[] 
   return ["-protocol_whitelist", "file", ...(format ? ["-f", format] : [])];
 }
 
-export async function probeMediaFile(filePath: string, format: "mov" | "matroska" | null = null): Promise<ProbedMedia | null> {
+export async function probeMediaFile(filePath: string, format: "mov" | "matroska" | null = null, timeoutMs = PROBE_TIMEOUT_MS): Promise<ProbedMedia | null> {
   try {
     const { stdout } = await execFileAsync(FFPROBE_BINARY, ["-v", "error", ...untrustedInputArgs(format), "-show_streams", "-show_format", "-of", "json", filePath], {
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
     });
     return readProbeJson(JSON.parse(stdout));
   } catch {
     return null;
   }
+}
+
+/**
+ * D18 security review (F3): whether a file that claims to be a video really
+ * is one, before a large one is kept. Its first bytes must look like MP4/MOV
+ * or WebM/Matroska (sniffVideoContainer), and ffprobe -- reading the local
+ * file only (-protocol_whitelist file, so never the network), as the
+ * container those bytes name (no format guessing), within a time limit --
+ * must find a picture stream in it. Four lucky bytes are not enough: a
+ * "free" box followed by anything else is refused here. Any failure (no
+ * ffprobe on the server, an error, the time limit) counts as "not a video".
+ * The path is always one the server made.
+ */
+export async function verifyVideoFile(filePath: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+  const head = Buffer.alloc(16);
+  try {
+    const handle = await open(filePath, "r");
+    try {
+      await handle.read(head, 0, head.length, 0);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return false;
+  }
+  const format = sniffVideoContainer(head);
+  if (!format) return false;
+  return (await probeMediaFile(filePath, format, opts.timeoutMs ?? PROBE_TIMEOUT_MS)) !== null;
 }
 
 export interface ProcessedUploadVideo {

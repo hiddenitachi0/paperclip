@@ -1,14 +1,17 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { promisify } from "node:util";
 import express from "express";
 import multer from "multer";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   MEDIA_FOOTAGE_DEFAULTS,
+  MEDIA_STUDIO_PLUGIN_KEY,
   MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES,
   MEDIA_VIDEO_FILE_HARD_MAX_BYTES,
   readMediaFootageSettings,
@@ -28,7 +31,15 @@ import {
   receiveCompanyFileUpload,
   uploadLimitBytes,
 } from "../http/file-uploads.js";
+import {
+  tryTakeUploadSlot,
+  UPLOADS_IN_FLIGHT_PER_COMPANY,
+  uploadSlotsInUse,
+  withUploadSlot,
+} from "../services/company-upload-slots.js";
 import type { CompanyFileLimits } from "../services/media-video-limits.js";
+import { companyFileLimits, largeVideoAttachmentsOptedIn, verifyVideoBuffer } from "../services/media-video-limits.js";
+import { checkFfmpegAvailable, sniffVideoContainer, verifyVideoFile } from "../services/video-ffmpeg.js";
 import { createLocalDiskStorageProvider } from "../storage/local-disk-provider.js";
 import { createStorageService } from "../storage/service.js";
 
@@ -72,6 +83,14 @@ function fakeMp4(size: number): Buffer {
   const body = Buffer.alloc(Math.max(0, size - head.length));
   for (let i = 0; i < body.length; i += 1) body[i] = i % 251;
   return Buffer.concat([head, body]).subarray(0, size);
+}
+
+const hasFfmpeg = await checkFfmpegAvailable(true);
+
+/** Passes the 4-byte container sniff ("free" at offset 4) but is not a video at all (security review F3). */
+function fakeContainer(size: number): Buffer {
+  const head = Buffer.concat([Buffer.from([0, 0, 0, 0x08]), Buffer.from("free", "latin1")]);
+  return Buffer.concat([head, Buffer.alloc(Math.max(0, size - head.length), "x")]).subarray(0, size);
 }
 
 describe("D18 limits: video files get their own, larger per-file limit", () => {
@@ -291,16 +310,22 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
     else process.env.PAPERCLIP_MEDIA_WORK_DIR = previousWorkDir;
   });
 
-  const limits: CompanyFileLimits = { attachmentMaxBytes: 64, videoFileMaxBytes: 8 * 1024 * 1024 };
-  function uploadApp() {
+  const limits: CompanyFileLimits = { attachmentMaxBytes: 64, videoFileMaxBytes: 8 * 1024 * 1024, storageQuotaBytes: 1024 ** 3 };
+  /** Stands in for ffprobe where the test is about spooling, not about the video check (F3 has its own tests below). */
+  const probeSaysVideo = async () => true;
+  function uploadApp(verify: (filePath: string) => Promise<boolean> = probeSaysVideo, companyId = "company-1") {
     const server = express();
     server.post("/upload", async (req, res) => {
       let file: Awaited<ReturnType<typeof receiveCompanyFileUpload>>;
       try {
-        file = await receiveCompanyFileUpload(req, res, limits);
+        file = await receiveCompanyFileUpload(req, res, limits, companyId);
       } catch (err) {
         if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
           res.status(422).json({ error: `File exceeds ${uploadLimitBytes(err, limits)} bytes` });
+          return;
+        }
+        if (err instanceof HttpError) {
+          res.status(err.status).json({ error: err.message });
           return;
         }
         res.status(500).json({ error: String(err) });
@@ -313,7 +338,7 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
       let status = 200;
       let payload: Record<string, unknown>;
       try {
-        await assertLargeUploadIsVideo(file, limits);
+        await assertLargeUploadIsVideo(file, limits, verify);
         const bytes = file.path ? await fs.readFile(file.path) : file.buffer!;
         payload = {
           inMemory: Boolean(file.buffer),
@@ -321,6 +346,7 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
           insideWorkDir: file.path ? path.dirname(file.path) === workDir : null,
           size: file.size,
           sha256: createHash("sha256").update(bytes).digest("hex"),
+          slotsInUse: uploadSlotsInUse(companyId),
         };
       } catch (err) {
         status = err instanceof HttpError ? err.status : 500;
@@ -334,10 +360,10 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
     return server;
   }
 
-  it("keeps a small file (any kind) in memory, as before", async () => {
+  it("keeps a small file (any kind) in memory, as before, without taking an upload slot", async () => {
     const res = await request(uploadApp()).post("/upload").attach("file", Buffer.from("tiny png bytes"), { filename: "a.png", contentType: "image/png" });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ inMemory: true, onDisk: false, size: 14 });
+    expect(res.body).toMatchObject({ inMemory: true, onDisk: false, size: 14, slotsInUse: 0 });
   });
 
   it("refuses a non-video file over the ordinary limit, with the ordinary limit in the message", async () => {
@@ -351,9 +377,11 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
     const video = fakeMp4(3 * 1024 * 1024 + 5);
     const res = await request(uploadApp()).post("/upload").attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ inMemory: false, onDisk: true, insideWorkDir: true, size: video.length });
+    // It held one of the company's upload slots while it was handled (F2), and gave it back.
+    expect(res.body).toMatchObject({ inMemory: false, onDisk: true, insideWorkDir: true, size: video.length, slotsInUse: 1 });
     expect(res.body.sha256).toBe(createHash("sha256").update(video).digest("hex"));
     expect(await fs.readdir(workDir)).toEqual([]);
+    expect(uploadSlotsInUse("company-1")).toBe(0);
   });
 
   it("refuses a video over the video limit and removes what was spooled", async () => {
@@ -361,12 +389,251 @@ describe("D18 uploads: videos spill to disk past the ordinary limit; other files
     expect(res.status).toBe(422);
     expect(res.body.error).toBe(`File exceeds ${8 * 1024 * 1024} bytes`);
     expect(await fs.readdir(workDir)).toEqual([]);
+    expect(uploadSlotsInUse("company-1")).toBe(0);
   });
 
   it("refuses a large file that only claims to be a video", async () => {
-    const res = await request(uploadApp()).post("/upload").attach("file", Buffer.alloc(4096, "x"), { filename: "notes.mp4", contentType: "video/mp4" });
+    const res = await request(uploadApp(verifyVideoFile)).post("/upload").attach("file", Buffer.alloc(4096, "x"), { filename: "notes.mp4", contentType: "video/mp4" });
     expect(res.status).toBe(422);
     expect(res.body.error).toContain("not a video");
     expect(await fs.readdir(workDir)).toEqual([]);
+    expect(uploadSlotsInUse("company-1")).toBe(0);
+  });
+
+  it("F3: refuses a fake container that passes the 4-byte sniff (a 'free' box, then anything) once ffprobe has read it", async () => {
+    const fake = fakeContainer(4096);
+    expect(sniffVideoContainer(fake)).toBe("mov"); // the old check alone would have let it in
+    const res = await request(uploadApp(verifyVideoFile)).post("/upload").attach("file", fake, { filename: "film.mp4", contentType: "video/mp4" });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("not a video");
+    expect(await fs.readdir(workDir)).toEqual([]);
+    expect(uploadSlotsInUse("company-1")).toBe(0);
+  });
+
+  it("F2: asks a third large upload from the same company to wait (429), spooling nothing; small files and other companies go on", async () => {
+    const held = Array.from({ length: UPLOADS_IN_FLIGHT_PER_COMPANY }, () => tryTakeUploadSlot("company-1"));
+    expect(held.every(Boolean)).toBe(true);
+    try {
+      const busy = await request(uploadApp()).post("/upload").attach("file", fakeMp4(64 * 1024), { filename: "film.mp4", contentType: "video/mp4" });
+      expect(busy.status).toBe(429);
+      expect(busy.body.error).toContain("Other uploads for this company are still going");
+      expect(await fs.readdir(workDir)).toEqual([]);
+      expect(uploadSlotsInUse("company-1")).toBe(UPLOADS_IN_FLIGHT_PER_COMPANY);
+
+      // A file within the ordinary limit never needs a slot.
+      const small = await request(uploadApp()).post("/upload").attach("file", Buffer.from("tiny"), { filename: "a.txt", contentType: "text/plain" });
+      expect(small.status).toBe(200);
+      // Another company has its own slots.
+      const other = await request(uploadApp(probeSaysVideo, "company-2")).post("/upload").attach("file", fakeMp4(64 * 1024), { filename: "film.mp4", contentType: "video/mp4" });
+      expect(other.status).toBe(200);
+      expect(uploadSlotsInUse("company-2")).toBe(0);
+    } finally {
+      for (const release of held) release?.();
+    }
+    const after = await request(uploadApp()).post("/upload").attach("file", fakeMp4(64 * 1024), { filename: "film.mp4", contentType: "video/mp4" });
+    expect(after.status).toBe(200);
+    expect(uploadSlotsInUse("company-1")).toBe(0);
+  });
+});
+
+describe("D18 security review F2: at most a few large uploads per company at once", () => {
+  it("hands out UPLOADS_IN_FLIGHT_PER_COMPANY slots per company; giving one back twice frees it once", async () => {
+    expect(UPLOADS_IN_FLIGHT_PER_COMPANY).toBe(2);
+    const first = tryTakeUploadSlot("slots-co");
+    const second = tryTakeUploadSlot("slots-co");
+    expect(first && second).toBeTruthy();
+    expect(tryTakeUploadSlot("slots-co")).toBeNull();
+    expect(uploadSlotsInUse("slots-co")).toBe(2);
+    first!();
+    first!();
+    expect(uploadSlotsInUse("slots-co")).toBe(1);
+    await expect(withUploadSlot("slots-co", async () => uploadSlotsInUse("slots-co"))).resolves.toBe(2);
+    second!();
+    expect(uploadSlotsInUse("slots-co")).toBe(0);
+  });
+
+  it("withUploadSlot answers 429 when the company's slots are taken, and frees its slot when the work fails", async () => {
+    const held = [tryTakeUploadSlot("slots-co-2"), tryTakeUploadSlot("slots-co-2")];
+    await expect(withUploadSlot("slots-co-2", async () => "never")).rejects.toMatchObject({ status: 429 });
+    held.forEach((release) => release?.());
+    await expect(withUploadSlot("slots-co-2", async () => Promise.reject(new Error("storage failed")))).rejects.toThrow("storage failed");
+    expect(uploadSlotsInUse("slots-co-2")).toBe(0);
+  });
+});
+
+describe("D18 security review F1: large videos on tasks and in Files only where the operator and Media Studio allow them", () => {
+  const MB = 1024 * 1024;
+  const previousOptIn = process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+  afterEach(() => {
+    if (previousOptIn === undefined) delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+    else process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = previousOptIn;
+  });
+
+  /** A stand-in for the one Media Studio settings query: plugins joined to the company's settings row. */
+  function fakeDb(rows: Array<{ status: string; enabled: boolean; settingsJson: Record<string, unknown> }>) {
+    const select = vi.fn(() => {
+      const chain = { from: () => chain, innerJoin: () => chain, where: () => chain, limit: async () => rows };
+      return chain;
+    });
+    return { select } as unknown as Parameters<typeof companyFileLimits>[0] & { select: typeof select };
+  }
+  const company = { attachmentMaxBytes: 10 * MB };
+  const ordinary = { attachmentMaxBytes: 10 * MB, videoFileMaxBytes: 10 * MB, storageQuotaBytes: null };
+  const mediaStudioOn = { status: "ready", enabled: true, settingsJson: { mediaVideoFileMaxMb: 500, mediaStorageQuotaBytes: 10 * 1024 ** 3 } };
+
+  it("is off unless the operator opts in with PAPERCLIP_LARGE_VIDEO_ATTACHMENTS", () => {
+    for (const value of ["true", "1", "yes", "on", " TRUE "]) expect(largeVideoAttachmentsOptedIn({ PAPERCLIP_LARGE_VIDEO_ATTACHMENTS: value })).toBe(true);
+    for (const value of [undefined, "", "false", "0", "no", "2gb"]) expect(largeVideoAttachmentsOptedIn({ PAPERCLIP_LARGE_VIDEO_ATTACHMENTS: value })).toBe(false);
+  });
+
+  it("keeps the ordinary limit for every file when the operator has not opted in, even with Media Studio on", async () => {
+    delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+    const db = fakeDb([mediaStudioOn]);
+    expect(await companyFileLimits(db, "company-1", company, { kind: "upload" })).toEqual(ordinary);
+    expect(maxBytesForContentType("video/mp4", ordinary)).toBe(10 * MB);
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
+  it("keeps the ordinary limit for a company without Media Studio, even when the operator opted in", async () => {
+    process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+    // No Media Studio settings row: the company never set Media Studio up (or the plugin is not installed).
+    expect(await companyFileLimits(fakeDb([]), "company-1", company, { kind: "upload" })).toEqual(ordinary);
+    // Installed but switched off on this server, or switched off for this company.
+    expect(await companyFileLimits(fakeDb([{ ...mediaStudioOn, status: "disabled" }]), "company-1", company, { kind: "upload" })).toEqual(ordinary);
+    expect(await companyFileLimits(fakeDb([{ ...mediaStudioOn, status: "uninstalled" }]), "company-1", company, { kind: "upload" })).toEqual(ordinary);
+    expect(await companyFileLimits(fakeDb([{ ...mediaStudioOn, enabled: false }]), "company-1", company, { kind: "upload" })).toEqual(ordinary);
+  });
+
+  it("gives videos the company's Media Studio limit, counted against its storage limit, when both allow it", async () => {
+    process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+    const limits = await companyFileLimits(fakeDb([mediaStudioOn]), "company-1", company, { kind: "upload" });
+    expect(limits).toEqual({ attachmentMaxBytes: 10 * MB, videoFileMaxBytes: 500 * MB, storageQuotaBytes: 10 * 1024 ** 3 });
+    expect(maxBytesForContentType("video/mp4", limits)).toBe(500 * MB);
+    // Every other kind of file keeps the ordinary limit.
+    expect(maxBytesForContentType("application/zip", limits)).toBe(10 * MB);
+    // Media Studio's defaults when its settings say nothing about it: 2 GB, 5 GB of storage.
+    const defaults = await companyFileLimits(fakeDb([{ status: "ready", enabled: true, settingsJson: {} }]), "company-1", company, { kind: "upload" });
+    expect(defaults).toMatchObject({ videoFileMaxBytes: MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES, storageQuotaBytes: MEDIA_FOOTAGE_DEFAULTS.storageQuotaBytes });
+  });
+
+  it("lets only Media Studio itself save large videos through the plugin host", async () => {
+    process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+    const db = fakeDb([mediaStudioOn]);
+    expect(await companyFileLimits(db, "company-1", company, { kind: "plugin", pluginKey: "some-other-plugin" })).toEqual(ordinary);
+    expect(db.select).not.toHaveBeenCalled();
+    expect(await companyFileLimits(db, "company-1", company, { kind: "plugin", pluginKey: MEDIA_STUDIO_PLUGIN_KEY })).toMatchObject({ videoFileMaxBytes: 500 * MB });
+  });
+});
+
+describe("D18 security review F3: a large video must really be a video (ffprobe on the local file)", () => {
+  const exec = promisify(execFile);
+  const previousWorkDir = process.env.PAPERCLIP_MEDIA_WORK_DIR;
+  const previousFfprobe = process.env.PAPERCLIP_FFPROBE_PATH;
+  afterEach(() => {
+    if (previousWorkDir === undefined) delete process.env.PAPERCLIP_MEDIA_WORK_DIR;
+    else process.env.PAPERCLIP_MEDIA_WORK_DIR = previousWorkDir;
+    if (previousFfprobe === undefined) delete process.env.PAPERCLIP_FFPROBE_PATH;
+    else process.env.PAPERCLIP_FFPROBE_PATH = previousFfprobe;
+  });
+
+  it("refuses a fake container that passes the 4-byte sniff, a non-video and a missing file (with or without ffprobe on this host)", async () => {
+    const dir = await tempDir("paperclip-d18-probe-");
+    const fake = path.join(dir, "fake.mp4");
+    await fs.writeFile(fake, fakeContainer(64 * 1024));
+    const text = path.join(dir, "notes.mp4");
+    await fs.writeFile(text, Buffer.alloc(4096, "x"));
+    expect(await verifyVideoFile(fake)).toBe(false);
+    expect(await verifyVideoFile(text)).toBe(false);
+    expect(await verifyVideoFile(path.join(dir, "missing.mp4"))).toBe(false);
+  });
+
+  /** A stand-in ffprobe that records how it was run and answers as told. */
+  async function fakeFfprobe(dir: string, script: string): Promise<{ bin: string; argsFile: string }> {
+    const bin = path.join(dir, "ffprobe");
+    const argsFile = path.join(dir, "args.txt");
+    await fs.writeFile(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\n${script}\n`, { mode: 0o755 });
+    return { bin, argsFile };
+  }
+  async function loadVerifier(bin: string) {
+    process.env.PAPERCLIP_FFPROBE_PATH = bin;
+    vi.resetModules();
+    try {
+      return (await import("../services/video-ffmpeg.js")).verifyVideoFile;
+    } finally {
+      vi.resetModules();
+    }
+  }
+  const videoJson = JSON.stringify({ streams: [{ codec_type: "video", width: 1920, height: 1080, r_frame_rate: "30/1", avg_frame_rate: "30/1" }], format: { duration: "12.5" } });
+  const audioOnlyJson = JSON.stringify({ streams: [{ codec_type: "audio" }], format: { duration: "12.5" } });
+
+  it("asks ffprobe to read the local file only, as the sniffed container, and accepts it only with a picture stream", async () => {
+    const dir = await tempDir("paperclip-d18-fakeprobe-");
+    const file = path.join(dir, "film.mp4");
+    await fs.writeFile(file, fakeMp4(4096));
+
+    const accepting = await fakeFfprobe(dir, `echo '${videoJson}'`);
+    expect(await (await loadVerifier(accepting.bin))(file)).toBe(true);
+    const args = (await fs.readFile(accepting.argsFile, "utf8")).trim().split("\n");
+    expect(args).toEqual(["-v", "error", "-protocol_whitelist", "file", "-f", "mov", "-show_streams", "-show_format", "-of", "json", file]);
+
+    const audioOnly = await fakeFfprobe(dir, `echo '${audioOnlyJson}'`);
+    expect(await (await loadVerifier(audioOnly.bin))(file)).toBe(false);
+
+    const failing = await fakeFfprobe(dir, "echo 'moov atom not found' >&2; exit 1");
+    expect(await (await loadVerifier(failing.bin))(file)).toBe(false);
+
+    const garbage = await fakeFfprobe(dir, "echo 'not json'");
+    expect(await (await loadVerifier(garbage.bin))(file)).toBe(false);
+  });
+
+  it("refuses the file when ffprobe runs out of time, or is not installed", async () => {
+    const dir = await tempDir("paperclip-d18-slowprobe-");
+    const file = path.join(dir, "film.mp4");
+    await fs.writeFile(file, fakeMp4(4096));
+    const slow = await fakeFfprobe(dir, `sleep 5; echo '${videoJson}'`);
+    const verify = await loadVerifier(slow.bin);
+    const started = Date.now();
+    expect(await verify(file, { timeoutMs: 300 })).toBe(false);
+    expect(Date.now() - started).toBeLessThan(4_000);
+
+    const missing = await loadVerifier(path.join(dir, "no-such-ffprobe"));
+    expect(await missing(file)).toBe(false);
+  });
+
+  it("checks a video held in memory from a work file that is removed again; a non-video is refused without writing anything", async () => {
+    const workDir = await tempDir("paperclip-d18-bufferprobe-");
+    process.env.PAPERCLIP_MEDIA_WORK_DIR = workDir;
+    const seen: string[] = [];
+    const verify = async (filePath: string) => {
+      seen.push(filePath);
+      expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+      return false;
+    };
+    expect(await verifyVideoBuffer(Buffer.alloc(4096, "x"), verify)).toBe(false);
+    expect(seen).toEqual([]);
+    expect(await verifyVideoBuffer(fakeContainer(4096), verify)).toBe(false);
+    expect(seen).toHaveLength(1);
+    expect(path.dirname(seen[0]!)).toBe(workDir);
+    expect(await fs.readdir(workDir)).toEqual([]);
+    // With the real check, the fake container is refused too.
+    expect(await verifyVideoBuffer(fakeContainer(4096))).toBe(false);
+    expect(await fs.readdir(workDir)).toEqual([]);
+  });
+
+  (hasFfmpeg ? it : it.skip)("accepts a real MP4 and a real WebM (needs ffmpeg on this host)", async () => {
+    const dir = await tempDir("paperclip-d18-realprobe-");
+    const mp4 = path.join(dir, "real.mp4");
+    const webm = path.join(dir, "real.webm");
+    const source = ["-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5"];
+    await exec("ffmpeg", [...source, "-pix_fmt", "yuv420p", mp4]);
+    await exec("ffmpeg", [...source, "-c:v", "libvpx", "-b:v", "100k", webm]).catch(() => undefined);
+    expect(await verifyVideoFile(mp4)).toBe(true);
+    // This ffmpeg may be built without a WebM encoder; check WebM only when it made one.
+    const hasWebm = await fs.stat(webm).then(() => true, () => false);
+    if (hasWebm) expect(await verifyVideoFile(webm)).toBe(true);
+    process.env.PAPERCLIP_MEDIA_WORK_DIR = dir;
+    expect(await verifyVideoBuffer(await fs.readFile(mp4))).toBe(true);
+    // The work file made for the check is gone again.
+    expect((await fs.readdir(dir)).sort()).toEqual(hasWebm ? ["real.mp4", "real.webm"] : ["real.mp4"]);
   });
 });

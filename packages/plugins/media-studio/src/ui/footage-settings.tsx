@@ -6,7 +6,8 @@ import { errorText, storylineFetchJson } from "./storyline-api.js";
 // uploaded footage to Sogni" (on by default). Everyone in the company sees
 // them; only the owner or an admin can change them (the server enforces it).
 // D18: "Largest film or saved video" is the per-file limit for finished
-// films and videos kept in Files (2 GB by default, under the server's ceiling).
+// films (2 GB by default, under the server's ceiling), and for videos kept on
+// tasks or in Files when the server's operator has allowed large videos there.
 
 type Settings = {
   storageQuotaBytes: number;

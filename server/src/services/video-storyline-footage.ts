@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoShots, videoStorylines, videoUploads } from "@paperclipai/db";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { applyInstanceVideoCeiling, mediaFootageHardLimits } from "./media-video-limits.js";
+import { companyStorageUsedBytes } from "./media-storage-quota.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastAgeRefusals, readPluginState } from "./storyline-cast.js";
 import { storylineCompanyModel } from "./video-storyline-company-model.js";
@@ -105,27 +106,12 @@ export function dataUriBytes(dataUri: string): Buffer | null {
  */
 export { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 
-/** Where music uploaded for storylines is stored (counted in the company's footage quota). */
-export const STORYLINE_MUSIC_NAMESPACE = "video-storylines/music";
-
 /**
- * Everything the company's footage quota counts: its uploads (raw, working,
- * preview, poster) plus music files uploaded for storylines (security review
- * DUR-4745: music used to sit outside the quota).
+ * The company's media storage limit counts storyline uploads, storyline
+ * music and (D18) large videos kept on tasks or in Files; it lives in
+ * media-storage-quota.ts so the task and Files routes can use it too.
  */
-export async function companyStorageUsedBytes(executor: Pick<Db, "select">, companyId: string): Promise<number> {
-  const [uploads] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(${videoUploads.rawByteSize} + ${videoUploads.workingByteSize} + ${videoUploads.previewByteSize} + ${videoUploads.posterByteSize}), 0)::bigint`,
-    })
-    .from(videoUploads)
-    .where(eq(videoUploads.companyId, companyId));
-  const [music] = await executor
-    .select({ total: sql<number>`coalesce(sum(${assets.byteSize}), 0)::bigint` })
-    .from(assets)
-    .where(and(eq(assets.companyId, companyId), sql`${assets.objectKey} like ${`${companyId}/${STORYLINE_MUSIC_NAMESPACE}/%`}`));
-  return Number(uploads?.total ?? 0) + Number(music?.total ?? 0);
-}
+export { companyStorageUsedBytes, STORYLINE_MUSIC_NAMESPACE } from "./media-storage-quota.js";
 
 export function uploadByteSize(row: Pick<UploadRow, "rawByteSize" | "workingByteSize" | "previewByteSize" | "posterByteSize">): number {
   return Number(row.rawByteSize) + Number(row.workingByteSize) + Number(row.previewByteSize) + Number(row.posterByteSize);

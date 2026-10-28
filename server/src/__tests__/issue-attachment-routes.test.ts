@@ -2,9 +2,9 @@ import { Readable } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageService } from "../storage/types.js";
-import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+import { withFakeCompanyScopeReserve, type FakeUnsafeRows } from "./helpers/fake-scoped-db.js";
 
 // `vi.resetModules()` in beforeEach re-transforms the large issues.ts
 // dependency graph on every test; the first test to hit that cold-start
@@ -156,7 +156,7 @@ function createStorageService(body = Buffer.from("test")): TestStorageService {
   };
 }
 
-async function createApp(storage: StorageService, options?: { companyIds?: string[]; source?: string }) {
+async function createApp(storage: StorageService, options?: { companyIds?: string[]; source?: string; unsafeRows?: FakeUnsafeRows }) {
   const [{ errorHandler }, { issueRoutes }] = await Promise.all([
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -173,7 +173,7 @@ async function createApp(storage: StorageService, options?: { companyIds?: strin
     };
     next();
   });
-  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, storage));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}, { unsafeRows: options?.unsafeRows }) as any, storage));
   app.use(errorHandler);
   return app;
 }
@@ -238,6 +238,7 @@ describe("issue attachment routes", () => {
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
+    vi.doUnmock("../services/video-ffmpeg.js");
     registerRouteMocks();
     vi.clearAllMocks();
     mockLogActivity.mockResolvedValue(undefined);
@@ -383,44 +384,216 @@ describe("issue attachment routes", () => {
     expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
   });
 
-  it("D18: streams a video past the ordinary limit from disk into storage; other files keep the limit", async () => {
-    const storage = createStorageService();
-    const streamed: Array<{ namespace: string; contentType: string; size: number; head: string }> = [];
-    storage.putFileFromPath = vi.fn(async (input) => {
-      const { readFile } = await import("node:fs/promises");
-      const body = await readFile(input.filePath);
-      streamed.push({ namespace: input.namespace, contentType: input.contentType, size: body.length, head: body.subarray(4, 8).toString("latin1") });
-      return { provider: "local_disk", objectKey: `${input.namespace}/film.mp4`, contentType: input.contentType, byteSize: body.length, sha256: "sha", originalFilename: input.originalFilename };
-    });
-    mockCompanyService.getById.mockResolvedValue({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 16 });
-    mockIssueService.getById.mockResolvedValue({
-      id: "11111111-1111-4111-8111-111111111111",
-      companyId: "99999999-9999-4999-8999-999999999999",
-      identifier: "PAP-1",
-    });
-    mockIssueService.createAttachment.mockResolvedValue(makeAttachment("video/mp4", "film.mp4"));
+  describe("D18: large videos on tasks (security review F1-F3)", () => {
+    const COMPANY_ID = "99999999-9999-4999-8999-999999999999";
+    const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
+    const ATTACH_URL = `/api/companies/${COMPANY_ID}/issues/${ISSUE_ID}/attachments`;
+    const FILES_URL = `/api/companies/${COMPANY_ID}/files`;
     const video = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom", "latin1"), Buffer.alloc(4096, 9)]);
+    const previousOptIn = process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
 
-    const app = await createApp(storage);
-    const res = await request(app)
-      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
-      .attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
-    expect(res.status).toBe(201);
-    expect(streamed).toEqual([{ namespace: "issues/11111111-1111-4111-8111-111111111111", contentType: "video/mp4", size: video.length, head: "ftyp" }]);
-    expect(storage.__calls.putFile).toBeUndefined();
-    expect(mockIssueService.createAttachment).toHaveBeenCalledWith(expect.objectContaining({ contentType: "video/mp4", byteSize: video.length }));
+    afterEach(() => {
+      if (previousOptIn === undefined) delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+      else process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = previousOptIn;
+    });
 
-    // A file that only claims to be a video, and a large picture, keep the ordinary limit.
-    const fake = await request(app)
-      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
-      .attach("file", Buffer.alloc(4096, 1), { filename: "x.mp4", contentType: "video/mp4" });
-    expect(fake.status).toBe(422);
-    const picture = await request(app)
-      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
-      .attach("file", Buffer.alloc(4096, 1), { filename: "x.png", contentType: "image/png" });
-    expect(picture.status).toBe(422);
-    expect(picture.body.error).toBe("Attachment exceeds 16 bytes");
-    expect(streamed).toHaveLength(1);
+    /**
+     * The route's own scoped queries: the company's Media Studio row (plugins
+     * joined to plugin_company_settings) and the media storage in use.
+     */
+    function dbRows(opts: { mediaStudio: null | { status?: string; enabled?: boolean; settings?: Record<string, unknown> }; usedBytes?: number }) {
+      const queries: string[] = [];
+      const rows: FakeUnsafeRows = (query) => {
+        queries.push(query);
+        if (query.includes("plugin_company_settings")) {
+          if (!opts.mediaStudio) return [];
+          return [[opts.mediaStudio.status ?? "ready", opts.mediaStudio.enabled ?? true, JSON.stringify(opts.mediaStudio.settings ?? {})]];
+        }
+        if (query.includes("sum(")) return [[String(query.includes("video_uploads") ? (opts.usedBytes ?? 0) : 0)]];
+        return [];
+      };
+      return { rows, queries };
+    }
+
+    function streamingStorage() {
+      const storage = createStorageService();
+      const streamed: Array<{ namespace: string; contentType: string; size: number; head: string }> = [];
+      storage.putFileFromPath = vi.fn(async (input) => {
+        const { readFile } = await import("node:fs/promises");
+        const body = await readFile(input.filePath);
+        streamed.push({ namespace: input.namespace, contentType: input.contentType, size: body.length, head: body.subarray(4, 8).toString("latin1") });
+        return { provider: "local_disk", objectKey: `${input.namespace}/film.mp4`, contentType: input.contentType, byteSize: body.length, sha256: "sha", originalFilename: input.originalFilename };
+      });
+      return { storage, streamed };
+    }
+
+    /**
+     * ffprobe stands in as a mock here (the real check has its own tests in
+     * large-video-storage.test.ts): the first bytes are still sniffed, then
+     * "ffprobe" answers `isVideo`.
+     */
+    function probeSays(isVideo: boolean) {
+      const probed: string[] = [];
+      const verifyVideoFile = vi.fn(async (filePath: string) => {
+        const actual = await vi.importActual<typeof import("../services/video-ffmpeg.js")>("../services/video-ffmpeg.js");
+        const { readFile } = await import("node:fs/promises");
+        if (!actual.sniffVideoContainer((await readFile(filePath)).subarray(0, 16))) return false;
+        probed.push(filePath);
+        return isVideo;
+      });
+      vi.doMock("../services/video-ffmpeg.js", async () => ({
+        ...(await vi.importActual<typeof import("../services/video-ffmpeg.js")>("../services/video-ffmpeg.js")),
+        verifyVideoFile,
+      }));
+      return { verifyVideoFile, probed };
+    }
+
+    beforeEach(() => {
+      mockCompanyService.getById.mockResolvedValue({ id: COMPANY_ID, attachmentMaxBytes: 16 });
+      mockIssueService.getById.mockResolvedValue({ id: ISSUE_ID, companyId: COMPANY_ID, identifier: "PAP-1" });
+      mockIssueService.createAttachment.mockResolvedValue(makeAttachment("video/mp4", "film.mp4"));
+    });
+
+    it("F1: a company without Media Studio keeps its ordinary limit for videos, even when the operator opted in", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      const { verifyVideoFile: verify } = probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      const { rows, queries } = dbRows({ mediaStudio: null });
+      const app = await createApp(storage, { unsafeRows: rows });
+
+      const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("Attachment exceeds 16 bytes");
+      const file = await request(app).post(FILES_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(file.status).toBe(422);
+      expect(file.body.error).toBe("File exceeds 16 bytes");
+
+      expect(queries.some((query) => query.includes("plugin_company_settings"))).toBe(true);
+      expect(streamed).toEqual([]);
+      expect(storage.__calls.putFile).toBeUndefined();
+      expect(verify).not.toHaveBeenCalled();
+      expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
+    });
+
+    it("F1: Media Studio installed but switched off (on the server or for the company) keeps the ordinary limit", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      probeSays(true);
+      for (const mediaStudio of [{ status: "disabled" }, { status: "error" }, { enabled: false }]) {
+        const { storage, streamed } = streamingStorage();
+        const app = await createApp(storage, { unsafeRows: dbRows({ mediaStudio }).rows });
+        const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe("Attachment exceeds 16 bytes");
+        expect(streamed).toEqual([]);
+      }
+      expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
+    });
+
+    it("F1: without the operator's opt-in, a video keeps the ordinary limit even with Media Studio on", async () => {
+      delete process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS;
+      probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      const { rows, queries } = dbRows({ mediaStudio: {} });
+      const app = await createApp(storage, { unsafeRows: rows });
+      const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("Attachment exceeds 16 bytes");
+      expect(queries.some((query) => query.includes("plugin_company_settings"))).toBe(false);
+      expect(streamed).toEqual([]);
+    });
+
+    it("streams a real video past the ordinary limit from disk into storage, counted in the media storage limit, when both allow it", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      const { probed } = probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      const app = await createApp(storage, { unsafeRows: dbRows({ mediaStudio: { settings: { mediaStorageQuotaBytes: 1024 ** 3 } } }).rows });
+
+      const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(201);
+      // F2: stored where the company's media storage limit counts it.
+      expect(streamed).toEqual([{ namespace: `large-videos/issues/${ISSUE_ID}`, contentType: "video/mp4", size: video.length, head: "ftyp" }]);
+      expect(storage.__calls.putFile).toBeUndefined();
+      expect(probed).toHaveLength(1);
+      expect(mockIssueService.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ contentType: "video/mp4", byteSize: video.length, largeVideoQuotaBytes: 1024 ** 3 }),
+      );
+
+      // A file that only claims to be a video, and a large picture, keep the ordinary limit.
+      const fake = await request(app).post(ATTACH_URL).attach("file", Buffer.alloc(4096, 1), { filename: "x.mp4", contentType: "video/mp4" });
+      expect(fake.status).toBe(422);
+      const picture = await request(app).post(ATTACH_URL).attach("file", Buffer.alloc(4096, 1), { filename: "x.png", contentType: "image/png" });
+      expect(picture.status).toBe(422);
+      expect(picture.body.error).toBe("Attachment exceeds 16 bytes");
+      // A small file is stored as before: from memory, in its usual place, with no quota check on its row.
+      const small = await request(app).post(ATTACH_URL).attach("file", Buffer.from("tiny"), { filename: "a.txt", contentType: "text/plain" });
+      expect(small.status).toBe(201);
+      expect(storage.__calls.putFile?.namespace).toBe(`issues/${ISSUE_ID}`);
+      expect(mockIssueService.createAttachment).toHaveBeenLastCalledWith(expect.objectContaining({ largeVideoQuotaBytes: null }));
+      expect(streamed).toHaveLength(1);
+    });
+
+    it("F3: refuses a large upload that ffprobe does not see as a video, storing nothing", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      const { probed } = probeSays(false);
+      const { storage, streamed } = streamingStorage();
+      const app = await createApp(storage, { unsafeRows: dbRows({ mediaStudio: {} }).rows });
+      // Passes the 4-byte sniff ("free" at offset 4), but is not a video.
+      const fake = Buffer.concat([Buffer.from([0, 0, 0, 0x08]), Buffer.from("free", "latin1"), Buffer.alloc(4096, "x")]);
+      const res = await request(app).post(ATTACH_URL).attach("file", fake, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain("not a video");
+      expect(probed).toHaveLength(1);
+      expect(streamed).toEqual([]);
+      expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
+    });
+
+    it("F2: refuses a large video that would take the company past its media storage limit, before it is copied", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      const app = await createApp(storage, {
+        unsafeRows: dbRows({ mediaStudio: { settings: { mediaStorageQuotaBytes: 10_000 } }, usedBytes: 9_000 }).rows,
+      });
+      const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(413);
+      expect(res.body.error).toContain("storage limit");
+      expect(streamed).toEqual([]);
+      expect(mockIssueService.createAttachment).not.toHaveBeenCalled();
+    });
+
+    it("F2: removes the stored video again when its row does not fit the storage limit", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      storage.deleteObject = vi.fn(async () => undefined);
+      const { HttpError } = await import("../errors.js");
+      mockIssueService.createAttachment.mockRejectedValue(new HttpError(413, "over its storage limit"));
+      const app = await createApp(storage, { unsafeRows: dbRows({ mediaStudio: {} }).rows });
+      const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(res.status).toBe(413);
+      expect(streamed).toHaveLength(1);
+      expect(storage.deleteObject).toHaveBeenCalledWith(COMPANY_ID, `large-videos/issues/${ISSUE_ID}/film.mp4`);
+    });
+
+    it("F2: asks a large upload to wait while the company already has the most large uploads going", async () => {
+      process.env.PAPERCLIP_LARGE_VIDEO_ATTACHMENTS = "true";
+      probeSays(true);
+      const { storage, streamed } = streamingStorage();
+      const app = await createApp(storage, { unsafeRows: dbRows({ mediaStudio: {} }).rows });
+      const slots = await import("../services/company-upload-slots.js");
+      const held = Array.from({ length: slots.UPLOADS_IN_FLIGHT_PER_COMPANY }, () => slots.tryTakeUploadSlot(COMPANY_ID));
+      try {
+        const res = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+        expect(res.status).toBe(429);
+        expect(res.body.error).toContain("Other uploads for this company are still going");
+        expect(streamed).toEqual([]);
+      } finally {
+        held.forEach((release) => release?.());
+      }
+      const later = await request(app).post(ATTACH_URL).attach("file", video, { filename: "film.mp4", contentType: "video/mp4" });
+      expect(later.status).toBe(201);
+      expect(slots.uploadSlotsInUse(COMPANY_ID)).toBe(0);
+    });
   });
 
   it("serves html attachments as downloads with nosniff", async () => {
