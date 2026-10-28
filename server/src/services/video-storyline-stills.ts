@@ -12,6 +12,9 @@ import {
   readVideoStorylineCast,
   videoCastNameMentioned,
   videoShotCast,
+  videoShotOnlyCastLine,
+  unconfirmedVideoCastMessage,
+  unconfirmedVideoCastShots,
 } from "@paperclipai/shared";
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
@@ -85,6 +88,8 @@ interface ShotCastPeople {
   castIds: string[];
   people: CastPerson[];
   notes: string[];
+  /** "Only these people are in this shot: ..." from the confirmed cast; "" when the shot is not confirmed or the film has no linked person. */
+  onlyLine: string;
   pluginId?: string | null;
   /** The person picked this shot's cast by hand: the names in its text then do not add anyone. */
   pickedByHand?: boolean;
@@ -232,6 +237,11 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
 
+    // A film with a linked person needs a person's own pick of who is in this shot (see startRender).
+    if (unconfirmedVideoCastShots(readVideoStorylineCast(storyline.pictureSettings), [shot]).length > 0) {
+      throw unprocessable(unconfirmedVideoCastMessage([shot.orderIndex + 1]));
+    }
+
     // Priced as one picture on the service that makes it (see pictureTarget).
     const { target, pluginId, cfg } = await pictureTarget(companyId, storyline, shot);
     if (target.lookId && !target.look) {
@@ -291,25 +301,20 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     if (scoped.note) notes.push(scoped.note);
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
-    let referenceImages: string[];
-    if (scoped.person) {
-      // The look's person is in this shot without a cast link (named in the text): their pictures face the same age check as a cast member's.
-      // One at a time so each file id is checked against its own bytes.
-      const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
-      for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
-      const refusal = castPictureRefusal(
-        loaded.map((p) => ({ ...p, personName: scoped.person! })),
-        await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
-      );
-      if (refusal) throw unprocessable(refusal);
-      referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
-    } else {
-      referenceImages = await loadReferenceImages(db, companyId, refs.ids);
-    }
+    // Every picture about to be sent faces the age check, whoever it shows: the refusal set is company-wide (file ids and byte hashes).
+    // When the look's person is in the shot the pictures are checked as theirs. One at a time so each file id is checked against its own bytes.
+    const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
+    for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
+    const refusal = castPictureRefusal(
+      loaded.map((p) => ({ ...p, personName: scoped.person })),
+      await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
     const input: ImageGenerationInput = {
-      prompt: storyboardPrompt(shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
+      prompt: storyboardPrompt(cast.onlyLine ? `${shot.prompt}\n\n${cast.onlyLine}` : shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
     };
     if (target.providerId === "sogni") {
@@ -478,11 +483,11 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     shot: Pick<ShotRow, "id" | "prompt" | "cameraNotes">,
   ): Promise<ShotCastPeople> {
     const cast = readVideoStorylineCast(storyline.pictureSettings);
-    if (cast.members.length === 0) return { castIds: [], people: [], notes: [], pluginId };
+    if (cast.members.length === 0) return { castIds: [], people: [], notes: [], onlyLine: "", pluginId };
     const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
     const { castIds, picked } = videoShotCast(shot, cast, castIdentityNames(identities));
     const { people, notes } = castPeople(castIds, cast.members, identities);
-    return { castIds, people, notes, pluginId, pickedByHand: picked };
+    return { castIds, people, notes, onlyLine: videoShotOnlyCastLine(shot, cast), pluginId, pickedByHand: picked };
   }
 
   /**
@@ -526,8 +531,8 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
     }
     const refusal = castPictureRefusal(
-      // The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
-      loaded.filter((p) => p.owner || scoped.person).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person! })),
+      // Every picture is checked, whoever it shows. The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
+      loaded.map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person })),
       await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
     );
     if (refusal) throw unprocessable(refusal);
@@ -547,7 +552,7 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     if (people.length === 1) sheet = sheetWithCastIdentity(look?.sheet, people[0]!.identity);
     else if (people.length > 1 && look) sheet = sheetWithoutCharacter(look.sheet);
     let prompt = assemblePrompt({
-      request: castLine ? `${shot.prompt}\n\n${castLine}` : shot.prompt,
+      request: [shot.prompt, castLine, cast.onlyLine].filter(Boolean).join("\n\n"),
       style: look?.style,
       sheet,
       roles,

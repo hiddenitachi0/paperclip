@@ -390,12 +390,14 @@ function linkSecretProblem(names: string[]): string {
 
 /**
  * A LoRA's ref as agents and plugin workers see it: a link without its query
- * string or "#" part (and without any user name); Sogni ids as they are. A
+ * string or "#" part (and without any user name); Sogni ids as they are (a saved
+ * id never has a "?" or "#", and one that does is cut like a link). A
  * link with a key is refused when it is saved, and what is left after the
  * "?" still only shows on the board's own pages.
  */
 export function mediaLoraRefForAgents(lora: { source: MediaLoraSource | string; ref: string }): string {
-  if (lora.source !== "url") return lora.ref;
+  // A Sogni id has no "?", "#" or "://"; a row saved with one before that was refused is cut down like a link.
+  if (lora.source !== "url" && !lora.ref.includes("://")) return lora.ref.split(/[?#]/, 1)[0] ?? "";
   try {
     const url = new URL(lora.ref);
     return `${url.origin}${url.pathname}`;
@@ -566,6 +568,9 @@ export function checkMediaLoraFields(lora: {
   }
   if (lora.provider === "sogni" && lora.source === "url") {
     problems.push("Sogni takes LoRAs from its own list or the ones you imported into Sogni. A link only works on Fal.");
+  } else if (lora.provider === "sogni" && /:\/\/|[?#]/.test(lora.ref)) {
+    // A Sogni ref is an id and agents see it as it is, so a link or a "?" / "#" part could carry a key to them.
+    problems.push('A Sogni LoRA is saved by its id (no link, no "?" and no "#" in it). Paste the id from Sogni\'s list.');
   }
   if (lora.provider === "fal" && lora.source !== "url") {
     problems.push("Fal takes LoRAs by link. Paste the https link to the LoRA file (Hugging Face or Civitai).");

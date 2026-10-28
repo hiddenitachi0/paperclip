@@ -1,0 +1,19 @@
+{
+  "name": "paperclip-render-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Locked-down render container: turns Hyperframes HTML compositions into MP4 for Paperclip's Media Studio. Not part of the pnpm workspace.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/server.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "hyperframes": "0.8.150"
+  }
+}

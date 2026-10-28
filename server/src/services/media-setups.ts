@@ -69,7 +69,8 @@ import { assertStorylineEditable, isStorylineEditable, lockStorylineRow, videoSt
  * Approval is for a recipe: changing an approved setup's kind, service,
  * model, edit model, mode, LoRAs or params moves it back to draft (agents
  * stop seeing it, the approver is cleared) unless the same request approves
- * it again, under that person's name. A recipe or status change that races
+ * it again, under that person's name. Changing a LoRA's trigger words, tag or
+ * provider flags does the same to the approved setups that use it. A recipe or status change that races
  * another edit is refused (409) rather than approving a recipe nobody saw.
  *
  * Starters: on first use each company gets the D4 starter setups and the two
@@ -968,18 +969,51 @@ export function mediaSetupsService(db: Db) {
     const now = new Date();
     const userId = userIdOf(actor);
     const reviewing = fields.contentTag !== undefined && fields.contentTag !== existing.contentTag;
-    const [row] = await db
-      .update(mediaLoras)
-      .set({
-        ...fields,
-        ...(reviewing ? { reviewedByUserId: fields.contentTag === "unreviewed" ? null : userId, reviewedAt: fields.contentTag === "unreviewed" ? null : now } : {}),
-        ...(archived === true && !existing.archivedAt ? { archivedAt: now } : {}),
-        ...(archived === false ? { archivedAt: null } : {}),
-        updatedAt: now,
-      })
-      .where(and(eq(mediaLoras.id, loraId), eq(mediaLoras.companyId, companyId)))
-      .returning();
-    if (!row) throw notFound(LORA_NOT_FOUND);
+    // An approval is for what the approver saw, and a LoRA's trigger words and
+    // tags are part of what /resolve returns and rates for every setup that
+    // uses it (the same rule as a recipe change). So when they change, the
+    // approved setups that use the LoRA go back to draft in the same
+    // transaction. (Provider, source and ref cannot be edited.)
+    const changesSetups =
+      (fields.triggerWords !== undefined && JSON.stringify(fields.triggerWords) !== JSON.stringify(existing.triggerWords)) ||
+      reviewing ||
+      (fields.providerNsfw !== undefined && fields.providerNsfw !== existing.providerNsfw) ||
+      (fields.providerSexual !== undefined && fields.providerSexual !== existing.providerSexual);
+    const { row, returned } = await withCompanyScope(db, companyId, async (tx) => {
+      const [updated] = await tx
+        .update(mediaLoras)
+        .set({
+          ...fields,
+          ...(reviewing ? { reviewedByUserId: fields.contentTag === "unreviewed" ? null : userId, reviewedAt: fields.contentTag === "unreviewed" ? null : now } : {}),
+          ...(archived === true && !existing.archivedAt ? { archivedAt: now } : {}),
+          ...(archived === false ? { archivedAt: null } : {}),
+          updatedAt: now,
+        })
+        .where(and(eq(mediaLoras.id, loraId), eq(mediaLoras.companyId, companyId)))
+        .returning();
+      if (!updated) throw notFound(LORA_NOT_FOUND);
+      // updated_at moves too, so an approval racing this edit is refused (409) like one racing a recipe edit.
+      const approved = changesSetups
+        ? await tx
+            .select({ id: mediaModelSetups.id, approvedByUserId: mediaModelSetups.approvedByUserId })
+            .from(mediaModelSetups)
+            .where(
+              and(
+                eq(mediaModelSetups.companyId, companyId),
+                eq(mediaModelSetups.status, "approved"),
+                sql`${mediaModelSetups.loras} @> ${JSON.stringify([{ loraId }])}::jsonb`,
+              ),
+            )
+            .for("update")
+        : [];
+      if (approved.length > 0) {
+        await tx
+          .update(mediaModelSetups)
+          .set({ status: "draft", approvedByUserId: null, approvedAt: null, updatedAt: now })
+          .where(and(eq(mediaModelSetups.companyId, companyId), inArray(mediaModelSetups.id, approved.map((setup) => setup.id))));
+      }
+      return { row: updated, returned: approved };
+    });
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -988,8 +1022,21 @@ export function mediaSetupsService(db: Db) {
       action: reviewing ? "media.lora_reviewed" : "media.lora_updated",
       entityType: "media_lora",
       entityId: loraId,
-      details: { fields: Object.keys(input), contentTag: row.contentTag, archived: Boolean(row.archivedAt) },
+      details: { fields: Object.keys(input), contentTag: row.contentTag, archived: Boolean(row.archivedAt), ...(returned.length > 0 ? { setupsReturnedToDraft: returned.map((setup) => setup.id) } : {}) },
     });
+    // The same entry a recipe change leaves on the setup, so the setup's own history shows why it lost its approval.
+    for (const setup of returned) {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "media.setup_updated",
+        entityType: "media_model_setup",
+        entityId: setup.id,
+        details: { status: "draft", returnedToDraft: true, loraChanged: loraId, previousApprovedByUserId: setup.approvedByUserId },
+      });
+    }
     return toMediaLoraView(row);
   }
 
