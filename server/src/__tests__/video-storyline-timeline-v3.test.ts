@@ -181,7 +181,7 @@ d("storyline timeline v3", () => {
       expect(row.errorMessage).toContain("Sogni API key");
     });
 
-    it("a re-render that cannot start pauses with the shot's reason", async () => {
+    it("a re-render that cannot start fails the shot with its reason and leaves the film as it was", async () => {
       const { companyId, storylineId, shotIds } = await seed();
       await markMade(shotIds[0]!, companyId);
       await markMade(shotIds[1]!, companyId);
@@ -191,7 +191,7 @@ d("storyline timeline v3", () => {
       });
       const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
       await expect(render.reRenderShot(companyId, storylineId, shotIds[1]!, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("enough credit") });
-      expect((await storylineRow(storylineId)).status).toBe("paused");
+      expect((await storylineRow(storylineId)).status).toBe("done");
       const shot = await shotRow(shotIds[1]!);
       expect(shot.status).toBe("failed");
       expect(shot.errorMessage).toContain("enough credit");
