@@ -302,9 +302,13 @@ export interface VideoStripClip {
   playMs?: number;
   /** The full length the trim handles can reach (ms): your video's length, or a made AI clip's length; null when it can't be trimmed yet. */
   sourceLengthMs?: number | null;
-  /** The video service and model this clip uses (AI shots only). */
+  /** The video service and model behind this clip (AI shots only): the one that made it when it is made, else the one a render will use. */
   providerId?: VideoStorylineProvider | null;
   model?: string | null;
+  /** True when a person pinned this shot to its own video service/model ("keep this shot on X"); false = it follows the film's. */
+  pinned?: boolean;
+  /** What the NEXT render of this shot will use (the pin, else the film's); null for your own videos and photos. */
+  willUse?: { providerId: VideoStorylineProvider; model: string | null } | null;
   /** About what making this AI shot (again) costs, in cents; null for your own videos and photos. */
   estimatedCostCents?: number | null;
 }

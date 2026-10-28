@@ -60,6 +60,8 @@ export class FalVideoProvider implements MediaJobProvider {
 // videoModel key list (a custom id is sent unchanged).
 
 const SOGNI_API_BASE = "https://api.sogni.ai";
+/** What Sogni runs when no videoModel is sent (the animate_photo schema default). Recorded on the job as the model that really ran; never a made-up name. */
+const SOGNI_DEFAULT_VIDEO_MODEL = "ltx25";
 
 export interface SogniVideoProviderOptions {
   apiKey: string;
@@ -136,7 +138,7 @@ export class SogniVideoProvider implements MediaJobProvider {
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");
-    return { externalId: workflowId, model: plan.videoModel ?? "sogni-video", provider: this.name };
+    return { externalId: workflowId, model: plan.videoModel ?? SOGNI_DEFAULT_VIDEO_MODEL, provider: this.name };
   }
 
   async poll(handle: MediaJobHandle): Promise<MediaPollOutcome> {
