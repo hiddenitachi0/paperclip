@@ -65,6 +65,8 @@ export function parseProjectDeployPolicy(raw: unknown): ProjectDeployPolicy | nu
     ...(typeof parsed.sftpUsername === "string" ? { sftpUsername: parsed.sftpUsername } : {}),
     ...(typeof parsed.sftpRemotePath === "string" ? { sftpRemotePath: parsed.sftpRemotePath } : {}),
     ...(Array.isArray(parsed.sftpAllowlist) ? { sftpAllowlist: asStringArray(parsed.sftpAllowlist) } : {}),
+    ...(Array.isArray(parsed.sftpExclude) ? { sftpExclude: asStringArray(parsed.sftpExclude) } : {}),
+    ...(typeof parsed.sftpHostKeySha256 === "string" ? { sftpHostKeySha256: parsed.sftpHostKeySha256 } : {}),
     ...(typeof parsed.releaseRetentionCount === "number" ? { releaseRetentionCount: parsed.releaseRetentionCount } : {}),
   };
 }
