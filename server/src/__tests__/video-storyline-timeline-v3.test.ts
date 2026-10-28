@@ -354,6 +354,109 @@ d("storyline timeline v3", () => {
           expect((await shotRow(film.shotIds[0]!)).status).toBe("rendering");
         });
 
+        it("a late job is stopped by a provider built without the deadline's signal, so the stop request is not cut off at once (DUR-4949)", async () => {
+          const film = await seed({ shots: 1 });
+          await markMade(film.shotIds[0]!, film.companyId);
+          await db.update(videoStorylines).set({ status: "ready_to_stitch", spentCents: 40 }).where(eq(videoStorylines.id, film.storylineId));
+          let clock = new Date();
+          const stoppedBy: Array<{ externalId: string; builtWithSignal: boolean }> = [];
+          const render = videoStorylineRenderService(db, {
+            now: () => clock,
+            resolveApiKey: async () => "key",
+            buildProvider: (_providerId, _apiKey, _model, signal) =>
+              ({
+                name: "sogni",
+                // The answer arrives after the deadline has passed.
+                start: async () => {
+                  clock = new Date(clock.getTime() + SHOT_START_DEADLINE_MS + 1_000);
+                  return { externalId: "wf-late", model: "ltx25", provider: "sogni" };
+                },
+                poll: async () => ({ status: "running" as const }),
+                cancel: async (handle: { externalId: string }) => {
+                  stoppedBy.push({ externalId: handle.externalId, builtWithSignal: signal !== undefined });
+                },
+              }) as unknown as Provider,
+          });
+          await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ message: expect.stringContaining("took too long to start") });
+          expect(stoppedBy).toEqual([{ externalId: "wf-late", builtWithSignal: false }]);
+        });
+
+        it("a start the deadline cut short says the shot may have been charged, not that nothing was (DUR-4949)", async () => {
+          const film = await seed({ shots: 1 });
+          // Capture the deadline timer so the test can fire it without waiting ten minutes.
+          const realSetTimeout = globalThis.setTimeout;
+          const deadlineTimers: Array<() => void> = [];
+          const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+            if (ms === SHOT_START_DEADLINE_MS) {
+              deadlineTimers.push(fn);
+              return realSetTimeout(() => undefined, 0);
+            }
+            return realSetTimeout(fn, ms, ...rest);
+          }) as unknown as typeof setTimeout);
+          try {
+            let abortStart!: () => void;
+            const aborted = new Promise<never>((_, reject) => (abortStart = () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }))));
+            const stub = stubProvider(() => aborted);
+            const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+            const outcome = render.startRender(film.companyId, film.storylineId, ACTOR, {}).then(() => "started", (err: unknown) => err);
+            await vi.waitFor(() => expect(stub.starts).toBe(1));
+            deadlineTimers.forEach((fire) => fire());
+            abortStart();
+            const err = (await outcome) as Error;
+            expect(err.message).toContain("may have been charged");
+            expect(err.message).not.toContain("Nothing was charged");
+            expect((await shotRow(film.shotIds[0]!)).errorMessage).toContain("may have been charged");
+          } finally {
+            spy.mockRestore();
+          }
+        });
+
+        it("a late failure while a second re-render holds the shot queued leaves it queued, and a third re-render is still refused (DUR-4949)", async () => {
+          const film = await seed({ shots: 1 });
+          await markMade(film.shotIds[0]!, film.companyId);
+          await db.update(videoStorylines).set({ status: "ready_to_stitch", spentCents: 40 }).where(eq(videoStorylines.id, film.storylineId));
+          let clock = new Date();
+          let failFirst!: () => void;
+          const firstMayFail = new Promise<never>((_, reject) => (failFirst = () => reject(new Error("Sogni is down"))));
+          let holdSecond!: () => void;
+          const secondMayAnswer = new Promise<void>((resolve) => (holdSecond = resolve));
+          const stub = stubProvider(async (n) => {
+            if (n === 1) return firstMayFail;
+            await secondMayAnswer;
+            return { externalId: `wf-${n}`, model: "ltx25", provider: "sogni" };
+          });
+          const render = videoStorylineRenderService(db, { now: () => clock, buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+
+          // A: accepted, its start hangs. The grace period passes and the sweep fails it.
+          const first = render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          const firstOutcome = first.then(() => "started", (err: unknown) => err);
+          await vi.waitFor(() => expect(stub.starts).toBe(1));
+          clock = new Date(clock.getTime() + STALLED_RENDER_GRACE_MS + 60_000);
+          await render.releaseStalledRenders();
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("failed");
+          // B: a second re-render is accepted; its start is still in flight, so the shot is queued.
+          const second = render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR);
+          const secondOutcome = second.then(() => "started", (err: unknown) => err);
+          await vi.waitFor(() => expect(stub.starts).toBe(2));
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
+
+          // A fails late. It no longer owns the shot: B's queued shot and B's film are left alone.
+          failFirst();
+          expect(await firstOutcome).toMatchObject({ message: expect.stringContaining("did not start again") });
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
+          // A re-render leaves the film's own status alone (DUR-4915), and the late failure must not touch it either.
+          expect((await storylineRow(film.storylineId)).status).toBe("ready_to_stitch");
+          // C: still refused while B holds the shot.
+          await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 409 });
+          expect(stub.starts).toBe(2);
+
+          // B finishes normally: one running job.
+          holdSecond();
+          expect(await secondOutcome).toBe("started");
+          expect(await runningJobs(film.storylineId)).toBe(1);
+          expect((await shotRow(film.shotIds[0]!)).status).toBe("rendering");
+        });
+
         it("a shot that took too long to get ready never reaches the paid start call", async () => {
           const film = await seed({ shots: 1 });
           let clock = new Date();

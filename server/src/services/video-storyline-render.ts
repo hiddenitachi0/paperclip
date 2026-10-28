@@ -1,5 +1,5 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq, inArray, lt, ne, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, lte, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoMediaSpend, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import { sendableDataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
@@ -229,6 +229,8 @@ export class RenderStartError extends Error {
     message: string,
     readonly original: unknown,
     charged: boolean,
+    /** The stamp this start gave the shot when it claimed it (DUR-4937): the shot's updated_at is still this while it is the start's own. */
+    readonly claimedAt?: Date,
   ) {
     super(message);
     this.name = "RenderStartError";
@@ -463,6 +465,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
     const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model, deadline.signal);
+    // Stopping a job must not ride the deadline's signal: that signal is already aborted by the time a late job
+    // needs stopping, so the stop request would be cut off at once and the job would stay running and paid for.
+    const buildCancelProvider = () => (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
     const systemActor = { actorType: "user" as const, actorId };
 
     // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
@@ -531,18 +536,21 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       input.prompt = `${input.prompt}\nFrame: ${storyline.aspect === "9:16" ? "vertical 9:16" : "square 1:1"}.`;
     }
     const shotNumber = shot.orderIndex + 1;
+    let claimedAt: Date | undefined;
     // DUR-4937: claim the shot before the paid call, so a shot already queued or rendering is never started a second
     // time (two ticks, or a re-render racing the chain). A caller that already moved the shot to "queued" under the
     // storyline lock (a re-render, an animated photo) is that claim; every other caller's shot must still be idle.
     if (!opts.alreadyQueued) {
+      const claimStamp = nowOf();
       const claimed = await db
         .update(videoShots)
-        .set({ status: "queued", updatedAt: nowOf() })
+        .set({ status: "queued", updatedAt: claimStamp })
         .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "failed"])))
         .returning({ id: videoShots.id });
       if (claimed.length === 0) {
         throw new ShotClaimLostError(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
       }
+      claimedAt = claimStamp;
     }
     // DUR-4944: out of time before anything was sent, so no paid call is made. This runs after the claim on purpose:
     // the shot is already ours (queued), and this error sends it to the caller's recordShotStartFailure, which moves a
@@ -553,25 +561,39 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         `Shot ${shotNumber} took too long to get ready, so it was not sent to ${PROVIDER_LABEL[providerId]}. Nothing was charged for it. Try it again.`,
         undefined,
         false,
+        claimedAt,
       );
     }
     let handle: MediaJobHandle;
     try {
       handle = await provider.start(input);
     } catch (err) {
-      // The service never confirmed a job, so nothing was charged.
       logger.warn({ err, shotId: shot.id, providerId }, "video-storyline-render: the video service did not start a shot");
-      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false);
+      // Cut short by the deadline: the request may have reached the service (Fal can queue a job and then lose the
+      // answer), so this is not known to be free.
+      if (deadline.signal.aborted) {
+        throw new RenderStartError(
+          `${PROVIDER_LABEL[providerId]} didn't answer in time while shot ${shotNumber} was being sent, so it was stopped. It may have been charged: check ${PROVIDER_LABEL[providerId]}'s dashboard before trying again, so you don't pay twice.`,
+          err,
+          true,
+          claimedAt,
+        );
+      }
+      // The service never confirmed a job, so nothing was charged.
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false, claimedAt);
     }
     // The job exists, but this start outlived its deadline: the shot may already have been swept as stalled and
     // started again, and writing this job down would run (and pay for) the shot twice. Stop it instead.
     if (deadline.passed()) {
       logger.error({ shotId: shot.id, externalId: handle.externalId, providerId }, "video-storyline-render: a shot start finished after its deadline; stopping the late job");
-      await provider.cancel(handle).catch((err) => logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: could not stop a late shot start"));
+      await buildCancelProvider()
+        .cancel(handle)
+        .catch((err) => logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: could not stop a late shot start"));
       throw new RenderStartError(
         `Shot ${shotNumber} took too long to start on ${PROVIDER_LABEL[providerId]}, so it was stopped. If you see a charge for it, tell your admin. Try it again.`,
         undefined,
         true,
+        claimedAt,
       );
     }
     const attempt = shot.attempt + 1;
@@ -597,8 +619,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     } catch (err) {
       // The job started but could not be written down: stop it rather than leave it unfollowed.
       logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: started a shot but could not record it");
-      await provider.cancel(handle).catch(() => undefined);
-      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: true }), err, true);
+      await buildCancelProvider().cancel(handle).catch(() => undefined);
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: true }), err, true, claimedAt);
     }
   }
 
@@ -611,7 +633,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function recordShotStartFailure(
     companyId: string,
     storyline: Pick<StorylineRow, "id" | "providerId" | "model">,
-    shot: Pick<ShotRow, "id" | "orderIndex" | "providerId" | "model">,
+    shot: Pick<ShotRow, "id" | "orderIndex" | "providerId" | "model" | "updatedAt">,
     err: unknown,
     restore: { status: string; errorPrefix?: string },
   ): Promise<string> {
@@ -620,11 +642,30 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (!(err instanceof HttpError)) {
       logger.warn({ err, shotId: shot.id }, "video-storyline-render: a shot could not be started");
     }
-    await db
+    // A start that claimed the shot itself stamped it after the caller read it; that stamp is the start's own too.
+    const claimedAt = err instanceof RenderStartError ? err.claimedAt : undefined;
+    const ownedAt = claimedAt && claimedAt.getTime() > shot.updatedAt.getTime() ? claimedAt : shot.updatedAt;
+    const failed = await db
       .update(videoShots)
       .set({ status: "failed", errorMessage: reason, updatedAt: nowOf() })
-      // Only a shot that is not running: a start that did get recorded is the tick's to follow.
-      .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "queued", "failed"])));
+      .where(
+        and(
+          eq(videoShots.id, shot.id),
+          // Only a shot that is not running: a start that did get recorded is the tick's to follow.
+          inArray(videoShots.status, ["draft", "queued", "failed"]),
+          // Only a shot this caller still owns (DUR-4949). A start that fails late, after the shot was swept as
+          // stalled and queued again by another re-render, must not mark that other render's shot failed (a third
+          // re-render would then be accepted and both would run one shot). Every write to the shot moves updatedAt
+          // on from what the caller read; the 1 ms of slack covers a stamp the database kept to the microsecond.
+          lte(videoShots.updatedAt, new Date(ownedAt.getTime() + 1)),
+        ),
+      )
+      .returning({ id: videoShots.id });
+    // Not this caller's shot any more: the film's state is that other render's to settle, not this late failure's.
+    if (failed.length === 0) {
+      logger.warn({ shotId: shot.id }, "video-storyline-render: a shot start failed after the shot was taken over; left it alone");
+      return reason;
+    }
     await db
       .update(videoStorylines)
       .set({ status: restore.status, errorMessage: `${restore.errorPrefix ?? ""}${reason}`, updatedAt: nowOf() })
