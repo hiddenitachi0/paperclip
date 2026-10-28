@@ -151,7 +151,12 @@ export function createStorageService(provider: StorageProvider): StorageService 
       });
       source.on("error", (err) => hashing.destroy(err));
       source.pipe(hashing);
-      await provider.putObject({ objectKey, body: hashing, contentType, contentLength: byteSize });
+      try {
+        await provider.putObject({ objectKey, body: hashing, contentType, contentLength: byteSize });
+      } finally {
+        // A provider that gave up early must not leave the file open.
+        source.destroy();
+      }
 
       if (streamedBytes !== byteSize) {
         // The file changed while it was being stored: never keep a half-written copy.

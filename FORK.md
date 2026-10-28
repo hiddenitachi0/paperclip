@@ -328,6 +328,36 @@ acknowledges; the server holds no bot tokens for this. Page: company sidebar →
 | `ui/src/pages/Watchers.tsx`, `ui/src/components/WatcherFormDialog.tsx`, `ui/src/api/watchers.ts` | Page, plain-language rule builder | **New files** |
 | `ui/src/App.tsx`, `ui/src/components/Sidebar.tsx`, `ui/src/lib/company-routes.ts`, `ui/src/lib/queryKeys.ts` | Route, nav item, route root, query key | Additive 1-liners |
 
+### Feature 14 — Code-drawn videos (Media Studio D14: locked-down Hyperframes render worker)
+
+Charts, titles and explainers drawn by code, not by an image model. A separate container
+(`docker/render-worker`: Node 22, ffmpeg, chrome-headless-shell, Hyperframes 0.8.150, Apache-2.0)
+renders Hyperframes HTML compositions to MP4. It has no network at all; Paperclip's server talks
+to it over a Unix socket and sends each company's own files inside the job. Agents use it through
+`/api/companies/:id/code-renders` (check, contact sheet, render) within daily minute caps that stop
+and ask (D7: a finished render counts its real length; checks, contact sheets and failed or cancelled
+jobs the renderer's real time; jobs in flight their reservation), and a finished video (up to 2 GB)
+is streamed worker -> temp file -> storage, never held in memory. Off (503) until the operator adds the container on the box (`docker/render-worker/README.md`)
+after the Security Reviewer gate.
+
+| File | Change | Type |
+|---|---|---|
+| `docker/render-worker/**` (Dockerfile, standalone `package.json` + `package-lock.json`, `src/`, `test/`, licences, README) | The worker; not a pnpm workspace package, so the monorepo lockfile is untouched | **New files** |
+| `docker/docker-compose.render-worker.yml` | Overlay: worker (`network_mode: none`, read-only, non-root, limits, `init: true`) + socket volume on `server` | **New file** |
+| `packages/db/src/schema/code_render_jobs.ts`, `migrations/0260_code_render_jobs.sql` (+ snapshot, journal) | `code_render_jobs` (company-scoped, RLS) | **New files** |
+| `packages/db/src/schema/index.ts` | Export | Additive 1-line |
+| `packages/db/src/migrations/0164_rls_login_roles.sql` | `code_render_jobs` added to both arrays | Additive |
+| `packages/db/src/cross-company-audit.ts` | `heartbeat-scheduler:codeRenders` in the routine-bypass list | Additive 1-line |
+| `packages/shared/src/code-renders.ts`, `packages/shared/src/index.ts` | Kinds, statuses, caps, validators, API types | New file + 1-line export |
+| `server/src/services/code-render-worker-client.ts`, `server/src/services/code-renders.ts` | Socket/HTTP client; caps, budget gate, company files, collect into Files | **New files** |
+| `server/src/routes/code-renders.ts`, `server/src/app.ts` | Routes (company agents + board) | New file + 1-line mount |
+| `server/src/storage/types.ts`, `server/src/storage/service.ts`, `server/src/storage/local-disk-provider.ts` | `putFileFromPath` (stream a file on disk into storage, hashed on the way); `putObject` takes a Buffer or a stream | Additive |
+| `server/src/services/scheduler-tick-single-flight.ts`, `server/src/index.ts` | New `codeRenders` single-flight chain (skipped while unconfigured) | Additive |
+| `server/src/__tests__/openapi-routes.test.ts` | `code-renders.ts` on the not-yet-documented list | Additive 1-line |
+| `packages/skills-catalog/catalog/optional/media/explainer-video/SKILL.md` (+ `generated/catalog.json`, `shipped-catalog.test.ts`) | New optional skill | **New file** + regenerated manifest |
+| `packages/skills-catalog/catalog/optional/content/brag/SKILL.md`, `.../media/media-studio-generation/SKILL.md` | Point to the renderer / the new skill | Surgical edit |
+| `package.json`, `.github/workflows/pr.yml` | `test:render-worker` script and CI step | Additive |
+
 ## Out-of-tree work (near-zero conflict risk)
 
 ### Feature 2 — Cowork/Claude Code → Paperclip importer

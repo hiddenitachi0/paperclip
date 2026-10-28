@@ -1,5 +1,5 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq, inArray, lt, ne, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, lte, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoMediaSpend, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import { sendableDataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
@@ -11,7 +11,12 @@ import {
   estimateVideoStorylineCostCents,
   readVideoStorylineCast,
   videoRenderDurationSeconds,
+  videoCastCheckRequiredAtStart,
   videoShotCast,
+  VIDEO_CAST_ENFORCED_KEY,
+  unconfirmedVideoCastMessage,
+  unconfirmedVideoCastShots,
+  videoShotOnlyCastLine,
   videoShotVideoPrompt,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
@@ -83,32 +88,46 @@ const PREVIEW_POLL_TIMEOUT_MS = 90_000;
  * few reference uploads at 30 s each), so a start in progress is never cut.
  */
 export const STALLED_RENDER_GRACE_MS = 15 * 60_000;
+/**
+ * Everything beginShotRender does, from its first read up to and including the
+ * video service's start call, must finish inside this. It is well under
+ * STALLED_RENDER_GRACE_MS on purpose: a start that outlives the grace could be
+ * swept as stalled (and the shot re-rendered and paid for again) while it was
+ * still about to create its own paid job (DUR-4944).
+ */
+export const SHOT_START_DEADLINE_MS = 10 * 60_000;
 
 /** What a shot shows when it was left queued/rendering with no video service job behind it. */
 const SHOT_NEVER_STARTED_MESSAGE = "This shot never started on the video service. Nothing was charged for it. Try it again.";
 
 /** SSRF-guarded FetchImpl, reused for both provider API calls and downloading finished clips -- see safe-outbound-fetch.ts. */
-async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024): Promise<Response> {
+async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024, outerSignal?: AbortSignal): Promise<Response> {
   const target = await validateAndResolveFetchUrl(url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), init?.method === "GET" || !init?.method ? CLIP_DOWNLOAD_TIMEOUT_MS : RENDER_API_FETCH_TIMEOUT_MS);
+  // The caller's own deadline (a shot start's, see SHOT_START_DEADLINE_MS) cuts the request short as well.
+  const onOuterAbort = () => controller.abort();
+  if (outerSignal?.aborted) controller.abort();
+  outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes });
     return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
+    outerSignal?.removeEventListener("abort", onOuterAbort);
   }
 }
 
 /** Storyline strip: AI transitions use the same guarded fetch and provider clients as shot renders. */
 export { safeFetch as storylineSafeFetch };
 
-export function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null): MediaJobProvider {
+export function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null, signal?: AbortSignal): MediaJobProvider {
+  const fetchImpl: typeof safeFetch = signal ? (url, init, maxResponseBytes) => safeFetch(url, init, maxResponseBytes, signal) : safeFetch;
   if (providerId === "fal") {
-    return new FalVideoProvider(apiKey, safeFetch, model ?? undefined);
+    return new FalVideoProvider(apiKey, fetchImpl, model ?? undefined);
   }
   // Uploads go to Sogni's storage as real multipart bytes through the same pinned fetch (see sogniStorageFetch).
-  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: sogniStorageFetch(safeFetch), defaultModel: model ?? undefined });
+  return new SogniVideoProvider({ apiKey, apiFetch: fetchImpl, transferFetch: sogniStorageFetch(fetchImpl), defaultModel: model ?? undefined });
 }
 
 async function dataUriFromObject(companyId: string, provider: string, objectKey: string, contentType: string): Promise<string> {
@@ -216,6 +235,8 @@ export class RenderStartError extends Error {
     message: string,
     readonly original: unknown,
     charged: boolean,
+    /** The stamp this start gave the shot when it claimed it (DUR-4937): the shot's updated_at is still this while it is the start's own. */
+    readonly claimedAt?: Date,
   ) {
     super(message);
     this.name = "RenderStartError";
@@ -237,7 +258,7 @@ export class ShotClaimLostError extends HttpError {
 export interface VideoStorylineRenderDeps {
   now?: () => Date;
   /** Test seam: the provider client for a shot render (production builds the real Fal/Sogni client). */
-  buildProvider?: (providerId: VideoStorylineProvider, apiKey: string, model: string | null) => MediaJobProvider;
+  buildProvider?: (providerId: VideoStorylineProvider, apiKey: string, model: string | null, signal?: AbortSignal) => MediaJobProvider;
   /** Test seam: the API key lookup (production reads the company's / instance's secret). */
   resolveApiKey?: (companyId: string, providerId: VideoStorylineProvider) => Promise<string>;
 }
@@ -319,6 +340,33 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       .where(and(eq(videoShots.storylineId, storylineId), eq(videoShots.status, "done"), lt(videoShots.orderIndex, beforeOrderIndex)))
       .orderBy(asc(videoShots.orderIndex));
     return rows.length > 0 ? rows[rows.length - 1]! : null;
+  }
+
+  /** The video text of a shot: description and camera notes, plus the "only these people" line when its cast is confirmed. */
+  function shotVideoPrompt(storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect): string {
+    const base = videoShotVideoPrompt(shot.prompt, shot.cameraNotes);
+    const line = videoShotOnlyCastLine(shot, readVideoStorylineCast(storyline.pictureSettings));
+    return line ? `${base}\n\n${line}` : base;
+  }
+
+  /**
+   * Refuses a paid call that would send a linked person's pictures for shots
+   * nobody has confirmed the cast for (castVideoInput would otherwise guess
+   * from names in the text). Used by every entry point other than the render
+   * chain itself (startRender checks its own list; the chain and a paused
+   * film's resume deliberately skip it, see startRender).
+   */
+  function assertVideoCastConfirmed(
+    storyline: typeof videoStorylines.$inferSelect,
+    shots: ReadonlyArray<{ id: string; orderIndex: number }>,
+  ): void {
+    const unconfirmed = unconfirmedVideoCastShots(readVideoStorylineCast(storyline.pictureSettings), shots);
+    if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
+  }
+
+  /** SQL for picture_settings with the cast-rule marker added, leaving the rest of the column as it is under the lock. */
+  function markCastEnforced() {
+    return sql`coalesce(${videoStorylines.pictureSettings}, '{}'::jsonb) || ${JSON.stringify({ [VIDEO_CAST_ENFORCED_KEY]: true })}::jsonb` as unknown as typeof videoStorylines.$inferSelect["pictureSettings"];
   }
 
   /**
@@ -414,6 +462,30 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     actorId: string,
     opts: { companyKeyOnly?: boolean; alreadyQueued?: boolean } = {},
   ) {
+    // DUR-4944: one deadline for the whole start. The timer cuts the video service's requests short; the injected
+    // clock is checked too, so a start that finishes late is stopped even if no request was running when it passed.
+    const controller = new AbortController();
+    const startedAtMs = nowOf().getTime();
+    const deadline = {
+      signal: controller.signal,
+      passed: () => controller.signal.aborted || nowOf().getTime() - startedAtMs > SHOT_START_DEADLINE_MS,
+    };
+    const timer = setTimeout(() => controller.abort(), SHOT_START_DEADLINE_MS);
+    try {
+      await beginShotRenderWithinDeadline(companyId, storyline, shot, actorId, opts, deadline);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function beginShotRenderWithinDeadline(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+    actorId: string,
+    opts: { companyKeyOnly?: boolean; alreadyQueued?: boolean },
+    deadline: { signal: AbortSignal; passed: () => boolean },
+  ) {
     if (shot.clipKind !== "generated") {
       throw unprocessable(`Clip ${shot.orderIndex + 1} is your own video or photo; it is prepared on the server, never rendered by an AI service.`);
     }
@@ -428,7 +500,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     assertFilmModelAllowed(model, mode);
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
-    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
+    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model, deadline.signal);
+    // Stopping a job must not ride the deadline's signal: that signal is already aborted by the time a late job
+    // needs stopping, so the stop request would be cut off at once and the job would stay running and paid for.
+    const buildCancelProvider = () => (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
     const systemActor = { actorType: "user" as const, actorId };
 
     // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
@@ -476,8 +551,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const input: MediaJobInput = {
       kind: "video",
-      // Camera notes go with the description (they used to be dropped). A safe-for-work film adds "Fully clothed." and what to keep out (no video request has a negative field yet).
-      prompt: filmVideoPrompt(mode, videoShotVideoPrompt(shot.prompt, shot.cameraNotes)),
+      // Camera notes go with the description (they used to be dropped), plus the "only these people" line once the cast is confirmed. A safe-for-work film adds "Fully clothed." and what to keep out (no video request has a negative field yet).
+      prompt: filmVideoPrompt(mode, shotVideoPrompt(storyline, shot)),
       // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
       promptRewrite: false,
       model: model ?? undefined,
@@ -497,26 +572,65 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       input.prompt = `${input.prompt}\nFrame: ${storyline.aspect === "9:16" ? "vertical 9:16" : "square 1:1"}.`;
     }
     const shotNumber = shot.orderIndex + 1;
+    let claimedAt: Date | undefined;
     // DUR-4937: claim the shot before the paid call, so a shot already queued or rendering is never started a second
     // time (two ticks, or a re-render racing the chain). A caller that already moved the shot to "queued" under the
     // storyline lock (a re-render, an animated photo) is that claim; every other caller's shot must still be idle.
     if (!opts.alreadyQueued) {
+      const claimStamp = nowOf();
       const claimed = await db
         .update(videoShots)
-        .set({ status: "queued", updatedAt: nowOf() })
+        .set({ status: "queued", updatedAt: claimStamp })
         .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "failed"])))
         .returning({ id: videoShots.id });
       if (claimed.length === 0) {
         throw new ShotClaimLostError(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
       }
+      claimedAt = claimStamp;
+    }
+    // DUR-4944: out of time before anything was sent, so no paid call is made. This runs after the claim on purpose:
+    // the shot is already ours (queued), and this error sends it to the caller's recordShotStartFailure, which moves a
+    // queued shot to "failed" with this reason -- never left stuck in "queued". Checked before the claim, a deadline
+    // passing during the claim write would slip through to provider.start.
+    if (deadline.passed()) {
+      throw new RenderStartError(
+        `Shot ${shotNumber} took too long to get ready, so it was not sent to ${PROVIDER_LABEL[providerId]}. Nothing was charged for it. Try it again.`,
+        undefined,
+        false,
+        claimedAt,
+      );
     }
     let handle: MediaJobHandle;
     try {
       handle = await provider.start(input);
     } catch (err) {
-      // The service never confirmed a job, so nothing was charged.
       logger.warn({ err, shotId: shot.id, providerId }, "video-storyline-render: the video service did not start a shot");
-      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false);
+      // Cut short by the deadline: the request may have reached the service (Fal can queue a job and then lose the
+      // answer), so this is not known to be free.
+      if (deadline.signal.aborted) {
+        throw new RenderStartError(
+          `${PROVIDER_LABEL[providerId]} didn't answer in time while shot ${shotNumber} was being sent, so it was stopped. It may have been charged: check ${PROVIDER_LABEL[providerId]}'s dashboard before trying again, so you don't pay twice.`,
+          err,
+          true,
+          claimedAt,
+        );
+      }
+      // The service never confirmed a job, so nothing was charged.
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false, claimedAt);
+    }
+    // The job exists, but this start outlived its deadline: the shot may already have been swept as stalled and
+    // started again, and writing this job down would run (and pay for) the shot twice. Stop it instead.
+    if (deadline.passed()) {
+      logger.error({ shotId: shot.id, externalId: handle.externalId, providerId }, "video-storyline-render: a shot start finished after its deadline; stopping the late job");
+      await buildCancelProvider()
+        .cancel(handle)
+        .catch((err) => logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: could not stop a late shot start"));
+      throw new RenderStartError(
+        `Shot ${shotNumber} took too long to start on ${PROVIDER_LABEL[providerId]}, so it was stopped. If you see a charge for it, tell your admin. Try it again.`,
+        undefined,
+        true,
+        claimedAt,
+      );
     }
     const attempt = shot.attempt + 1;
     try {
@@ -541,8 +655,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     } catch (err) {
       // The job started but could not be written down: stop it rather than leave it unfollowed.
       logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: started a shot but could not record it");
-      await provider.cancel(handle).catch(() => undefined);
-      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: true }), err, true);
+      await buildCancelProvider().cancel(handle).catch(() => undefined);
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: true }), err, true, claimedAt);
     }
   }
 
@@ -555,7 +669,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function recordShotStartFailure(
     companyId: string,
     storyline: Pick<StorylineRow, "id" | "providerId" | "model">,
-    shot: Pick<ShotRow, "id" | "orderIndex" | "providerId" | "model">,
+    shot: Pick<ShotRow, "id" | "orderIndex" | "providerId" | "model" | "updatedAt">,
     err: unknown,
     restore: { status: string; errorPrefix?: string },
   ): Promise<string> {
@@ -564,11 +678,30 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (!(err instanceof HttpError)) {
       logger.warn({ err, shotId: shot.id }, "video-storyline-render: a shot could not be started");
     }
-    await db
+    // A start that claimed the shot itself stamped it after the caller read it; that stamp is the start's own too.
+    const claimedAt = err instanceof RenderStartError ? err.claimedAt : undefined;
+    const ownedAt = claimedAt && claimedAt.getTime() > shot.updatedAt.getTime() ? claimedAt : shot.updatedAt;
+    const failed = await db
       .update(videoShots)
       .set({ status: "failed", errorMessage: reason, updatedAt: nowOf() })
-      // Only a shot that is not running: a start that did get recorded is the tick's to follow.
-      .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "queued", "failed"])));
+      .where(
+        and(
+          eq(videoShots.id, shot.id),
+          // Only a shot that is not running: a start that did get recorded is the tick's to follow.
+          inArray(videoShots.status, ["draft", "queued", "failed"]),
+          // Only a shot this caller still owns (DUR-4949). A start that fails late, after the shot was swept as
+          // stalled and queued again by another re-render, must not mark that other render's shot failed (a third
+          // re-render would then be accepted and both would run one shot). Every write to the shot moves updatedAt
+          // on from what the caller read; the 1 ms of slack covers a stamp the database kept to the microsecond.
+          lte(videoShots.updatedAt, new Date(ownedAt.getTime() + 1)),
+        ),
+      )
+      .returning({ id: videoShots.id });
+    // Not this caller's shot any more: the film's state is that other render's to settle, not this late failure's.
+    if (failed.length === 0) {
+      logger.warn({ shotId: shot.id }, "video-storyline-render: a shot start failed after the shot was taken over; left it alone");
+      return reason;
+    }
     await db
       .update(videoStorylines)
       .set({ status: restore.status, errorMessage: `${restore.errorPrefix ?? ""}${reason}`, updatedAt: nowOf() })
@@ -644,6 +777,18 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // it, with two chains then rendering every shot twice past the cap. Wait for the re-render to settle instead.
     if (shots.some((s) => s.clipKind === "generated" && (s.status === "queued" || s.status === "rendering"))) {
       throw conflict(RENDER_IN_FLIGHT_MESSAGE);
+    }
+
+    // Who is in a shot is a person's choice, not a guess from names in the
+    // text: a film with a person linked to its cast needs every shot still to
+    // render confirmed first. Only here, at start -- never in beginShotRender,
+    // so a film that is rendering (the chain continues) finishes normally. A
+    // paused film is exempt only when it predates this rule (no marker, see
+    // VIDEO_CAST_ENFORCED_KEY): one that was started under the rule and paused
+    // since (budget cap, failed shot) may have gained shots or cast, so it is
+    // checked like a new start. Checked again under the row lock below.
+    if (videoCastCheckRequiredAtStart(storyline.status, storyline.pictureSettings)) {
+      assertVideoCastConfirmed(storyline, renderableShots.filter((s) => s.status !== "done"));
     }
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
@@ -731,9 +876,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
         throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
       }
+      // Re-check against the cast as it is under the lock (a cast edit may have
+      // committed since the read above), and mark the film as started under the rule.
+      const castCheck = videoCastCheckRequiredAtStart(locked.status, locked.pictureSettings);
+      if (castCheck) assertVideoCastConfirmed(locked, renderableShots.filter((s) => s.status !== "done"));
       await tx
         .update(videoStorylines)
         .set({
+          ...(castCheck ? { pictureSettings: markCastEnforced() } : {}),
           status: "rendering",
           budgetCapCents: effectiveBudgetCapCents,
           estimatedTotalCents: estimateResult.estimatedTotalCents,
@@ -848,6 +998,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (storyline.budgetCapCents === null) {
       throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
     }
+    // Who is in the shot is a person's choice (see startRender). A re-render only queues this one shot (the film's
+    // status is left alone, DUR-4915), so no chain starts here: this shot is the one checked, again under the lock below.
+    assertVideoCastConfirmed(storyline, [shot]);
     const refundCents = shot.actualCostCents ?? 0;
     // Shots already queued or rendering have not settled into spentCents yet: count what they will cost (DUR-4930).
     const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, shotId);
@@ -891,6 +1044,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
       if (!current) throw conflict("This shot was removed while the re-render was starting.");
       if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
+      // Re-check against the cast as it is under the lock (a cast edit may have committed since the read above).
+      assertVideoCastConfirmed(locked, [current]);
       const lockedRefund = current.actualCostCents ?? 0;
       // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
       // pre-lock check), priced with the same clear rule the update below applies.
@@ -995,6 +1150,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
     }
 
+    assertVideoCastConfirmed(storyline, [shot]);
+
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // DUR-4898: same rating rules as a real render, checked before anything is reserved.
     assertFilmModelAllowed(model, filmContentMode(storyline));
@@ -1073,7 +1230,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: filmVideoPrompt(filmContentMode(storyline), videoShotVideoPrompt(shot.prompt, shot.cameraNotes)),
+      prompt: filmVideoPrompt(filmContentMode(storyline), shotVideoPrompt(storyline, shot)),
       promptRewrite: false,
       model: model ?? undefined,
       startImage,
@@ -1664,6 +1821,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     releaseShotReservation,
     resolveProviderApiKey,
     castVideoInput,
+    assertVideoCastConfirmed,
     downloadResultBytes,
     downloadClipFromStorage,
   };
