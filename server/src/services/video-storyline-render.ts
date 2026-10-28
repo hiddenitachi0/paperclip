@@ -11,7 +11,12 @@ import {
   estimateVideoStorylineCostCents,
   readVideoStorylineCast,
   videoRenderDurationSeconds,
+  videoCastCheckRequiredAtStart,
   videoShotCast,
+  VIDEO_CAST_ENFORCED_KEY,
+  unconfirmedVideoCastMessage,
+  unconfirmedVideoCastShots,
+  videoShotOnlyCastLine,
   videoShotVideoPrompt,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
@@ -336,6 +341,33 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return rows.length > 0 ? rows[rows.length - 1]! : null;
   }
 
+  /** The video text of a shot: description and camera notes, plus the "only these people" line when its cast is confirmed. */
+  function shotVideoPrompt(storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect): string {
+    const base = videoShotVideoPrompt(shot.prompt, shot.cameraNotes);
+    const line = videoShotOnlyCastLine(shot, readVideoStorylineCast(storyline.pictureSettings));
+    return line ? `${base}\n\n${line}` : base;
+  }
+
+  /**
+   * Refuses a paid call that would send a linked person's pictures for shots
+   * nobody has confirmed the cast for (castVideoInput would otherwise guess
+   * from names in the text). Used by every entry point other than the render
+   * chain itself (startRender checks its own list; the chain and a paused
+   * film's resume deliberately skip it, see startRender).
+   */
+  function assertVideoCastConfirmed(
+    storyline: typeof videoStorylines.$inferSelect,
+    shots: ReadonlyArray<{ id: string; orderIndex: number }>,
+  ): void {
+    const unconfirmed = unconfirmedVideoCastShots(readVideoStorylineCast(storyline.pictureSettings), shots);
+    if (unconfirmed.length > 0) throw unprocessable(unconfirmedVideoCastMessage(unconfirmed.map((s) => s.orderIndex + 1)));
+  }
+
+  /** SQL for picture_settings with the cast-rule marker added, leaving the rest of the column as it is under the lock. */
+  function markCastEnforced() {
+    return sql`coalesce(${videoStorylines.pictureSettings}, '{}'::jsonb) || ${JSON.stringify({ [VIDEO_CAST_ENFORCED_KEY]: true })}::jsonb` as unknown as typeof videoStorylines.$inferSelect["pictureSettings"];
+  }
+
   /**
    * The shot's linked cast members' pictures for the video call: per person
    * the face crop, the canonical render and the body crop (the approved
@@ -516,7 +548,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const input: MediaJobInput = {
       kind: "video",
       // Camera notes go with the description (they used to be dropped).
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      prompt: shotVideoPrompt(storyline, shot),
       // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
       promptRewrite: false,
       model: model ?? undefined,
@@ -743,6 +775,18 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict(RENDER_IN_FLIGHT_MESSAGE);
     }
 
+    // Who is in a shot is a person's choice, not a guess from names in the
+    // text: a film with a person linked to its cast needs every shot still to
+    // render confirmed first. Only here, at start -- never in beginShotRender,
+    // so a film that is rendering (the chain continues) finishes normally. A
+    // paused film is exempt only when it predates this rule (no marker, see
+    // VIDEO_CAST_ENFORCED_KEY): one that was started under the rule and paused
+    // since (budget cap, failed shot) may have gained shots or cast, so it is
+    // checked like a new start. Checked again under the row lock below.
+    if (videoCastCheckRequiredAtStart(storyline.status, storyline.pictureSettings)) {
+      assertVideoCastConfirmed(storyline, renderableShots.filter((s) => s.status !== "done"));
+    }
+
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
     // still needs to render must already be approved. Checked here, upfront
     // for the WHOLE storyline, rather than relying solely on
@@ -828,9 +872,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
         throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
       }
+      // Re-check against the cast as it is under the lock (a cast edit may have
+      // committed since the read above), and mark the film as started under the rule.
+      const castCheck = videoCastCheckRequiredAtStart(locked.status, locked.pictureSettings);
+      if (castCheck) assertVideoCastConfirmed(locked, renderableShots.filter((s) => s.status !== "done"));
       await tx
         .update(videoStorylines)
         .set({
+          ...(castCheck ? { pictureSettings: markCastEnforced() } : {}),
           status: "rendering",
           budgetCapCents: effectiveBudgetCapCents,
           estimatedTotalCents: estimateResult.estimatedTotalCents,
@@ -945,6 +994,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (storyline.budgetCapCents === null) {
       throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
     }
+    // Who is in the shot is a person's choice (see startRender). A re-render only queues this one shot (the film's
+    // status is left alone, DUR-4915), so no chain starts here: this shot is the one checked, again under the lock below.
+    assertVideoCastConfirmed(storyline, [shot]);
     const refundCents = shot.actualCostCents ?? 0;
     // Shots already queued or rendering have not settled into spentCents yet: count what they will cost (DUR-4930).
     const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, shotId);
@@ -988,6 +1040,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
       if (!current) throw conflict("This shot was removed while the re-render was starting.");
       if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
+      // Re-check against the cast as it is under the lock (a cast edit may have committed since the read above).
+      assertVideoCastConfirmed(locked, [current]);
       const lockedRefund = current.actualCostCents ?? 0;
       // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
       // pre-lock check), priced with the same clear rule the update below applies.
@@ -1092,6 +1146,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
     }
 
+    assertVideoCastConfirmed(storyline, [shot]);
+
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // The shortest clip this model will actually make (1s for a model that
     // takes any length, 5s for Fal's Kling models, which refuse 1s).
@@ -1165,7 +1221,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      prompt: shotVideoPrompt(storyline, shot),
       promptRewrite: false,
       model: model ?? undefined,
       startImage,
@@ -1699,6 +1755,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     releaseShotReservation,
     resolveProviderApiKey,
     castVideoInput,
+    assertVideoCastConfirmed,
     downloadResultBytes,
     downloadClipFromStorage,
   };

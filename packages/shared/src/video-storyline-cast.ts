@@ -186,3 +186,69 @@ export function videoShotCast(
   const text = [shot.prompt, shot.cameraNotes ?? ""].join("\n");
   return { castIds: detectVideoShotCast(text, cast.members, identityNames), picked: false };
 }
+
+/**
+ * picture_settings key set by the server when a render chain is started under
+ * the rule "each shot still to render has its cast confirmed" (startRender or a
+ * re-render that starts the chain). A paused film WITHOUT it was already
+ * rendering or paused when the rule shipped, so resuming it is exempt (it
+ * finishes as before); a paused film WITH it must pass the check again,
+ * because shots, cast and approvals can change while it is paused. Never
+ * accepted from a client (the picture settings schema is strict) and never
+ * returned to one.
+ */
+export const VIDEO_CAST_ENFORCED_KEY = "castConfirmationEnforced";
+
+/** True when a render chain was started under the cast-confirmation rule (see VIDEO_CAST_ENFORCED_KEY). */
+export function videoCastConfirmationEnforced(pictureSettings: unknown): boolean {
+  if (!pictureSettings || typeof pictureSettings !== "object") return false;
+  return (pictureSettings as Record<string, unknown>)[VIDEO_CAST_ENFORCED_KEY] === true;
+}
+
+/**
+ * Must starting or resuming a render of a film in `status` check the cast?
+ * Everything except a paused film that predates the rule.
+ */
+export function videoCastCheckRequiredAtStart(status: string, pictureSettings: unknown): boolean {
+  return status !== "paused" || videoCastConfirmationEnforced(pictureSettings);
+}
+
+/** Does the film have at least one cast member linked to a saved person? Only then must each shot's cast be confirmed. */
+export function videoCastHasLinkedPeople(cast: Pick<VideoStorylineCast, "members">): boolean {
+  return cast.members.some((m) => !!m.identityId);
+}
+
+/**
+ * The shots whose cast nobody has confirmed: films with a linked person need
+ * a person's own pick (`shotCast[shotId]`, even an empty one = nobody) for
+ * every shot, not a guess from names in the text. Empty when the film has no
+ * linked people. In the order given.
+ */
+export function unconfirmedVideoCastShots<T extends { id: string }>(cast: VideoStorylineCast, shots: readonly T[]): T[] {
+  if (!videoCastHasLinkedPeople(cast)) return [];
+  return shots.filter((s) => !Object.prototype.hasOwnProperty.call(cast.shotCast, s.id));
+}
+
+/** "Confirm who is in shot 4 first." / "shots 4 and 7" / "shots 1, 4 and 7". `shotNumbers` are the shots' 1-based positions. */
+export function unconfirmedVideoCastMessage(shotNumbers: readonly number[]): string {
+  const nums = shotNumbers.map(String);
+  if (nums.length === 0) return "";
+  const list = nums.length === 1 ? nums[0]! : `${nums.slice(0, -1).join(", ")} and ${nums[nums.length - 1]}`;
+  return `Confirm who is in ${nums.length === 1 ? "shot" : "shots"} ${list} first. Open the Cast step in the storyboard and confirm the people in each shot.`;
+}
+
+/**
+ * The prompt line that keeps a shot to the people picked for it, built from
+ * the confirmed cast only. "" when the film has no linked people or the shot
+ * is not confirmed (a film that was already rendering or paused when
+ * confirmation became mandatory keeps working as before).
+ */
+export function videoShotOnlyCastLine(shot: { id: string }, cast: VideoStorylineCast): string {
+  if (!videoCastHasLinkedPeople(cast)) return "";
+  const picked = cast.shotCast[shot.id];
+  if (!picked) return "";
+  const names = picked.map((id) => cast.members.find((m) => m.id === id)?.name).filter((n): n is string => !!n);
+  if (names.length === 0) return "No people appear in this shot.";
+  const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `Only ${names.length === 1 ? "this person is" : "these people are"} in this shot: ${list}. Nobody else.`;
+}
