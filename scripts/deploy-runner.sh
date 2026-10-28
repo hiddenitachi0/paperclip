@@ -531,6 +531,31 @@ sftp_port = ""
 sftp_username = ""
 sftp_remote_path = ""
 sftp_allowlist = ""
+sftp_exclude = ""
+sftp_host_key_sha256 = ""
+
+
+def sftp_path_problem(entry):
+    """Why a deployPolicy SFTP path (allowlist or exclude entry) is unusable, or None.
+
+    Same rules as describeSftpPathProblem in deploy-policy-validation.ts. A
+    trailing "/" marks a whole folder. Excludes are compared as exact strings
+    against what git tracks, so a path that is not in its plain normal form
+    would silently fail to exclude anything -- refuse it instead.
+    """
+    if entry.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", entry):
+        return "an absolute path"
+    if re.search(r"""\s|['"\\]""", entry):
+        return "whitespace, a quote or a backslash in it"
+    if re.search(r"[%#?\[\]{}]", entry):
+        return "a percent sign, #, ?, square bracket or curly brace in it (curl would read it as part of the URL, not as a file name)"
+    body = entry[:-1] if entry.endswith("/") else entry
+    segments = body.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return 'an empty, "." or ".." segment'
+    return None
+
+
 if deploy_transport == "sftp":
     sftp_host = (policy.get("sftpHost") or "").strip()
     if not sftp_host:
@@ -555,11 +580,28 @@ if deploy_transport == "sftp":
     # written by anything other than the API, is not proof of anything.
     # Never a wildcard/whole-tree upload either: only these exact entries.
     for entry in allowlist_entries:
-        segments = re.split(r"[\\/]", entry)
-        if entry.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", entry) or any(seg == ".." for seg in segments):
-            print(f"deploy_policy.sftpAllowlist entry {entry!r} is not a safe relative path", file=sys.stderr)
+        problem = sftp_path_problem(entry)
+        if problem:
+            print(f"deploy_policy.sftpAllowlist entry {entry!r} is not a safe relative path ({problem})", file=sys.stderr)
             sys.exit(1)
     sftp_allowlist = "\n".join(allowlist_entries)
+    # DUR-4977: sftpExclude is removed from the resolved allowlist (see
+    # sftp_expand_allowlist). A bad entry is refused, never skipped: skipping
+    # one would ship exactly the files the operator meant to keep off the site.
+    exclude_entries = [str(entry).strip() for entry in (policy.get("sftpExclude") or []) if str(entry).strip()]
+    for entry in exclude_entries:
+        problem = sftp_path_problem(entry)
+        if problem:
+            print(f"deploy_policy.sftpExclude entry {entry!r} is not a safe relative path ({problem})", file=sys.stderr)
+            sys.exit(1)
+    sftp_exclude = "\n".join(exclude_entries)
+    # DUR-4977: pin for the host's public key, handed to curl as
+    # --hostpubsha256 on every SFTP call. Required: without it the credential
+    # would be offered to whatever answers on the address.
+    sftp_host_key_sha256 = (policy.get("sftpHostKeySha256") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9+/]{43}=?", sftp_host_key_sha256):
+        print("deploy_policy.sftpHostKeySha256 is empty or not a base64 SHA-256 (43 characters, no SHA256: prefix)", file=sys.stderr)
+        sys.exit(1)
     if not requesting_agent_id:
         print("deploy_policy.requestingAgentId is empty -- required to resolve the SFTP credential", file=sys.stderr)
         sys.exit(1)
@@ -588,6 +630,8 @@ fields = {
     "DV_SFTP_USERNAME": sftp_username,
     "DV_SFTP_REMOTE_PATH": sftp_remote_path,
     "DV_SFTP_ALLOWLIST": sftp_allowlist,
+    "DV_SFTP_EXCLUDE": sftp_exclude,
+    "DV_SFTP_HOST_KEY_SHA256": sftp_host_key_sha256,
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(value)}")
@@ -1444,8 +1488,20 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
 # when THIS function returns, not when the caller does, and would delete the
 # credential material before the caller ever uses it. The caller must set
 # `trap "rm -rf '$tmp_dir'" RETURN` itself immediately after a successful call.
-sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_id -> 0 ok (curl_auth_args[] + tmp_dir set in caller scope), 1 failed (nothing created)
-  local aid="$1" host="$2" username="$3" requesting_agent_id="$4" company_id="$5"
+#
+# DUR-4977: also appends the host-key pin (curl --hostpubsha256) to
+# curl_auth_args, so every curl call in this file that already carries the
+# auth args carries the pin too -- there is no SFTP call without it. Refuses
+# to resolve (and so never reads the credential) when the pin is missing or
+# malformed: without it the key would be handed to whatever answers on the
+# address.
+sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_id, host_key_sha256 -> 0 ok (curl_auth_args[] + tmp_dir set in caller scope), 1 failed (nothing created)
+  local aid="$1" host="$2" username="$3" requesting_agent_id="$4" company_id="$5" host_key_sha256="${6:-}"
+
+  if ! [[ "$host_key_sha256" =~ ^[A-Za-z0-9+/]{43}=?$ ]]; then
+    log "runner: $aid SFTP host key pin (deployPolicy.sftpHostKeySha256) is missing or is not a base64 SHA-256 (43 characters, no SHA256: prefix) -- refusing to open an SFTP connection, the credential was not read"
+    return 1
+  fi
 
   local cred_json kind value
   cred_json="$(cli_json secrets deploy-sftp-credential -C "$company_id" -A "$requesting_agent_id" 2>>"$LOG")" || {
@@ -1476,13 +1532,17 @@ sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_
       curl_auth_args=(--netrc-file "$netrc_file")
       ;;
     sftp_private_key)
-      # HANDOFF: preferred over a password where the host supports it, but
-      # curl/libssh2 key-auth setups vary (some builds want an explicit
-      # --pubkey alongside --key) -- flag to an operator switching to this if
-      # uploads fail with an auth error despite a correct key.
       printf '%s\n' "$value" >"$key_file"
       chmod 600 "$key_file"
       curl_auth_args=(--user "$username:" --key "$key_file")
+      # DUR-4977: proven against a local sshd (restrict,command="internal-sftp")
+      # with an ed25519 key: curl 8.14 / libssh2 1.11 authenticates with --key
+      # alone. Older libssh2 builds need the public half as well, so derive it
+      # when ssh-keygen is here; it is best-effort and never fatal, because
+      # curl without --pubkey is also valid.
+      if command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -y -P "" -f "$key_file" >"$tmp_dir/id_key.pub" 2>/dev/null </dev/null && [ -s "$tmp_dir/id_key.pub" ]; then
+        curl_auth_args+=(--pubkey "$tmp_dir/id_key.pub")
+      fi
       ;;
     *)
       log "runner: $aid SFTP credential bound to agent $requesting_agent_id has an unrecognized kind ($kind)"
@@ -1490,6 +1550,7 @@ sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_
       return 1
       ;;
   esac
+  curl_auth_args+=(--hostpubsha256 "$host_key_sha256")
   return 0
 }
 
@@ -1509,7 +1570,7 @@ sftp_quote_mkdir_p() { # reldir, host, port, remote_path -> best-effort, relies 
   for segment in "${segs[@]}"; do
     [ -n "$segment" ] || continue
     accum="$accum/$segment"
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "mkdir $remote_path$accum" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "mkdir $remote_path$accum" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
   done
 }
 
@@ -1520,12 +1581,163 @@ sftp_quote_mkdir_p() { # reldir, host, port, remote_path -> best-effort, relies 
 # Never allowed to affect the function's own exit status -- a stray leftover
 # staging file is a cosmetic problem, not a reason to report a deploy that
 # otherwise succeeded as failed.
+#
+# DUR-4977: staging lives inside the served docroot (<remote_path>/
+# .deploy-staging/<id>/), so this has to leave nothing behind: every file that
+# was attempted (including one whose upload failed half way, which curl may
+# have left on the host), then every directory the staged paths created,
+# deepest first, then the per-run folder, then .deploy-staging itself (the
+# last rmdir just fails, harmlessly, if another run's staging is inside it).
+# rmdir is not recursive, so a folder that still holds something is left, not
+# deleted.
 sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
-  local aid="$1" staging_dir="$2" host="$3" port="$4" remote_path="$5" entry
+  local aid="$1" staging_dir="$2" host="$3" port="$4" remote_path="$5" entry dir
+  local base="sftp://$host:$port$remote_path/"
   for entry in "${staged_entries[@]}"; do
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $staging_dir/$entry" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $staging_dir/$entry" "$base" >/dev/null 2>>"$LOG"
   done
-  curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+  # Every parent directory of every attempted entry, deepest first.
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && [ "$dir" != "." ] || continue
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir/$dir" "$base" >/dev/null 2>>"$LOG"
+  done < <(
+    for entry in "${staged_entries[@]}"; do
+      dir="$(dirname "$entry")"
+      while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+        printf '%s\n' "$dir"
+        dir="$(dirname "$dir")"
+      done
+    done | LC_ALL=C sort -u | awk '{ print gsub("/", "/") " " $0 }' | sort -rn | cut -d' ' -f2-
+  )
+  curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir" "$base" >/dev/null 2>>"$LOG"
+  curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $remote_path/.deploy-staging" "$base" >/dev/null 2>>"$LOG"
+}
+
+# DUR-4977: shape check for a repo-relative SFTP path (one optional trailing
+# "/" marks a folder): not empty, not absolute, and no "", "." or ".." segment.
+# Excludes are compared as exact strings against what git tracks, so a path
+# that is not in plain normal form would silently exclude nothing.
+sftp_path_shape_ok() { # path -> 0 ok, 1 not a plain relative path
+  local p="$1" body
+  case "$p" in ""|/*|[A-Za-z]:[\\/]*) return 1 ;; esac
+  # % # ? [ ] { } : curl builds sftp://host/path from the name and reads them as URL
+  # syntax ("%2e%2e" is a dot segment, "#"/"?" cut the path short), so the file
+  # would land somewhere other than the name the policy checked.
+  case "$p" in *[]%#?[{}]*) return 1 ;; esac
+  body="${p%/}"
+  [ -n "$body" ] || return 1
+  case "/$body/" in *//*|*/./*|*/../*) return 1 ;; esac
+  return 0
+}
+
+# DUR-4977: turns the policy's sftpAllowlist + sftpExclude into the exact list
+# of files to upload, one per line on stdout (sorted, de-duplicated).
+#   - an entry ending in "/" means every file git TRACKS under that folder in
+#     the checkout at target_dir (`git ls-files`), never the working tree, so an
+#     untracked or ignored file can never ship;
+#   - any other entry is one file, as before;
+#   - sftpExclude entries (an exact file, or a folder ending in "/") are then
+#     removed from that set.
+# Fails closed -- non-zero exit, nothing on stdout -- when an exclude or a
+# folder entry is not a plain relative path (whitespace/quote characters
+# included: the swap puts every path in a curl quote command that cannot
+# escape them), when a folder entry tracks no file at all (a typo that would
+# otherwise ship a partial site), when git cannot list, or when nothing is
+# left to upload. Per-file checks for whitespace/quotes/symlinks stay in
+# upload_via_sftp, run on every resolved file.
+sftp_expand_allowlist() { # aid, target_dir, allowlist(newline), excludes(newline) -> stdout: files to upload; 0 ok, 1 refused
+  local aid="$1" target_dir="$2" allowlist="$3" excludes="$4"
+  local entry name x listing_file excluded
+  local -a exclude_files=() exclude_dirs=() resolved=() names=()
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! sftp_path_shape_ok "$entry" || [[ "$entry" == *[[:space:]\'\"\\]* ]]; then
+      log "runner: $aid SFTP exclude entry '$entry' is not a plain relative path -- refusing the deploy rather than guessing what to leave out"
+      return 1
+    fi
+    case "$entry" in
+      */) exclude_dirs+=("$entry") ;;
+      *) exclude_files+=("$entry") ;;
+    esac
+  done <<<"$excludes"
+
+  listing_file="$(mktemp)" || { log "runner: $aid could not create a temp file to list tracked files"; return 1; }
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! sftp_path_shape_ok "$entry"; then
+      log "runner: $aid SFTP allowlist entry '$entry' is not a plain relative path -- refusing the deploy"
+      rm -f "$listing_file"
+      return 1
+    fi
+    case "$entry" in
+      */)
+        if [[ "$entry" == *[[:space:]\'\"\\]* ]]; then
+          log "runner: $aid SFTP allowlist folder '$entry' contains whitespace, a quote or a backslash -- refusing the deploy"
+          rm -f "$listing_file"
+          return 1
+        fi
+        # --literal-pathspecs: the folder name is a path, never a pathspec
+        # (no ":(glob)" magic, no wildcards).
+        if ! git --literal-pathspecs -C "$target_dir" ls-files -z -- "$entry" >"$listing_file" 2>>"$LOG"; then
+          log "runner: $aid could not list the files git tracks under '$entry' in $target_dir"
+          rm -f "$listing_file"
+          return 1
+        fi
+        names=()
+        mapfile -d '' -t names <"$listing_file"
+        if [ "${#names[@]}" -eq 0 ]; then
+          log "runner: $aid SFTP allowlist folder '$entry' has no file tracked by git at the approved commit -- refusing the deploy (a typo here would ship a partial site)"
+          rm -f "$listing_file"
+          return 1
+        fi
+        for name in ${names[@]+"${names[@]}"}; do
+          case "$name" in
+            *$'\n'*)
+              log "runner: $aid a tracked file under '$entry' has a newline in its name -- refusing the deploy"
+              rm -f "$listing_file"
+              return 1
+              ;;
+          esac
+          resolved+=("$name")
+        done
+        ;;
+      *) resolved+=("$entry") ;;
+    esac
+  done <<<"$allowlist"
+  rm -f "$listing_file"
+
+  local kept=0 excluded_count=0
+  local -a final=()
+  for name in ${resolved[@]+"${resolved[@]}"}; do
+    excluded=0
+    for x in ${exclude_files[@]+"${exclude_files[@]}"}; do
+      [ "$name" = "$x" ] && { excluded=1; break; }
+    done
+    if [ "$excluded" -eq 0 ]; then
+      for x in ${exclude_dirs[@]+"${exclude_dirs[@]}"}; do
+        case "$name" in "$x"*) excluded=1; break ;; esac
+      done
+    fi
+    if [ "$excluded" -eq 1 ]; then
+      excluded_count=$((excluded_count + 1))
+    else
+      # Checked only for files that would ship, so an operator can exclude one.
+      case "$name" in
+        *[]%#?[{}]*)
+          log "runner: $aid a tracked file to upload has a percent sign, #, ?, [ ] or { } in its name ($name) -- refusing the deploy; exclude or rename it"
+          return 1
+          ;;
+      esac
+      final+=("$name")
+    fi
+  done
+  if [ "${#final[@]}" -eq 0 ]; then
+    log "runner: $aid SFTP allowlist resolved to no files to upload (after $excluded_count exclusion(s)) -- refusing the deploy"
+    return 1
+  fi
+  log "runner: $aid SFTP allowlist resolved to ${#final[@]} file(s) ($excluded_count excluded)"
+  printf '%s\n' "${final[@]}" | LC_ALL=C sort -u
 }
 
 # DUR-4068/DUR-4236: the sftp-transport counterpart to run_recipe above. Used
@@ -1554,18 +1766,31 @@ sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
 # question of whether this project's actual SFTP provider supports these
 # quote commands (rename/mkdir/rm) at all -- that is unverified from this repo
 # and flagged for Filip.
-upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative paths), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok, 1 failed
-  local aid="$1" target_dir="$2" allowlist="$3" host="$4" port="$5" username="$6" remote_path="$7" requesting_agent_id="$8" company_id="$9"
+#
+# DUR-4977: the allowlist may name whole folders (an entry ending in "/" is
+# every file git tracks there) and excludes remove paths from the result --
+# see sftp_expand_allowlist. Every curl call below carries the host-key pin
+# (--hostpubsha256, via curl_auth_args). Refuses a symlink, tracked or not:
+# curl -T follows it, so a link inside the repo would publish whatever file on
+# the runner it points at.
+upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative paths or folders ending in /), host, port, username, remote_path, requesting_agent_id, company_id, host_key_sha256, excludes(newline-separated) -> 0 ok, 1 failed
+  local aid="$1" target_dir="$2" allowlist="$3" host="$4" port="$5" username="$6" remote_path="$7" requesting_agent_id="$8" company_id="$9" host_key_sha256="${10:-}" excludes="${11:-}"
+
+  # Resolved before the credential is read: an unsafe policy never gets as far
+  # as holding the key.
+  allowlist="$(sftp_expand_allowlist "$aid" "$target_dir" "$allowlist" "$excludes")" || return 1
 
   local -a curl_auth_args=()
   local tmp_dir=""
-  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" || return 1
+  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" "$host_key_sha256" || return 1
   # shellcheck disable=SC2064 -- intentionally expanding $tmp_dir now, not at trap time
   trap "rm -rf '$tmp_dir'" RETURN
 
   local staging_dir="$remote_path/.deploy-staging/$aid"
   local entry local_path staged_target failures=0 staged=0
   local -a staged_entries=()
+  local real_target_dir
+  real_target_dir="$(realpath "$target_dir" 2>/dev/null)"
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     # DUR-4236 follow-up: the swap loop below feeds $entry into curl's -Q quote
@@ -1581,17 +1806,42 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
         failures=$((failures + 1))
         continue
         ;;
+      *[]%#?[{}]*)
+        log "runner: $aid SFTP allowlist entry '$entry' contains a percent sign, #, ?, [ ], or { } -- curl would read it as URL syntax and could stage it outside the staging folder or leave it in the live docroot, so it is refused"
+        failures=$((failures + 1))
+        continue
+        ;;
     esac
     local_path="$target_dir/$entry"
+    # A link at the file itself, or in any directory above it (an explicit
+    # file entry can reach through a tracked directory symlink), would make
+    # curl publish something outside the checkout: the resolved path must stay
+    # inside it. Fails closed if realpath is unavailable.
+    if [ -L "$local_path" ] || [ -z "$real_target_dir" ]; then
+      log "runner: $aid SFTP allowlist entry $entry is a symlink -- refusing to upload it (curl would follow the link and publish its target)"
+      failures=$((failures + 1))
+      continue
+    fi
+    case "$(realpath "$local_path" 2>/dev/null)" in
+      "$real_target_dir"/*) ;;
+      *)
+        log "runner: $aid SFTP allowlist entry $entry resolves outside $target_dir through a symlinked directory -- refusing to upload it"
+        failures=$((failures + 1))
+        continue
+        ;;
+    esac
     if [ ! -f "$local_path" ]; then
       log "runner: $aid SFTP allowlist entry $entry does not exist in $target_dir -- nothing uploaded for it"
       failures=$((failures + 1))
       continue
     fi
     staged_target="sftp://$host:$port$staging_dir/$entry"
-    if curl -sS --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$staged_target" 2>>"$LOG"; then
+    # Recorded BEFORE the transfer: a failed -T can leave a partial file in the
+    # staging folder, and the cleanup must remove it too. (The swap only runs
+    # when no upload failed, so every recorded entry is a complete one by then.)
+    staged_entries+=("$entry")
+    if curl -sS --globoff --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$staged_target" 2>>"$LOG"; then
       staged=$((staged + 1))
-      staged_entries+=("$entry")
     else
       log "runner: $aid SFTP staging upload of $entry to $staged_target failed"
       failures=$((failures + 1))
@@ -1616,10 +1866,10 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
     # $dest directly. A failure here just means there was nothing at $dest yet
     # (a brand new file), which is the common case for a project's first
     # deploy or a newly added path -- not swallowed, just not fatal.
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
-    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $staged_target $dest" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $staged_target $dest" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
       swapped=$((swapped + 1))
-      curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+      curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
     else
       log "runner: $aid SFTP swap of staged $entry into $dest failed -- restoring the previous file at $dest if there was one"
       swap_failures=$((swap_failures + 1))
@@ -1632,9 +1882,9 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
       # exit, but harmless) by checking afterward whether $dest.deploy-bak is
       # still there: if the restore rename actually ran and failed, the
       # .deploy-bak file is still sitting where it was, unmoved.
-      if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+      if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
         :
-      elif curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "ls $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+      elif curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "ls $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
         log "runner: $aid SFTP restore of the previous file at $dest FAILED -- $dest is now MISSING on the live site (the old version is still at $dest.deploy-bak and must be renamed back manually)"
         swap_missing=$((swap_missing + 1))
       fi
@@ -1683,14 +1933,14 @@ sftp_added_entries() { # target_dir, allowlist(newline-separated), before_commit
 # rather than attempted -- the allowlist is operator-configured, not
 # agent-controlled, but curl's quote-command string is whitespace-tokenized
 # with no escaping, so a stray space could delete the wrong path.
-sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok (incl. nothing to do), 1 some deletion failed
-  local aid="$1" entries="$2" host="$3" port="$4" username="$5" remote_path="$6" requesting_agent_id="$7" company_id="$8"
+sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, remote_path, requesting_agent_id, company_id, host_key_sha256 -> 0 ok (incl. nothing to do), 1 some deletion failed
+  local aid="$1" entries="$2" host="$3" port="$4" username="$5" remote_path="$6" requesting_agent_id="$7" company_id="$8" host_key_sha256="${9:-}"
   entries="$(printf '%s\n' "$entries" | sed '/^[[:space:]]*$/d')"
   [ -n "$entries" ] || return 0
 
   local -a curl_auth_args=()
   local tmp_dir=""
-  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" || return 1
+  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" "$host_key_sha256" || return 1
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp_dir'" RETURN
 
@@ -1698,13 +1948,13 @@ sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, re
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
-      *[[:space:]]*|*\'*|*\"*)
-        log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote characters: $entry"
+      *[[:space:]]*|*\'*|*\"*|*[]%#?[{}]*)
+        log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote/URL-special characters: $entry"
         failures=$((failures + 1))
         continue
         ;;
     esac
-    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $remote_path/$entry" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+    if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $remote_path/$entry" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
       removed=$((removed + 1))
     else
       log "runner: $aid could not remove $remote_path/$entry from the SFTP host while cleaning up a rolled-back release -- it may need manual removal"
@@ -2046,12 +2296,14 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # exist locally to compare against git history.
   local sftp_added_entries_list=""
   if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
-    sftp_added_entries_list="$(sftp_added_entries "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$before_commit")"
+    # DUR-4977: folder entries are expanded to the files they mean first; the
+    # resolved list is what sftp_added_entries compares to git history.
+    sftp_added_entries_list="$(sftp_added_entries "$DV_DEPLOY_TARGET_PATH" "$(sftp_expand_allowlist "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_EXCLUDE" 2>/dev/null)" "$before_commit")"
   fi
 
   local recipe_status
   if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
-    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
+    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id" "$DV_SFTP_HOST_KEY_SHA256" "$DV_SFTP_EXCLUDE"
     recipe_status=$?
   else
     run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
@@ -2197,7 +2449,7 @@ maybe_rollback() { # approval_id, before_commit, after_commit, sftp_added_entrie
   git -C "$DV_DEPLOY_TARGET_PATH" reset --hard --quiet "$before" 2>>"$LOG"
   local rollback_status
   if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
-    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
+    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id" "$DV_SFTP_HOST_KEY_SHA256" "$DV_SFTP_EXCLUDE"
     rollback_status=$?
     # DUR-4236: the re-upload above only overwrites files that exist in both
     # versions. Anything the failed release added that $before never had must
@@ -2207,7 +2459,7 @@ maybe_rollback() { # approval_id, before_commit, after_commit, sftp_added_entrie
     # read as "the rollback recipe failed" (which restart/health-check logic
     # elsewhere treats as leaving the running version untouched/broken).
     if [ -n "$added_entries" ]; then
-      sftp_remove_remote_entries "$aid" "$added_entries" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id" \
+      sftp_remove_remote_entries "$aid" "$added_entries" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id" "$DV_SFTP_HOST_KEY_SHA256" \
         || log "runner: $aid rollback left at least one file the failed release added still live on the SFTP host — see the lines above for which path(s)"
     fi
   else

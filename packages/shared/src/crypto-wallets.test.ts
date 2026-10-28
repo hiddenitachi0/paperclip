@@ -4,7 +4,9 @@ import {
   DEFAULT_CRYPTO_AGENT_LIMITS,
   DEFAULT_CRYPTO_WALLET_LIMITS,
   CRYPTO_CHAIN_INFO,
+  CRYPTO_FAUCET_HINTS_AS_OF,
   createCryptoWalletSchema,
+  cryptoPaymentLink,
   cryptoAgentLimitsSchema,
   formatCryptoAmount,
   looksLikeCryptoAddress,
@@ -78,5 +80,27 @@ describe("crypto wallet validators", () => {
 
   it("never lets a wallet key be bound to an agent's environment", () => {
     expect(isSecretKindBindable("crypto_wallet_key")).toBe(false);
+  });
+});
+
+describe("test-network funding hints and payment links", () => {
+  it("dates the faucet hints and covers every network", () => {
+    expect(CRYPTO_FAUCET_HINTS_AS_OF).toBe("27 Oct 2026");
+    expect(CRYPTO_CHAIN_INFO.bitcoin.testnetFaucetHint).toContain("coinfaucet.eu");
+    expect(CRYPTO_CHAIN_INFO.bitcoin.testnetFaucetNotes.join(" ")).toContain("alt.signetfaucet.com");
+    expect(CRYPTO_CHAIN_INFO.ethereum.testnetFaucetHint).toContain("pk910");
+    expect(CRYPTO_CHAIN_INFO.ethereum.testnetFaucetNotes.join(" ")).toContain("Never use a faucet that needs real ETH");
+    expect(CRYPTO_CHAIN_INFO.hyperliquid.testnetFaucetHint).toContain("no-real-money rule");
+    expect(CRYPTO_CHAIN_INFO.solana.testnetFaucetHint).toContain("forbids AI agents");
+  });
+
+  it("names the network in payment links", () => {
+    const eth = "0x1111111111111111111111111111111111111111";
+    expect(cryptoPaymentLink("ethereum", "testnet", eth)).toBe(`ethereum:${eth}@11155111`);
+    expect(cryptoPaymentLink("ethereum", "mainnet", eth)).toBe(`ethereum:${eth}@1`);
+    expect(cryptoPaymentLink("bitcoin", "testnet", "tb1qabc")).toBe("bitcoin:tb1qabc?label=TEST%20NETWORK%20ONLY");
+    expect(cryptoPaymentLink("bitcoin", "mainnet", "bc1qabc")).toBe("bitcoin:bc1qabc");
+    expect(cryptoPaymentLink("solana", "testnet", "x")).toBeNull();
+    expect(cryptoPaymentLink("hyperliquid", "testnet", eth)).toBeNull();
   });
 });

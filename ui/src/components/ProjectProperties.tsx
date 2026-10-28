@@ -64,6 +64,8 @@ function toDeployDraft(deployPolicy: ProjectDeployPolicy | null | undefined) {
     sftpUsername: deployPolicy?.sftpUsername ?? "",
     sftpRemotePath: deployPolicy?.sftpRemotePath ?? "",
     sftpAllowlist: deployPolicy?.sftpAllowlist ?? [],
+    sftpExclude: deployPolicy?.sftpExclude ?? [],
+    sftpHostKeySha256: deployPolicy?.sftpHostKeySha256 ?? "",
     ...(deployPolicy?.mirrorBranch ? { mirrorBranch: deployPolicy.mirrorBranch } : {}),
   };
 }
@@ -121,6 +123,8 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     sftpUsername,
     sftpRemotePath,
     sftpAllowlist,
+    sftpExclude,
+    sftpHostKeySha256,
     ...rest
   } = draft;
   return {
@@ -139,6 +143,8 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     ...(sftpUsername.trim() ? { sftpUsername: sftpUsername.trim() } : {}),
     ...(sftpRemotePath.trim() ? { sftpRemotePath: sftpRemotePath.trim() } : {}),
     ...(sftpAllowlist.length > 0 ? { sftpAllowlist } : {}),
+    ...(sftpExclude.length > 0 ? { sftpExclude } : {}),
+    ...(sftpHostKeySha256.trim() ? { sftpHostKeySha256: sftpHostKeySha256.trim() } : {}),
   };
 }
 
@@ -203,7 +209,9 @@ export type ProjectConfigFieldKey =
   | "deploy_sftp_port"
   | "deploy_sftp_username"
   | "deploy_sftp_remote_path"
-  | "deploy_sftp_allowlist";
+  | "deploy_sftp_allowlist"
+  | "deploy_sftp_exclude"
+  | "deploy_sftp_host_key_sha256";
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -1809,7 +1817,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     <div>
                       <div className="mb-1 flex items-center gap-1.5">
                         <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>Files allowed to upload (comma-separated)</span>
+                          <span>Files and folders allowed to upload (comma-separated)</span>
                           <SaveIndicator state={fieldState("deploy_sftp_allowlist")} />
                         </label>
                       </div>
@@ -1818,13 +1826,58 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                         onCommit={(value) =>
                           commitDeployField("deploy_sftp_allowlist", { sftpAllowlist: splitCommaList(value) })}
                         className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
-                        placeholder="dist/index.html, dist/assets/app.js"
+                        placeholder="index.html, Apps/, assets/"
                       />
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        Exact paths inside the project folder, no wildcards. There is no whole-tree upload — only
-                        files listed here are ever sent.
+                        Paths inside the project folder, no wildcards. A name ending in / (like Apps/) means every
+                        file the project tracks in that folder at the approved version — files that are not tracked
+                        are never sent. Only what is listed here is ever sent.
                       </p>
                     </div>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>Left out of the upload (comma-separated, optional)</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_exclude")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpExclude.join(", ")}
+                        onCommit={(value) =>
+                          commitDeployField("deploy_sftp_exclude", { sftpExclude: splitCommaList(value) })}
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="Apps/data/, Apps/Turnus/turnus-store.php"
+                      />
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Taken out of the list above. A file name, or a folder name ending in /. A wrong entry blocks
+                        the deploy rather than being skipped.
+                      </p>
+                    </div>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>SFTP host key fingerprint</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_host_key_sha256")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpHostKeySha256}
+                        onCommit={(value) => commitDeployField("deploy_sftp_host_key_sha256", { sftpHostKeySha256: value })}
+                        immediate
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="43 characters, no SHA256: in front"
+                      />
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Required. The deploy only connects to a server showing this key, so the SFTP key cannot be
+                        handed to something else answering on the same address. Get it with{" "}
+                        <code>ssh-keyscan -t ed25519 HOST | ssh-keygen -lf -</code> and copy what comes after SHA256:.
+                      </p>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      The upload is first placed in a <code>.deploy-staging</code> folder inside the remote
+                      directory and removed again after every run. Make sure the website refuses to serve{" "}
+                      <code>.deploy-staging</code> — see the website SFTP deploy guide in the docs.
+                    </p>
                   </div>
                 ) : (
                   <>

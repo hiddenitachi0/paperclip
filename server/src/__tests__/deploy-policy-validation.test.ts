@@ -4,6 +4,7 @@ import { describeDeployPolicyProblems, formatDeployPolicyProblems } from "../ser
 
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
+const PIN = "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8";
 
 const context = {
   workspaces: [
@@ -160,6 +161,7 @@ describe("describeDeployPolicyProblems", () => {
       sftpUsername: "deployer",
       sftpRemotePath: "/var/www/site",
       sftpAllowlist: ["dist/index.html"],
+      sftpHostKeySha256: PIN,
       appHealthCheckPaths: ["/"],
       ...overrides,
     });
@@ -185,6 +187,78 @@ describe("describeDeployPolicyProblems", () => {
 
   it("accepts a complete, enabled sftp policy with a page listed", () => {
     expect(describeDeployPolicyProblems(sftpPolicy(), context, "sftp")).toEqual([]);
+  });
+
+  // DUR-4977: durkan-web ships a whole folder tree, so the allowlist takes
+  // folders ("Apps/") and an exclude list, and the host's key is pinned.
+  it("accepts folder entries and excludes written as plain relative paths", () => {
+    expect(
+      describeDeployPolicyProblems(
+        sftpPolicy({
+          sftpAllowlist: ["index.html", "Apps/", "assets/"],
+          sftpExclude: ["Apps/data/", "Apps/Turnus/turnus-store.php"],
+        }),
+        context,
+        "sftp",
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ["../outside", "a \"..\" segment"],
+    ["/etc/passwd", "an absolute path"],
+    ["C:\\secrets", "an absolute path"],
+    ["Apps//data/", "an empty"],
+    ["./Apps/data/", "an empty"],
+    ["Apps/da ta/", "a space"],
+    ["Apps/da'ta/", "quote"],
+    ["Apps/%2e%2e/data/", "percent sign"],
+    ["Apps/info.php#x", "percent sign"],
+    ["Apps/info.php?x", "percent sign"],
+    ["Apps/{..}/{..}/data/", "curly brace"],
+    ["Apps/[a-b]/", "square bracket"],
+  ])("refuses the exclude entry %j", (entry, reason) => {
+    const problems = describeDeployPolicyProblems(sftpPolicy({ sftpExclude: [entry] }), context, "sftp");
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/exclude list/);
+    expect(problems[0]).toContain(reason);
+  });
+
+  it.each(["../", "Apps/../", "/var/www/", "Apps//", "bad name/", "./index.html", "Apps/%2e%2e/", "a#b.html", "a?b.html", "Apps/{..}/x", "Apps/[a-b]/", "a}.html"])(
+    "refuses the allowlist entry %j",
+    (entry) => {
+      const problems = describeDeployPolicyProblems(sftpPolicy({ sftpAllowlist: [entry] }), context, "sftp");
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/allowlist/);
+    },
+  );
+
+  it("requires the host key pin for an enabled sftp policy, but not for a disabled draft", () => {
+    expect(describeDeployPolicyProblems(sftpPolicy({ sftpHostKeySha256: undefined }), context, "sftp")).toEqual([
+      expect.stringMatching(/host key pin/),
+    ]);
+    expect(describeDeployPolicyProblems(sftpPolicy({ sftpHostKeySha256: "  " }), context, "sftp")).toEqual([
+      expect.stringMatching(/host key pin/),
+    ]);
+    expect(
+      describeDeployPolicyProblems(sftpPolicy({ enabled: false, sftpHostKeySha256: undefined }), context, "sftp"),
+    ).toEqual([]);
+  });
+
+  it.each([`SHA256:${PIN}`, "tooshort", `${PIN}${PIN}`, `${PIN.slice(0, 42)}!`])(
+    "refuses the malformed host key pin %j, even on a disabled draft",
+    (pin) => {
+      for (const enabled of [true, false]) {
+        const problems = describeDeployPolicyProblems(sftpPolicy({ enabled, sftpHostKeySha256: pin }), context, "sftp");
+        expect(problems).toEqual([expect.stringMatching(/43 characters/)]);
+      }
+    },
+  );
+
+  // paperclip:allow-git-push: transport-name string literal, not a git command invocation
+  it("does not ask a git_push project for a host key pin", () => {
+    // paperclip:allow-git-push: transport-name string literal, not a git command invocation
+    expect(describeDeployPolicyProblems(policy({ sftpHostKeySha256: undefined }), context, "git_push")).toEqual([]);
   });
 });
 
