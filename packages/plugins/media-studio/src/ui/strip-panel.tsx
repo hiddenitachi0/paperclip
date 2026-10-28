@@ -123,6 +123,10 @@ export interface StripClip {
   sourceLengthMs?: number | null;
   providerId?: string | null;
   model?: string | null;
+  /** True when a person pinned this shot to its own video model ("keep this shot on X"). */
+  pinned?: boolean;
+  /** What the next render of this shot will use (the pin, else the film's); null for your own videos and photos. */
+  willUse?: { providerId: string; model: string | null } | null;
   estimatedCostCents?: number | null;
 }
 

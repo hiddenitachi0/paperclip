@@ -9,10 +9,11 @@ import {
   ACTION_ROOMS_PLACE,
   ACTION_ROOMS_SAVE,
   fileContentPath,
-  listCompanyPictures,
   pictureDataUrl,
   uploadPicture,
 } from "./anchor-helpers.js";
+import { FilesPictureList } from "./files-picture-list.js";
+import { errText } from "./error-text.js";
 
 // Rooms: a photo of a real room, named areas in it (zones) and product
 // pictures. "Place product" puts products into one zone and keeps the rest of
@@ -36,10 +37,6 @@ const dangerBtn: React.CSSProperties = { ...baseBtn, background: "#f03e3e", colo
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "inherit", borderColor: "#ced4da" };
 const thumb: React.CSSProperties = { width: 96, height: 96, objectFit: "cover", borderRadius: 6, display: "block", border: "1px solid rgba(128,128,128,0.35)" };
 const row: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 export function roomToDraft(room: Room | null): Draft {
   return room
@@ -111,11 +108,7 @@ function BrushMask({ src, onDone, onCancel }: { src: string; onDone: (blob: Blob
 function PictureButton({ companyId, label, onPick, disabled }: { companyId: string; label: string; onPick: (fileId: string) => void; disabled?: boolean }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
-  const [pictures, setPictures] = useState<Array<{ fileId: string; title: string }> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (open && !pictures) listCompanyPictures(companyId).then(setPictures).catch((e) => setError(errText(e)));
-  }, [open, pictures, companyId]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={row}>
@@ -133,15 +126,7 @@ function PictureButton({ companyId, label, onPick, disabled }: { companyId: stri
         />
       </div>
       {error ? <div style={errorBox}>{error}</div> : null}
-      {open ? (
-        <div style={{ ...row, maxHeight: 200, overflowY: "auto" }}>
-          {(pictures ?? []).map((p) => (
-            <button key={p.fileId} type="button" style={{ padding: 0, border: "none", background: "none", cursor: "pointer" }} onClick={() => { onPick(p.fileId); setOpen(false); }}>
-              <img src={fileContentPath(p.fileId)} alt={p.title} style={{ ...thumb, width: 64, height: 64 }} />
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {open ? <FilesPictureList companyId={companyId} size={64} onPick={(fileId) => { onPick(fileId); setOpen(false); }} /> : null}
     </div>
   );
 }
@@ -160,6 +145,7 @@ export function RoomsPanel({ context }: { context: PluginHostContext }) {
   const [open, setOpen] = useState<Room | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [zoneName, setZoneName] = useState("");
   const [zoneText, setZoneText] = useState("");
   const [painting, setPainting] = useState(false);
@@ -317,8 +303,9 @@ export function RoomsPanel({ context }: { context: PluginHostContext }) {
             disabled={busy !== null || !draft.name.trim() || !draft.photoFileId}
             onClick={() =>
               void step("save", async () => {
-                const res = (await save({ id: draft.id, name: draft.name, photoFileId: draft.photoFileId, cameraNote: draft.cameraNote || null, zones: draft.zones, products: draft.products })) as { room: Room; rooms: Room[] };
+                const res = (await save({ id: draft.id, name: draft.name, photoFileId: draft.photoFileId, cameraNote: draft.cameraNote || null, zones: draft.zones, products: draft.products })) as { room: Room; rooms: Room[]; note?: string | null };
                 setRooms(res.rooms);
+                setNotice(res.note ?? null);
                 setDraft(null);
                 setOpen(res.room);
               })
@@ -336,11 +323,11 @@ export function RoomsPanel({ context }: { context: PluginHostContext }) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Room details">
         <div style={row}>
-          <button type="button" style={ghostBtn} onClick={() => { setOpen(null); setResult(null); }}>All rooms</button>
+          <button type="button" style={ghostBtn} onClick={() => { setOpen(null); setResult(null); setNotice(null); }}>All rooms</button>
           <strong style={{ fontSize: 15 }}>{open.name}</strong>
           {canManage ? (
             <>
-              <button type="button" style={secondaryBtn} onClick={() => setDraft(roomToDraft(open))}>Edit</button>
+              <button type="button" style={secondaryBtn} onClick={() => { setNotice(null); setDraft(roomToDraft(open)); }}>Edit</button>
               <button
                 type="button"
                 style={dangerBtn}
@@ -359,6 +346,7 @@ export function RoomsPanel({ context }: { context: PluginHostContext }) {
             </>
           ) : null}
         </div>
+        {notice ? <div role="status" style={okBox}>{notice}</div> : null}
         <img src={fileContentPath(open.photoFileId)} alt={open.name} style={{ maxWidth: 480, borderRadius: 6 }} />
         <div style={card} aria-label="Place product">
           <strong>Place products</strong>
@@ -451,12 +439,13 @@ export function RoomsPanel({ context }: { context: PluginHostContext }) {
       </div>
       {canManage ? (
         <div>
-          <button type="button" style={primaryBtn} onClick={() => setDraft(roomToDraft(null))}>New room</button>
+          <button type="button" style={primaryBtn} onClick={() => { setNotice(null); setDraft(roomToDraft(null)); }}>New room</button>
         </div>
       ) : (
         <span style={help}>Only an owner or admin can add or change rooms. Anyone in the company can place products.</span>
       )}
       {error ? <div style={errorBox}>{error}</div> : null}
+      {notice ? <div role="status" style={okBox}>{notice}</div> : null}
       {rooms.length === 0 ? <div style={help}>No rooms yet.</div> : null}
       <div style={row}>
         {rooms.map((room) => (

@@ -1063,7 +1063,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     try {
       const fresh = await storylines.getStorylineRow(companyId, storylineId);
       const freshShot = await storylines.getShotRow(companyId, storylineId, shot.id);
-      await render.beginShotRender(companyId, fresh, freshShot, actorId, { companyKeyOnly: true });
+      await render.beginShotRender(companyId, fresh, freshShot, actorId, { companyKeyOnly: true, alreadyQueued: true });
     } catch (err) {
       await render.releaseShotReservation(companyId, storylineId, shot.id);
       const message = err instanceof HttpError ? err.message : `The video service did not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400);

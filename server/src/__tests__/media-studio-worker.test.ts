@@ -19,6 +19,8 @@ const ISSUE = "55555555-5555-4555-8555-555555555555";
 const REF_A = "66666666-6666-4666-8666-666666666666";
 const REF_B = "77777777-7777-4777-8777-777777777777";
 const FOREIGN_REF = "88888888-8888-4888-8888-888888888888";
+const DELETED_REF = "99999999-9999-4999-8999-999999999999";
+const TEXT_REF = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
 
 const runCtx = { agentId: AGENT, runId: RUN, companyId: COMPANY, projectId: "" };
@@ -48,6 +50,7 @@ async function setup(config: Record<string, unknown> = { provider: "mock" }): Pr
       companyFile(REF_A, COMPANY),
       companyFile(REF_B, COMPANY),
       companyFile(FOREIGN_REF, OTHER_COMPANY),
+      companyFile(TEXT_REF, COMPANY, "text/plain"),
     ],
   });
   await plugin.definition.setup(harness.ctx);
@@ -324,9 +327,28 @@ describe("media-studio saved looks", () => {
       "Only the company's owner or an admin can change looks.",
     );
     await expect(harness.performAction("looks.save", draft, agent)).rejects.toThrow("Only the company's owner or an admin");
-    await expect(
-      harness.performAction("looks.save", { ...draft, referenceFileIds: [FOREIGN_REF] }, owner),
-    ).rejects.toThrow("One of the reference pictures is not in this company's Files.");
+    // Another company's (or a deleted) picture is never kept on the look: it is dropped and the answer says so.
+    const dropped = await harness.performAction<any>(
+      "looks.save",
+      { ...draft, name: "Dropped", referenceFileIds: [REF_A, FOREIGN_REF], referenceRoles: ["face", "outfit"] },
+      owner,
+    );
+    expect(dropped.note).toBe("1 picture was removed because it is no longer in Files.");
+    expect(dropped.looks.find((l: any) => l.name === "Dropped")).toMatchObject({ referenceFileIds: [REF_A], referenceRoles: ["face"] });
+    await harness.performAction("looks.delete", { id: dropped.looks.find((l: any) => l.name === "Dropped").id }, owner);
+
+    // A picture that was deleted from Files (no file at all) is dropped the same way; several drops use the plural note.
+    const deleted = await harness.performAction<any>("looks.save", { ...draft, name: "Deleted one", referenceFileIds: [DELETED_REF, REF_A], referenceRoles: ["face", "style"] }, owner);
+    expect(deleted.note).toBe("1 picture was removed because it is no longer in Files.");
+    expect(deleted.looks.find((l: any) => l.name === "Deleted one")).toMatchObject({ referenceFileIds: [REF_A], referenceRoles: ["style"] });
+    const allGone = await harness.performAction<any>("looks.save", { ...draft, name: "All gone", referenceFileIds: [DELETED_REF, FOREIGN_REF] }, owner);
+    expect(allGone.note).toBe("2 pictures were removed because they are no longer in Files.");
+    expect(allGone.looks.find((l: any) => l.name === "All gone")).toMatchObject({ referenceFileIds: [], referenceRoles: [] });
+    // A file that is there but is not a picture is still refused, not dropped.
+    await expect(harness.performAction("looks.save", { ...draft, name: "Text", referenceFileIds: [TEXT_REF] }, owner)).rejects.toThrow("is not a picture");
+    for (const name of ["Deleted one", "All gone"]) {
+      await harness.performAction("looks.delete", { id: allGone.looks.find((l: any) => l.name === name).id }, owner);
+    }
 
     const saved = await harness.performAction<any>("looks.save", draft, owner);
     expect(saved.looks).toHaveLength(1);
