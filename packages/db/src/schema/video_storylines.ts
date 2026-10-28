@@ -68,6 +68,8 @@ export const videoStorylines = pgTable(
         lookId?: string | null;
         cast?: Array<{ id: string; name: string; nickname: string | null; description: string | null; identityId: string | null }>;
         shotCast?: Record<string, string[]>;
+        // Server-set: a render chain started under the cast-confirmation rule (see VIDEO_CAST_ENFORCED_KEY).
+        castConfirmationEnforced?: boolean;
       }>()
       .notNull()
       .default({}),
