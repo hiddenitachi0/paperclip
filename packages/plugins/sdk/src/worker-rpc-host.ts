@@ -1263,6 +1263,24 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      mediaLibrary: {
+        async listSetups(companyId, options) {
+          return callHost("mediaLibrary.listSetups", { companyId, kind: options?.kind, approvedOnly: options?.approvedOnly });
+        },
+        async getSetup(companyId, setupId, options) {
+          return callHost("mediaLibrary.getSetup", { companyId, setupId, approvedOnly: options?.approvedOnly });
+        },
+        async getProjectDefaults(companyId) {
+          return callHost("mediaLibrary.getProjectDefaults", { companyId });
+        },
+        async listLoras(companyId) {
+          return callHost("mediaLibrary.listLoras", { companyId });
+        },
+        async resolve(companyId, setupId, options) {
+          return callHost("mediaLibrary.resolve", { companyId, setupId, approvedOnly: options?.approvedOnly });
+        },
+      },
+
       billing: {
         async reserveMediaStudioDirectSpend(companyId, input) {
           return callHost("billing.reserveMediaStudioDirectSpend", { companyId, ...input });

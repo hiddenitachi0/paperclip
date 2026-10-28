@@ -70,6 +70,10 @@ import type {
   PluginPerformActionActorContext,
   PluginPerformActionContext,
   PluginCompanyFileContent,
+  PluginMediaLora,
+  PluginMediaProjectDefaults,
+  PluginMediaResolvedSetup,
+  PluginMediaSetup,
 } from "./protocol.js";
 
 export interface TestHarnessOptions {
@@ -118,6 +122,10 @@ export interface TestHarness {
     principalGrants?: PrincipalPermissionGrant[];
     /** Company files for `ctx.files.get/readContent` (tied to a task or not). */
     companyFiles?: PluginCompanyFileContent[];
+    /** Saved model setups, LoRAs and project defaults for `ctx.mediaLibrary` (each row carries its companyId). */
+    mediaSetups?: PluginMediaSetup[];
+    mediaLoras?: PluginMediaLora[];
+    mediaProjectDefaults?: PluginMediaProjectDefaults[];
   }): void;
   setConfig(config: Record<string, unknown>): void;
   /** Dispatch a host or plugin event to registered handlers. */
@@ -502,6 +510,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const goals = new Map<string, Goal>();
   const accessMembers = new Map<string, PluginAccessMember>();
   const companyFiles = new Map<string, PluginCompanyFileContent>();
+  const mediaSetups = new Map<string, PluginMediaSetup>();
+  const mediaLoras = new Map<string, PluginMediaLora>();
+  const mediaProjectDefaults = new Map<string, PluginMediaProjectDefaults>();
   const principalGrants = new Map<string, PrincipalPermissionGrant[]>();
 
   function principalGrantsKey(companyId: string, principalType: PrincipalType, principalId: string) {
@@ -2364,6 +2375,81 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         throw new Error("The test harness has no analysis model; replace harness.ctx.models.analyseImage with a stub.");
       },
     },
+    // An in-memory stand-in for the host's read-only media library: seeded
+    // rows only, filtered by company like the host does.
+    mediaLibrary: {
+      async listSetups(companyId, options) {
+        requireCapability(manifest, capabilitySet, "media.library.read");
+        requireCompanyId(companyId);
+        return [...mediaSetups.values()].filter(
+          (setup) =>
+            setup.companyId === companyId &&
+            setup.status !== "archived" &&
+            (!options?.approvedOnly || setup.status === "approved") &&
+            (!options?.kind || setup.kind === options.kind),
+        );
+      },
+      async getSetup(companyId, setupId, options) {
+        requireCapability(manifest, capabilitySet, "media.library.read");
+        requireCompanyId(companyId);
+        const setup = mediaSetups.get(setupId);
+        if (!setup || setup.companyId !== companyId) return null;
+        if (options?.approvedOnly && setup.status !== "approved") return null;
+        return setup;
+      },
+      async getProjectDefaults(companyId) {
+        requireCapability(manifest, capabilitySet, "media.library.read");
+        requireCompanyId(companyId);
+        return (
+          mediaProjectDefaults.get(companyId) ?? {
+            companyId,
+            defaultImageSetupId: null,
+            defaultVideoSetupId: null,
+            defaultContentRating: "sfw",
+            defaultContinuityMode: "stills",
+          }
+        );
+      },
+      async listLoras(companyId) {
+        requireCapability(manifest, capabilitySet, "media.library.read");
+        requireCompanyId(companyId);
+        return [...mediaLoras.values()].filter((lora) => lora.companyId === companyId && lora.effectiveContentTag !== "refused");
+      },
+      async resolve(companyId, setupId, options) {
+        requireCapability(manifest, capabilitySet, "media.library.read");
+        requireCompanyId(companyId);
+        const setup = mediaSetups.get(setupId);
+        if (!setup || setup.companyId !== companyId) return null;
+        if (options?.approvedOnly && setup.status !== "approved") return null;
+        const problems = [...setup.problems];
+        if (setup.status === "archived") problems.unshift("This setup is archived. Pick another one, or bring it back first.");
+        const loras: PluginMediaResolvedSetup["loras"] = [];
+        for (const pick of setup.loras) {
+          const lora = mediaLoras.get(pick.loraId);
+          if (lora && lora.companyId === companyId) {
+            loras.push({ loraId: lora.id, ref: lora.ref, source: lora.source, name: lora.name, strength: pick.strength, triggerWords: lora.triggerWords });
+          }
+        }
+        return {
+          setupId: setup.id,
+          name: setup.name,
+          kind: setup.kind,
+          status: setup.status,
+          provider: setup.provider,
+          modelId: setup.modelId,
+          editModelId: setup.editModelId,
+          mode: setup.mode,
+          family: setup.family,
+          loras,
+          triggerWords: setup.triggerWords,
+          params: setup.params,
+          contentRating: setup.contentRating,
+          billing: setup.billing,
+          usable: problems.length === 0,
+          problems,
+        };
+      },
+    },
     billing: {
       async reserveMediaStudioDirectSpend(companyId) {
         requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
@@ -2533,6 +2619,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       for (const row of input.executionWorkspaces ?? []) executionWorkspaces.set(row.id, row);
       for (const row of input.accessMembers ?? []) accessMembers.set(row.id, row);
       for (const row of input.companyFiles ?? []) companyFiles.set(row.id, row);
+      for (const row of input.mediaSetups ?? []) mediaSetups.set(row.id, row);
+      for (const row of input.mediaLoras ?? []) mediaLoras.set(row.id, row);
+      for (const row of input.mediaProjectDefaults ?? []) mediaProjectDefaults.set(row.companyId, row);
       for (const row of input.principalGrants ?? []) {
         const list = principalGrants.get(principalGrantsKey(row.companyId, row.principalType, row.principalId)) ?? [];
         list.push(row);

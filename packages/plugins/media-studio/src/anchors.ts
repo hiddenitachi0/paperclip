@@ -285,6 +285,26 @@ async function assertPictureFile(ctx: PluginContext, companyId: string, fileId: 
   if (!file.contentType.toLowerCase().startsWith("image/")) throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture.`);
 }
 
+/**
+ * Of these Files pictures, the ids no longer in the company's Files (deleted
+ * since they were picked). Anything that is there but not a picture still throws.
+ */
+async function goneFromFiles(ctx: PluginContext, companyId: string, fileIds: string[]): Promise<Set<string>> {
+  const gone = new Set<string>();
+  for (const id of new Set(fileIds)) {
+    const file = await ctx.files.get(id, companyId);
+    if (!file) gone.add(id);
+    else if (!file.contentType.toLowerCase().startsWith("image/")) throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture.`);
+  }
+  return gone;
+}
+
+/** The plain sentence shown after a save left out pictures that were deleted from Files. */
+function goneNote(count: number): string | null {
+  if (count === 0) return null;
+  return `${count === 1 ? "1 picture was" : `${count} pictures were`} removed because ${count === 1 ? "it is" : "they are"} no longer in Files.`;
+}
+
 const DATA_IMAGE = /^data:(image\/[a-z0-9.+-]+);base64,/i;
 function asDataUrl(p: { contentType: string; contentBase64: string }): string {
   return `data:${p.contentType};base64,${p.contentBase64}`;
@@ -526,13 +546,14 @@ function identityView(identity: Identity) {
 
 // ─── Identities ──────────────────────────────────────────────────────────────
 
-async function validateIdentityFiles(ctx: PluginContext, companyId: string, fileIds: string[], blocks: string[]): Promise<void> {
+/** Refuses a picture flagged as under 18 or a file that is not a picture; returns the pictures already deleted from Files. */
+async function validateIdentityFiles(ctx: PluginContext, companyId: string, fileIds: string[], blocks: string[]): Promise<Set<string>> {
   for (const id of fileIds) {
     if (blocks.includes(id)) {
       throw new Error("One of these pictures was flagged by the analysis as possibly showing someone under 18, so it cannot be used for an identity.");
     }
-    await assertPictureFile(ctx, companyId, id, "One of the identity's pictures");
   }
+  return goneFromFiles(ctx, companyId, fileIds);
 }
 
 function readEditModel(value: unknown, fallback: string, label: string): string {
@@ -558,16 +579,24 @@ export async function saveIdentityAction(ctx: PluginContext, params: Record<stri
   const taken = (n: string) => list.some((i) => i.id !== id && [i.name, i.nickname].some((x) => x && x.toLowerCase() === n.toLowerCase()));
   if (taken(name) || (nickname && taken(nickname))) throw new Error("Another identity already uses that name or nickname. Pick another.");
   const sheet = readIdentitySheet(params.sheet);
-  const crops = readCrops(params.crops);
-  if (crops.filter((c) => c.role === "face").length > 1) throw new Error("Keep one face crop.");
-  const sourcePictures = readSourcePictures(params, existing, now);
+  const pickedCrops = readCrops(params.crops);
+  if (pickedCrops.filter((c) => c.role === "face").length > 1) throw new Error("Keep one face crop.");
+  const pickedSources = readSourcePictures(params, existing, now);
+  const pickedCanonical = typeof params.canonicalFileId === "string" && params.canonicalFileId.trim() ? params.canonicalFileId.trim() : existing?.canonicalFileId ?? null;
+  const blocks = await loadAgeBlocks(ctx, companyId);
+  const files = [...pickedSources.map((p) => p.fileId), pickedCanonical, ...pickedCrops.flatMap((c) => [c.fileId, c.sourceFileId])].filter((f): f is string => Boolean(f));
+  // A picture deleted from Files is left out (and the person told) so the identity can still be saved;
+  // the age checks below run on the pictures that remain.
+  const gone = await validateIdentityFiles(ctx, companyId, Array.from(new Set(files)), blocks);
+  const sourcePictures = pickedSources.filter((p) => !gone.has(p.fileId));
   const sourceIds = sourcePictures.map((p) => p.fileId);
   const originalFileId = sourceIds[0] ?? null;
-  const canonicalFileId = typeof params.canonicalFileId === "string" && params.canonicalFileId.trim() ? params.canonicalFileId.trim() : existing?.canonicalFileId ?? null;
-  const blocks = await loadAgeBlocks(ctx, companyId);
-  const files = [...sourceIds, canonicalFileId, ...crops.flatMap((c) => [c.fileId, c.sourceFileId])].filter((f): f is string => Boolean(f));
-  await validateIdentityFiles(ctx, companyId, Array.from(new Set(files)), blocks);
-  if (!originalFileId && !crops.some((c) => c.role === "face")) throw new Error("Add the person's picture (or a face crop) first.");
+  const canonicalFileId = pickedCanonical && !gone.has(pickedCanonical) ? pickedCanonical : null;
+  const crops = pickedCrops.filter((c) => !gone.has(c.fileId)).map((c) => (c.sourceFileId && gone.has(c.sourceFileId) ? { ...c, sourceFileId: null } : c));
+  const note = goneNote(gone.size);
+  if (!originalFileId && !crops.some((c) => c.role === "face")) {
+    throw new Error(gone.size > 0 ? "The person's picture is not in this company's Files any more. Pick it again." : "Add the person's picture (or a face crop) first.");
+  }
   // More than one picture of the person: every one of them must have passed
   // the age check (kept by the hash of its bytes, so a picture checked before
   // costs nothing; one not checked yet is checked now). One picture keeps the
@@ -604,7 +633,7 @@ export async function saveIdentityAction(ctx: PluginContext, params: Record<stri
   };
   const next = existing ? list.map((i) => (i.id === identity.id ? identity : i)) : [...list, identity];
   await saveIdentities(ctx, companyId, next);
-  return { identity: identityView(identity), identities: next.map(identityView) };
+  return { identity: identityView(identity), identities: next.map(identityView), note };
 }
 
 /** Delete an identity; looks that pointed at it keep working without it. */
@@ -951,12 +980,17 @@ async function saveRoomAction(ctx: PluginContext, params: Record<string, unknown
   const files = [fields.photoFileId, ...fields.zones.map((z) => z.maskFileId), ...fields.products.flatMap((p) => [p.fileId, p.cutoutFileId])].filter(
     (f): f is string => Boolean(f),
   );
-  for (const f of new Set(files)) await assertPictureFile(ctx, companyId, f, "One of the room's pictures");
+  // A picture deleted from Files is left out (and the person told) so the room can still be saved.
+  // The room photo is the one thing a room cannot do without.
+  const gone = await goneFromFiles(ctx, companyId, files);
+  if (gone.has(fields.photoFileId)) throw new Error("The room photo is not in this company's Files any more. Pick a new photo for the room.");
+  const zones = fields.zones.filter((z) => !gone.has(z.maskFileId));
+  const products = fields.products.filter((p) => !gone.has(p.fileId)).map((p) => (p.cutoutFileId && gone.has(p.cutoutFileId) ? { ...p, cutoutFileId: null } : p));
   if (!existing && rooms.length >= MAX_ROOMS) throw new Error(`A company can keep up to ${MAX_ROOMS} rooms. Delete one first.`);
-  const room: Room = { id: existing?.id ?? crypto.randomUUID(), ...fields, updatedAt: new Date().toISOString() };
+  const room: Room = { id: existing?.id ?? crypto.randomUUID(), ...fields, zones, products, updatedAt: new Date().toISOString() };
   const next = existing ? rooms.map((r) => (r.id === room.id ? room : r)) : [...rooms, room];
   await ctx.state.set(scope(companyId, "rooms"), next);
-  return { room, rooms: next };
+  return { room, rooms: next, note: goneNote(gone.size) };
 }
 
 async function placeAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {

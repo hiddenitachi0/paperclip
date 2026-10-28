@@ -51,6 +51,8 @@ import {
   type CropRole,
 } from "./anchor-helpers.js";
 import { FilesPictureList } from "./files-picture-list.js";
+import { StoredPicture } from "./stored-picture.js";
+import { errText } from "./error-text.js";
 
 // ─── Types (as the worker sends them; see src/identity.ts) ───────────────────
 
@@ -277,10 +279,6 @@ const dangerBtn: React.CSSProperties = { ...baseBtn, background: "#f03e3e", colo
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "inherit", borderColor: "#ced4da" };
 const thumb: React.CSSProperties = { width: 96, height: 96, objectFit: "cover", borderRadius: 6, display: "block", border: "1px solid rgba(128,128,128,0.35)" };
 const row: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 // ─── Crop editor ─────────────────────────────────────────────────────────────
 
@@ -844,7 +842,7 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
       </div>
       {identity.canonicalFileId ? (
         <div style={row}>
-          <img src={fileContentPath(identity.canonicalFileId)} alt="Chosen picture" style={thumb} />
+          <StoredPicture fileId={identity.canonicalFileId} alt="Chosen picture" style={thumb} />
           <div style={help}>
             Chosen{identity.provenance?.model ? ` (made with ${identity.provenance.model}` : ""}
             {identity.provenance?.model ? `; for re-rendering only: seed ${identity.provenance.seed ?? "none (picture edits take no seed)"})` : ""}.
@@ -1502,8 +1500,9 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
   const onSave = () =>
     step("save", async () => {
       if (!draft) return;
-      const res = (await save(draftToParams(draft))) as { identity: Identity; identities: Identity[] };
+      const res = (await save(draftToParams(draft))) as { identity: Identity; identities: Identity[]; note?: string | null };
       setInfo((i) => (i ? { ...i, identities: res.identities } : i));
+      setNotice(res.note ?? null);
       setDraft(null);
       setConflicts([]);
       setOpen(res.identity);
@@ -1548,7 +1547,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
                       disabled={busy !== null}
                       onClick={() => setDraft((d) => (d ? { ...d, activeSource: id } : d))}
                     >
-                      <img src={fileContentPath(id)} alt={`Picture ${i + 1} of the person`} style={thumb} />
+                      <StoredPicture fileId={id} alt={`Picture ${i + 1} of the person`} style={thumb} />
                     </button>
                     <span>{i === 0 ? "Picture 1 (main)" : `Picture ${i + 1}`}</span>
                     {cut.length > 0 ? <span style={help}>Crops: {cut.join(", ")}</span> : null}
@@ -1677,7 +1676,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
                 const from = c.sourceFileId ? draft.sourceFileIds.indexOf(c.sourceFileId) : -1;
                 return (
                   <div key={c.fileId} style={{ textAlign: "center", fontSize: 12 }}>
-                    <img src={fileContentPath(c.fileId)} alt={`${c.role} crop`} style={thumb} />
+                    <StoredPicture fileId={c.fileId} alt={`${c.role} crop`} style={thumb} />
                     {CROP_ROLE_OPTIONS.find((o) => o.value === c.role)?.label}
                     {from >= 0 ? <div style={help}>from picture {from + 1}</div> : null}
                   </div>
@@ -1757,7 +1756,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
             <div style={help}>Confirmed when the identity was made.</div>
           )}
           {error ? <div style={errorBox}>{error}</div> : null}
-          {notice ? <div style={okBox}>{notice}</div> : null}
+          {notice ? <div role="status" style={okBox}>{notice}</div> : null}
           <div>
             <button
               type="button"
@@ -1778,7 +1777,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Identity details">
         <div style={row}>
-          <button type="button" style={ghostBtn} onClick={() => setOpen(null)}>All identities</button>
+          <button type="button" style={ghostBtn} onClick={() => { setOpen(null); setNotice(null); }}>All identities</button>
           <strong style={{ fontSize: 15 }}>{open.name}{open.nickname ? ` ("${open.nickname}")` : ""}</strong>
           {info.canManage ? (
             <>
@@ -1788,12 +1787,13 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
           ) : null}
         </div>
         {error ? <div style={errorBox}>{error}</div> : null}
+        {notice ? <div role="status" style={okBox}>{notice}</div> : null}
         <div style={card}>
           {sourceIdsOf(open).length > 1 ? (
             <div style={row} aria-label="The person's pictures">
               {sourceIdsOf(open).map((id, i) => (
                 <div key={id} style={{ textAlign: "center", fontSize: 12 }}>
-                  <img src={fileContentPath(id)} alt={`Picture ${i + 1} of the person`} style={{ ...thumb, width: 64, height: 64 }} />
+                  <StoredPicture fileId={id} alt={`Picture ${i + 1} of the person`} style={{ ...thumb, width: 64, height: 64 }} />
                   {i === 0 ? "Main picture" : `Picture ${i + 1}`}
                 </div>
               ))}
@@ -1802,7 +1802,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
           <div style={row}>
             {open.crops.map((c) => (
               <div key={c.fileId} style={{ textAlign: "center", fontSize: 12 }}>
-                <img src={fileContentPath(c.fileId)} alt={`${c.role} crop`} style={thumb} />
+                <StoredPicture fileId={c.fileId} alt={`${c.role} crop`} style={thumb} />
                 {CROP_ROLE_OPTIONS.find((o) => o.value === c.role)?.label}
               </div>
             ))}
@@ -1845,7 +1845,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
           const pic = identity.canonicalFileId ?? identity.crops.find((c) => c.role === "face")?.fileId ?? identity.originalFileId;
           return (
             <button key={identity.id} type="button" style={{ ...card, cursor: "pointer", background: "none", color: "inherit", alignItems: "center", width: 140 }} onClick={() => setOpen(identity)}>
-              {pic ? <img src={fileContentPath(pic)} alt={identity.name} style={thumb} /> : null}
+              {pic ? <StoredPicture fileId={pic} alt={identity.name} style={thumb} /> : null}
               <span style={{ fontSize: 13, fontWeight: 600 }}>{identity.name}</span>
               {(identity.trainedIdentities ?? []).some((t) => t.status === "ready" || t.status === "completed") ? <span style={help}>Trained</span> : null}
             </button>

@@ -262,3 +262,14 @@ Notes:
 
 - The `docker-entrypoint.sh` adjusts the container `node` user UID/GID at startup to match the values passed via `USER_UID`/`USER_GID`, avoiding permission issues on bind-mounted volumes.
 - Paperclip data persists via Docker volumes/bind mounts (compose) or at `~/.local/share/paperclip` (quadlet).
+
+## Large video files (Media Studio)
+
+Media Studio's video files have their own per-file limit, separate from the ordinary attachment limit (25 MB by default, `PAPERCLIP_ATTACHMENT_MAX_BYTES`):
+
+- Finished storyline films and footage uploaded to a storyline may be up to **2 GB** each by default. An owner or admin changes this per company in Media Studio's settings ("Largest film or saved video", "Largest video").
+- `PAPERCLIP_VIDEO_FILE_MAX_BYTES` sets the server's ceiling for every company (at most 4 GB, which is also the default).
+- Videos on a task or in a company's Files keep the ordinary attachment limit, and `PAPERCLIP_ATTACHMENT_MAX_BYTES` stays their ceiling, unless you opt in with `PAPERCLIP_LARGE_VIDEO_ATTACHMENTS=true`. Even then, only companies that have Media Studio installed and switched on (their own Media Studio settings saved, plugin enabled) get the larger limit there, and only for videos -- every other file, and every company without Media Studio, keeps the ordinary limit.
+- Large videos on tasks and in Files count against the company's Media Studio "Storage limit" (5 GB by default), together with its storyline uploads. At most 2 large uploads per company run at once; a third is asked to wait. Each one is checked with `ffprobe` (local file only, with a time limit) and refused if it is not really a video -- so `ffprobe` must be installed for them to be accepted.
+- Large videos are streamed to and from storage on the server's disk (the data volume with the default `local_disk` storage), never held whole in memory. Downloads support byte ranges, so players can seek.
+- While a film is being combined or a large upload is received, work files go to `PAPERCLIP_MEDIA_WORK_DIR` (default: the system temp folder). A film needs about twice its own size free there while it is made, and each large upload about its own size.
