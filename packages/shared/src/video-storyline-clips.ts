@@ -306,6 +306,7 @@ export const MEDIA_FOOTAGE_SETTINGS_KEYS = {
   maxVideoMb: "mediaUploadMaxVideoMb",
   maxPhotoMb: "mediaUploadMaxPhotoMb",
   maxVideoSeconds: "mediaUploadMaxVideoSeconds",
+  maxVideoFileMb: "mediaVideoFileMaxMb",
   cleanupDays: "mediaUnchosenCleanupDays",
   neverSendUploadsToSogni: "neverSendUploadsToSogni",
 } as const;
@@ -315,31 +316,54 @@ export interface MediaFootageSettings {
   maxVideoMb: number;
   maxPhotoMb: number;
   maxVideoSeconds: number;
+  /**
+   * D18: the largest finished film, in megabytes. Videos on a task or in the
+   * company's Files (made by Media Studio or uploaded) may also go up to it,
+   * but only when the server's operator switched that on
+   * (PAPERCLIP_LARGE_VIDEO_ATTACHMENTS) and Media Studio is switched on for
+   * the company; they then count against `storageQuotaBytes`. Every other
+   * file keeps the company's ordinary attachment limit.
+   */
+  maxVideoFileMb: number;
   cleanupDays: number;
   neverSendUploadsToSogni: boolean;
 }
 
+/**
+ * D18: no single video file goes past this, whatever a company or the
+ * server is set to (a 30-minute 1080p film is well under it). The server
+ * can set a lower ceiling for every company (PAPERCLIP_VIDEO_FILE_MAX_BYTES).
+ */
+export const MEDIA_VIDEO_FILE_HARD_MAX_BYTES = 4 * 1024 ** 3;
+/** D18: the default per-file limit for video files (the owner's decision of 27 Oct: 2 GB, stored on the server's own disk). */
+export const MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES = 2 * 1024 ** 3;
+
 /** Upper limits no company setting can go past (the server box is shared). */
 export const MEDIA_FOOTAGE_HARD_LIMITS = {
   storageQuotaBytes: 200 * 1024 ** 3,
-  maxVideoMb: 1_024,
+  maxVideoMb: MEDIA_VIDEO_FILE_HARD_MAX_BYTES / 1024 ** 2,
   maxPhotoMb: 50,
   maxVideoSeconds: 3_600,
+  maxVideoFileMb: MEDIA_VIDEO_FILE_HARD_MAX_BYTES / 1024 ** 2,
   cleanupDays: 365,
 } as const;
 
 export const MEDIA_FOOTAGE_DEFAULTS: MediaFootageSettings = {
   storageQuotaBytes: 5 * 1024 ** 3,
-  maxVideoMb: 300,
+  maxVideoMb: MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES / 1024 ** 2,
   maxPhotoMb: 20,
   maxVideoSeconds: 600,
+  maxVideoFileMb: MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES / 1024 ** 2,
   cleanupDays: 14,
   neverSendUploadsToSogni: true,
 };
 
 export const MEDIA_FOOTAGE_EXPLANATIONS: Record<keyof MediaFootageSettings, string> = {
-  storageQuotaBytes: "How much space this company's uploaded photos and videos may take in total, across all storylines.",
+  storageQuotaBytes:
+    "How much space this company's uploaded photos and videos may take in total, across all storylines. Videos on tasks or in Files that are larger than the company's normal file limit count here too.",
   maxVideoMb: "The largest video file one person can upload, in megabytes.",
+  maxVideoFileMb:
+    "The largest finished film that is kept, in megabytes. If the server's operator has allowed large videos on tasks and in Files, it is also the largest video kept there. Long films are stored on the server's own disk. Other files keep the company's normal file limit.",
   maxPhotoMb: "The largest photo one person can upload, in megabytes.",
   maxVideoSeconds: "The longest video that can be uploaded, in seconds. Each clip in a film is at most 60 seconds; use a longer video by adding it more than once with different trims.",
   cleanupDays: "Uploads that are not used in any film, and AI transition versions nobody picked, are deleted after this many days to free space. The ones you use are always kept.",
@@ -353,6 +377,7 @@ export const updateMediaFootageSettingsSchema = z
     maxVideoMb: z.number().int().min(1).max(MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb).optional(),
     maxPhotoMb: z.number().int().min(1).max(MEDIA_FOOTAGE_HARD_LIMITS.maxPhotoMb).optional(),
     maxVideoSeconds: z.number().int().min(5).max(MEDIA_FOOTAGE_HARD_LIMITS.maxVideoSeconds).optional(),
+    maxVideoFileMb: z.number().int().min(1).max(MEDIA_FOOTAGE_HARD_LIMITS.maxVideoFileMb).optional(),
     cleanupDays: z.number().int().min(1).max(MEDIA_FOOTAGE_HARD_LIMITS.cleanupDays).optional(),
     neverSendUploadsToSogni: z.boolean().optional(),
   })
@@ -374,6 +399,7 @@ export function readMediaFootageSettings(settingsJson: Record<string, unknown> |
     maxVideoMb: int(K.maxVideoMb, D.maxVideoMb, H.maxVideoMb, 1),
     maxPhotoMb: int(K.maxPhotoMb, D.maxPhotoMb, H.maxPhotoMb, 1),
     maxVideoSeconds: int(K.maxVideoSeconds, D.maxVideoSeconds, H.maxVideoSeconds, 5),
+    maxVideoFileMb: int(K.maxVideoFileMb, D.maxVideoFileMb, H.maxVideoFileMb, 1),
     cleanupDays: int(K.cleanupDays, D.cleanupDays, H.cleanupDays, 1),
     // On unless an owner/admin explicitly switched it off.
     neverSendUploadsToSogni: s[K.neverSendUploadsToSogni] !== false,

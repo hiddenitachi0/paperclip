@@ -330,6 +330,13 @@ DECLARE
     -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
     -- listed here so the login-role lists match the schema.
     'mail_urgency_alerts',
+    -- Media Studio film studio Phase 1 (setup register and LoRA library).
+    -- Created, granted on and policed in 0259_media_setup_register.sql;
+    -- company-scoped, so they are in both lists.
+    'media_loras',
+    'media_model_setup_trials',
+    'media_model_setups',
+    'media_project_defaults',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -709,6 +716,13 @@ DECLARE
     -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
     -- listed here so the login-role lists match the schema.
     'mail_urgency_alerts',
+    -- Media Studio film studio Phase 1 (setup register and LoRA library).
+    -- Created, granted on and policed in 0259_media_setup_register.sql;
+    -- company-scoped, so they are in both lists.
+    'media_loras',
+    'media_model_setup_trials',
+    'media_model_setups',
+    'media_project_defaults',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.

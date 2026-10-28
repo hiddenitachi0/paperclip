@@ -291,21 +291,16 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     if (scoped.note) notes.push(scoped.note);
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
-    let referenceImages: string[];
-    if (scoped.person) {
-      // The look's person is in this shot without a cast link (named in the text): their pictures face the same age check as a cast member's.
-      // One at a time so each file id is checked against its own bytes.
-      const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
-      for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
-      const refusal = castPictureRefusal(
-        loaded.map((p) => ({ ...p, personName: scoped.person! })),
-        await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
-      );
-      if (refusal) throw unprocessable(refusal);
-      referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
-    } else {
-      referenceImages = await loadReferenceImages(db, companyId, refs.ids);
-    }
+    // Every picture about to be sent faces the age check, whoever it shows: the refusal set is company-wide (file ids and byte hashes).
+    // When the look's person is in the shot the pictures are checked as theirs. One at a time so each file id is checked against its own bytes.
+    const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
+    for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
+    const refusal = castPictureRefusal(
+      loaded.map((p) => ({ ...p, personName: scoped.person })),
+      await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
     const input: ImageGenerationInput = {
@@ -526,8 +521,8 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
     }
     const refusal = castPictureRefusal(
-      // The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
-      loaded.filter((p) => p.owner || scoped.person).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person! })),
+      // Every picture is checked, whoever it shows. The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
+      loaded.map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person })),
       await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
     );
     if (refusal) throw unprocessable(refusal);

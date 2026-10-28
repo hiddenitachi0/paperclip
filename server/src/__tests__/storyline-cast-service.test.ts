@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines } from "@paperclipai/db";
@@ -335,5 +335,115 @@ d("storyline cast (database)", () => {
     ]);
     const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
     expect(storyline!.status).toBe("rendering");
+  });
+
+  // ─── DUR-4935: the age check covers every picture sent, not only a person's ───
+
+  async function saveLooks(companyId: string, looks: unknown[]) {
+    await db.insert(pluginState).values({ pluginId, scopeKind: "company", scopeId: companyId, namespace: "default", stateKey: "looks", valueJson: looks });
+  }
+
+  async function flag(companyId: string, fileIds: string[]) {
+    await db.insert(pluginState).values({ pluginId, scopeKind: "company", scopeId: companyId, namespace: "default", stateKey: "identityAgeBlocks", valueJson: fileIds });
+  }
+
+  async function assertNothingPaid(shotId: string) {
+    expect(captured.pictures).toHaveLength(0);
+    expect(captured.videos).toHaveLength(0);
+    const [row] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
+    expect(row!.stillEstimatedCostCents).toBeNull();
+  }
+
+  const REFUSED = { status: 422, message: expect.stringContaining("age check") };
+
+  it("no cast: a flagged picture tagged style or background in the look is refused before any provider call, the look's person not being in the shot", async () => {
+    for (const role of ["style", "background"]) {
+      const { companyId, storylineId, shotId } = await seed({ providerId: "sogni", prompt: "a harbour at dusk" });
+      const maja = await savedPerson(companyId, "maja");
+      await saveIdentities(companyId, [maja]);
+      // Maja's own age-flagged face file, tagged as a style/background picture of her look.
+      const flagged = maja.crops[0]!.fileId;
+      await flag(companyId, [flagged]);
+      await saveLooks(companyId, [{ id: "look-1", name: "Harbour", style: "warm", provider: "sogni", identityId: maja.id, referenceFileIds: [flagged], referenceRoles: [role] }]);
+      await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", lookId: "look-1" } }, ACTOR);
+      await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject(REFUSED);
+      await assertNothingPaid(shotId);
+    }
+  });
+
+  it("no cast: a flagged picture in a look that shows nobody, or flagged by its bytes, is refused too", async () => {
+    const { companyId, storylineId, shotId } = await seed({ providerId: "sogni", prompt: "a harbour at dusk" });
+    const bytesFile = await file(companyId, "same-bytes-as-flagged");
+    const hash = createHash("sha256").update("same-bytes-as-flagged").digest("hex");
+    await db.insert(pluginState).values({ pluginId, scopeKind: "company", scopeId: companyId, namespace: "default", stateKey: "pictureAgeChecks", valueJson: { [hash]: { verdict: "under18" } } });
+    await saveLooks(companyId, [{ id: "look-1", name: "Harbour", style: "warm", provider: "sogni", referenceFileIds: [bytesFile], referenceRoles: ["background"] }]);
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", lookId: "look-1" } }, ACTOR);
+    await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject(REFUSED);
+    await assertNothingPaid(shotId);
+  });
+
+  it("no cast: a flagged picture as the shot's or the storyline's character reference is refused before any provider call", async () => {
+    const { companyId, storylineId, shotId } = await seed({ providerId: "sogni", prompt: "a harbour at dusk" });
+    const flagged = await file(companyId, "flagged-ref");
+    await flag(companyId, [flagged]);
+    const storylines = videoStorylineService(db);
+    await storylines.updateShot(companyId, storylineId, shotId, { lookReferenceAssetIds: [flagged] }, ACTOR);
+    await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject(REFUSED);
+    await storylines.updateShot(companyId, storylineId, shotId, { lookReferenceAssetIds: [] }, ACTOR);
+    await storylines.updateStoryline(companyId, storylineId, { characterReferenceAssetIds: [flagged] }, ACTOR);
+    await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject(REFUSED);
+    await assertNothingPaid(shotId);
+    // The same picture, not flagged, is sent as before.
+    await db.update(pluginState).set({ valueJson: [] }).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId), eq(pluginState.stateKey, "identityAgeBlocks")));
+    await videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR);
+    expect((captured.pictures[0]!.input.referenceImages as string[]).map(keyOf)).toEqual(["flagged-ref"]);
+  });
+
+  it("cast: a flagged style/background look picture, or shot or storyline character reference, is refused though nobody's own picture is flagged", async () => {
+    for (const where of ["look", "shot", "storyline"] as const) {
+      const { companyId, storylineId, shotId } = await seed({ providerId: "fal", prompt: "Bo walks the harbour" });
+      // Bo has one picture, so a free slot is left for the one extra picture under test.
+      const bo = await savedPerson(companyId, "bo");
+    bo.crops = bo.crops.slice(0, 1); // face only, so the model has room for the other pictures
+      bo.crops = bo.crops.slice(0, 1);
+      await saveIdentities(companyId, [bo]);
+      const pic = await file(companyId, `${where}-pic`);
+      if (where === "look") await saveLooks(companyId, [{ id: "look-1", name: "Harbour", style: "warm", provider: "sogni", referenceFileIds: [pic], referenceRoles: ["background"] }]);
+      const storylines = videoStorylineService(db);
+      if (where === "look") await storylines.updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "fal", lookId: "look-1" } }, ACTOR);
+      await storylines.setCast(companyId, storylineId, { members: [{ name: "Bo", identityId: bo.id }] }, ACTOR);
+      if (where === "shot") await storylines.updateShot(companyId, storylineId, shotId, { lookReferenceAssetIds: [pic] }, ACTOR);
+      if (where === "storyline") await storylines.updateStoryline(companyId, storylineId, { characterReferenceAssetIds: [pic] }, ACTOR);
+      const run = () => videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR);
+      await flag(companyId, [pic]);
+      await expect(run()).rejects.toMatchObject(REFUSED);
+      await assertNothingPaid(shotId);
+      await db.update(pluginState).set({ valueJson: [] }).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId), eq(pluginState.stateKey, "identityAgeBlocks")));
+      await run();
+      expect((captured.pictures[0]!.input.referenceImages as string[]).map(keyOf)).toContain(`${where}-pic`);
+      captured.pictures.length = 0;
+    }
+  });
+
+  it("video render and preview: a flagged shot or storyline reference picture refuses the render before any video provider call", async () => {
+    const { companyId, storylineId, shotId } = await seed({ providerId: "sogni", prompt: "a harbour at dusk" });
+    await videoStorylineSettingsService(db).setAdvancedEnabled(companyId, true);
+    const flagged = await file(companyId, "flagged-ref");
+    await flag(companyId, [flagged]);
+    const storylines = videoStorylineService(db);
+    await storylines.updateShot(companyId, storylineId, shotId, { lookReferenceAssetIds: [flagged] }, ACTOR);
+    await db
+      .update(videoShots)
+      .set({ storyboardStatus: "approved", stillObjectKey: "approved-still", stillProvider: "local", stillContentType: "image/png" })
+      .where(eq(videoShots.id, shotId));
+    const render = videoStorylineRenderService(db);
+    await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject(REFUSED);
+    // The preview (a short real clip) sends the same pictures, so it is refused too.
+    await expect(render.renderPreview(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject(REFUSED);
+    expect(captured.videos).toHaveLength(0);
+    // Not flagged: the picture is sent as a reference as before.
+    await db.update(pluginState).set({ valueJson: [] }).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId), eq(pluginState.stateKey, "identityAgeBlocks")));
+    await render.startRender(companyId, storylineId, ACTOR, {});
+    expect((captured.videos[0]!.input.referenceImages as string[]).map(keyOf)).toEqual(["flagged-ref"]);
   });
 });

@@ -156,6 +156,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "company-migration.ts",
   // Contract register routes (DUR-4852, Legal Phase 1) are confidential, board and Legal-agent only, and not yet in the public OpenAPI document.
   "contracts.ts",
+  // Media Studio model setups and LoRA library routes (Phase 1 register) are board-managed, agents read a filtered view, and not yet in the public OpenAPI document.
+  "media-setups.ts",
 ]);
 
 function createApp() {
