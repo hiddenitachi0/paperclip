@@ -167,6 +167,27 @@ d("videoStorylineRenderService budget gate", () => {
     ).rejects.toMatchObject({ status: 422 });
   });
 
+  // DUR-4922: a re-render's earlier render was already paid for, so it must stay in spentCents and run into the cap.
+  it("counts a finished shot's earlier render as spent, so a repeated re-render hits the cap", async () => {
+    // fal is 250 cents for this shot; cap 300. One finished render (250 spent) leaves no room for a second.
+    const { companyId, storylineId, shotId } = await seedEnabledCompanyWithShot(300);
+    await db.update(videoShots).set({ status: "done", actualCostCents: 250 }).where(eq(videoShots.id, shotId));
+    await db.update(videoStorylines).set({ spentCents: 250 }).where(eq(videoStorylines.id, storylineId));
+
+    await expect(
+      videoStorylineRenderService(db).reRenderShot(companyId, storylineId, shotId, ACTOR),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("would push spend to 500 cents"),
+    });
+
+    const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+    const [shot] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
+    expect(storyline!.spentCents).toBe(250);
+    expect(shot!.status).toBe("done");
+    expect(shot!.actualCostCents).toBe(250);
+  });
+
   it("refuses to re-render a shot while the storyline is actively stitching", async () => {
     const { companyId, storylineId } = await seedEnabledCompanyWithShot(100_000);
     const shots = await videoStorylineService(db).listShots(companyId, storylineId);

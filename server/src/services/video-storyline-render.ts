@@ -822,23 +822,24 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (storyline.budgetCapCents === null) {
       throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
     }
-    const refundCents = shot.actualCostCents ?? 0;
-    // Shots already queued or rendering have not settled into spentCents yet: count what they will cost (DUR-4930).
+    // spentCents is money actually paid, so the shot's previous render stays counted: it was paid for, and a loop of
+    // re-renders must run into the cap (DUR-4922). Shots already queued or rendering have not settled into spentCents
+    // yet: count what they will cost (DUR-4930).
     const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, shotId);
-    const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents) + inFlightCents;
+    const spentBefore = storyline.spentCents + inFlightCents;
     // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
     // estimate and the render use the same target.
     const shotEstimate = estimateShotRenderCents(storyline, [withoutAutomaticPin(shot)]);
-    if (spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    if (spentBefore + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
-        `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
+        `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentBefore + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
     // Spend-cap gap (DUR-4915, security review): a re-render on a film that is not already running is a fresh paid
     // render, so it needs the same board sign-off startRender asks for once the company's approval threshold is
-    // crossed. A film that is "rendering" is a run startRender already cleared. Never-made shots have no cost to
-    // refund, so one-shot-at-a-time must not walk past the threshold.
-    const gateTotal = spentAfterRefund + shotEstimate.estimatedTotalCents;
+    // crossed. A film that is "rendering" is a run startRender already cleared. One-shot-at-a-time must not walk
+    // past the threshold.
+    const gateTotal = spentBefore + shotEstimate.estimatedTotalCents;
     const refuseRerender = (thresholdCents: number, totalCents: number) =>
       refuseForApproval(companyId, storyline.title, storylineId, actor, {
         thresholdCents,
@@ -865,7 +866,6 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
       if (!current) throw conflict("This shot was removed while the re-render was starting.");
       if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
-      const lockedRefund = current.actualCostCents ?? 0;
       // Re-check the cap against the row as it is under the lock (a pin or cost may have changed since the
       // pre-lock check), priced with the same clear rule the update below applies.
       if (locked.budgetCapCents === null) {
@@ -873,7 +873,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       }
       const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
       const lockedInFlight = await inFlightShotEstimateCents(tx, locked, companyId, shotId);
-      const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedInFlight + lockedEstimate;
+      const lockedTotal = locked.spentCents + lockedInFlight + lockedEstimate;
       if (lockedTotal > locked.budgetCapCents) {
         throw unprocessable(
           `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
@@ -907,13 +907,6 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           updatedAt: nowOf(),
         })
         .where(eq(videoShots.id, shotId));
-      await tx
-        .update(videoStorylines)
-        .set({
-          ...(lockedRefund > 0 ? { spentCents: Math.max(0, locked.spentCents - lockedRefund) } : {}),
-          updatedAt: nowOf(),
-        })
-        .where(eq(videoStorylines.id, storylineId));
     });
     if (lockedGate.hit) await refuseRerender(lockedGate.hit.thresholdCents, lockedGate.hit.totalCents);
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
@@ -937,7 +930,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       action: "video_shot.rerendered",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex, refundCents },
+      details: { orderIndex: shot.orderIndex, previousCostCents: shot.actualCostCents ?? 0 },
     });
     return storylines.toShotSummary(await storylines.getShotRow(companyId, storylineId, shotId));
   }
