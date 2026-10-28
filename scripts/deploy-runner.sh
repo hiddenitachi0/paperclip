@@ -547,8 +547,8 @@ def sftp_path_problem(entry):
         return "an absolute path"
     if re.search(r"""\s|['"\\]""", entry):
         return "whitespace, a quote or a backslash in it"
-    if re.search(r"[%#?]", entry):
-        return "a percent sign, # or ? in it (curl would read it as part of the URL, not as a file name)"
+    if re.search(r"[%#?\[\]{}]", entry):
+        return "a percent sign, #, ?, square bracket or curly brace in it (curl would read it as part of the URL, not as a file name)"
     body = entry[:-1] if entry.endswith("/") else entry
     segments = body.split("/")
     if any(seg in ("", ".", "..") for seg in segments):
@@ -1570,7 +1570,7 @@ sftp_quote_mkdir_p() { # reldir, host, port, remote_path -> best-effort, relies 
   for segment in "${segs[@]}"; do
     [ -n "$segment" ] || continue
     accum="$accum/$segment"
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "mkdir $remote_path$accum" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "mkdir $remote_path$accum" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
   done
 }
 
@@ -1594,12 +1594,12 @@ sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
   local aid="$1" staging_dir="$2" host="$3" port="$4" remote_path="$5" entry dir
   local base="sftp://$host:$port$remote_path/"
   for entry in "${staged_entries[@]}"; do
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $staging_dir/$entry" "$base" >/dev/null 2>>"$LOG"
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $staging_dir/$entry" "$base" >/dev/null 2>>"$LOG"
   done
   # Every parent directory of every attempted entry, deepest first.
   while IFS= read -r dir; do
     [ -n "$dir" ] && [ "$dir" != "." ] || continue
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir/$dir" "$base" >/dev/null 2>>"$LOG"
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir/$dir" "$base" >/dev/null 2>>"$LOG"
   done < <(
     for entry in "${staged_entries[@]}"; do
       dir="$(dirname "$entry")"
@@ -1609,8 +1609,8 @@ sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
       done
     done | LC_ALL=C sort -u | awk '{ print gsub("/", "/") " " $0 }' | sort -rn | cut -d' ' -f2-
   )
-  curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir" "$base" >/dev/null 2>>"$LOG"
-  curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $remote_path/.deploy-staging" "$base" >/dev/null 2>>"$LOG"
+  curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir" "$base" >/dev/null 2>>"$LOG"
+  curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $remote_path/.deploy-staging" "$base" >/dev/null 2>>"$LOG"
 }
 
 # DUR-4977: shape check for a repo-relative SFTP path (one optional trailing
@@ -1620,10 +1620,10 @@ sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
 sftp_path_shape_ok() { # path -> 0 ok, 1 not a plain relative path
   local p="$1" body
   case "$p" in ""|/*|[A-Za-z]:[\\/]*) return 1 ;; esac
-  # % # ? : curl builds sftp://host/path from the name and reads them as URL
+  # % # ? [ ] { } : curl builds sftp://host/path from the name and reads them as URL
   # syntax ("%2e%2e" is a dot segment, "#"/"?" cut the path short), so the file
   # would land somewhere other than the name the policy checked.
-  case "$p" in *[%#?]*) return 1 ;; esac
+  case "$p" in *[]%#?[{}]*) return 1 ;; esac
   body="${p%/}"
   [ -n "$body" ] || return 1
   case "/$body/" in *//*|*/./*|*/../*) return 1 ;; esac
@@ -1724,8 +1724,8 @@ sftp_expand_allowlist() { # aid, target_dir, allowlist(newline), excludes(newlin
     else
       # Checked only for files that would ship, so an operator can exclude one.
       case "$name" in
-        *[%#?]*)
-          log "runner: $aid a tracked file to upload has a percent sign, # or ? in its name ($name) -- refusing the deploy; exclude or rename it"
+        *[]%#?[{}]*)
+          log "runner: $aid a tracked file to upload has a percent sign, #, ?, [ ] or { } in its name ($name) -- refusing the deploy; exclude or rename it"
           return 1
           ;;
       esac
@@ -1806,8 +1806,8 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
         failures=$((failures + 1))
         continue
         ;;
-      *[%#?]*)
-        log "runner: $aid SFTP allowlist entry '$entry' contains a percent sign, # or ? -- curl would read it as URL syntax and could stage it outside the staging folder or leave it in the live docroot, so it is refused"
+      *[]%#?[{}]*)
+        log "runner: $aid SFTP allowlist entry '$entry' contains a percent sign, #, ?, [ ], or { } -- curl would read it as URL syntax and could stage it outside the staging folder or leave it in the live docroot, so it is refused"
         failures=$((failures + 1))
         continue
         ;;
@@ -1840,7 +1840,7 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
     # staging folder, and the cleanup must remove it too. (The swap only runs
     # when no upload failed, so every recorded entry is a complete one by then.)
     staged_entries+=("$entry")
-    if curl -sS --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$staged_target" 2>>"$LOG"; then
+    if curl -sS --globoff --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$staged_target" 2>>"$LOG"; then
       staged=$((staged + 1))
     else
       log "runner: $aid SFTP staging upload of $entry to $staged_target failed"
@@ -1866,10 +1866,10 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
     # $dest directly. A failure here just means there was nothing at $dest yet
     # (a brand new file), which is the common case for a project's first
     # deploy or a newly added path -- not swallowed, just not fatal.
-    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
-    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $staged_target $dest" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+    curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $staged_target $dest" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
       swapped=$((swapped + 1))
-      curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+      curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
     else
       log "runner: $aid SFTP swap of staged $entry into $dest failed -- restoring the previous file at $dest if there was one"
       swap_failures=$((swap_failures + 1))
@@ -1882,9 +1882,9 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
       # exit, but harmless) by checking afterward whether $dest.deploy-bak is
       # still there: if the restore rename actually ran and failed, the
       # .deploy-bak file is still sitting where it was, unmoved.
-      if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+      if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
         :
-      elif curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "ls $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+      elif curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "ls $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
         log "runner: $aid SFTP restore of the previous file at $dest FAILED -- $dest is now MISSING on the live site (the old version is still at $dest.deploy-bak and must be renamed back manually)"
         swap_missing=$((swap_missing + 1))
       fi
@@ -1948,13 +1948,13 @@ sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, re
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
-      *[[:space:]]*|*\'*|*\"*|*[%#?]*)
+      *[[:space:]]*|*\'*|*\"*|*[]%#?[{}]*)
         log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote/URL-special characters: $entry"
         failures=$((failures + 1))
         continue
         ;;
     esac
-    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $remote_path/$entry" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+    if curl -sS --globoff --disable-epsv "${curl_auth_args[@]}" -Q "rm $remote_path/$entry" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
       removed=$((removed + 1))
     else
       log "runner: $aid could not remove $remote_path/$entry from the SFTP host while cleaning up a rolled-back release -- it may need manual removal"

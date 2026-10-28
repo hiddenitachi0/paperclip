@@ -31,10 +31,10 @@ Everything below is board-only to set. An agent cannot change the host, the key 
 
 - A folder entry means **every file git tracks under that folder at the approved commit** (`git ls-files` in the checkout), not whatever is on disk. Untracked files and git-ignored files can never be published.
 - Excludes are applied after that. An exclude is an exact file path, or a folder ending in `/`.
-- Allowlist entries and excludes must be plain relative paths: no `..`, no absolute path, no `.` or empty segment (`./a`, `a//b`), no spaces, quotes, backslashes, `%`, `#` or `?` (curl reads those as URL syntax, so a file name with one could land outside the staging folder). A bad entry refuses the deploy; it is never silently skipped, because skipping an exclude would publish exactly what it was meant to keep off the site.
+- Allowlist entries and excludes must be plain relative paths: no `..`, no absolute path, no `.` or empty segment (`./a`, `a//b`), no spaces, quotes, backslashes, `%`, `#`, `?`, `[`, `]`, `{` or `}` (curl reads those as URL syntax or file-name patterns, so a file name with one could land outside the staging folder; the runner also passes `--globoff` to every SFTP curl call). A bad entry refuses the deploy; it is never silently skipped, because skipping an exclude would publish exactly what it was meant to keep off the site.
 - A folder entry that tracks no file, or an allowlist that resolves to nothing, refuses the deploy (a typo must not publish a partial site).
 - A tracked symlink is refused: curl would follow it and publish whatever it points to on the runner.
-- A file with a space, quote, `%`, `#` or `?` in its name makes the whole deploy fail before anything is swapped. Exclude its folder (an exclude entry cannot itself contain those characters), or rename it.
+- A file with a space, quote, `%`, `#`, `?`, `[`, `]`, `{` or `}` in its name makes the whole deploy fail before anything is swapped. Exclude its folder (an exclude entry cannot itself contain those characters), or rename it.
 
 ## The SFTP account
 

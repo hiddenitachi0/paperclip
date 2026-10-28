@@ -215,6 +215,8 @@ describe("describeDeployPolicyProblems", () => {
     ["Apps/%2e%2e/data/", "percent sign"],
     ["Apps/info.php#x", "percent sign"],
     ["Apps/info.php?x", "percent sign"],
+    ["Apps/{..}/{..}/data/", "curly brace"],
+    ["Apps/[a-b]/", "square bracket"],
   ])("refuses the exclude entry %j", (entry, reason) => {
     const problems = describeDeployPolicyProblems(sftpPolicy({ sftpExclude: [entry] }), context, "sftp");
     expect(problems).toHaveLength(1);
@@ -222,7 +224,7 @@ describe("describeDeployPolicyProblems", () => {
     expect(problems[0]).toContain(reason);
   });
 
-  it.each(["../", "Apps/../", "/var/www/", "Apps//", "bad name/", "./index.html", "Apps/%2e%2e/", "a#b.html", "a?b.html"])(
+  it.each(["../", "Apps/../", "/var/www/", "Apps//", "bad name/", "./index.html", "Apps/%2e%2e/", "a#b.html", "a?b.html", "Apps/{..}/x", "Apps/[a-b]/", "a}.html"])(
     "refuses the allowlist entry %j",
     (entry) => {
       const problems = describeDeployPolicyProblems(sftpPolicy({ sftpAllowlist: [entry] }), context, "sftp");

@@ -4796,6 +4796,8 @@ test("DUR-4977: upload_via_sftp ships a folder entry's tracked files and passes 
     assert.ok(calls.length > 10, `expected staging, swap and cleanup calls, got ${calls.length}`);
     for (const call of calls) {
       assert.match(call, new RegExp(`--hostpubsha256 ${SFTP_PIN.replace(/[+/]/g, "\\$&")}( |$)`), `curl call without the host-key pin: ${call}`);
+      // Security review of PR #689 (F2): without --globoff curl expands {..} and [a-b] in the -T file and the URL.
+      assert.match(call, / --globoff /, `curl call without --globoff: ${call}`);
     }
     const uploads = calls.filter((c) => c.includes(" -T ")).map((c) => c.split(" -T ")[1].split(" ")[0]);
     assert.deepEqual(
@@ -4812,8 +4814,8 @@ test("DUR-4977: upload_via_sftp ships a folder entry's tracked files and passes 
 // becomes a curl URL whose dot segments curl normalises, so the "staged" upload
 // would land on a live, excluded path. "#" and "?" cut the URL short and leave
 // the file in the docroot. Names are chosen by whoever writes the commit.
-test("DUR-4977: a tracked file name with %, # or ? refuses the deploy before any connection is opened", () => {
-  const names = ["Apps/%2e%2e/%2e%2e/Apps/data/users.json", "Apps/info.php#x", "Apps/info.php?x", "Apps/a%23.php"];
+test("DUR-4977: a tracked file name with %, #, ?, [ ] or { } refuses the deploy before any connection is opened", () => {
+  const names = ["Apps/%2e%2e/%2e%2e/Apps/data/users.json", "Apps/info.php#x", "Apps/info.php?x", "Apps/a%23.php", "Apps/{..}/{..}/{..}/x", "Apps/[a-b]/x.php", "Apps/{a,b}.php"];
   for (const name of names) {
     const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-urlchars-test-"));
     try {
@@ -4833,7 +4835,7 @@ test("DUR-4977: a tracked file name with %, # or ? refuses the deploy before any
          echo "STATUS=$?"`,
       );
       assert.match(result.stdout, /STATUS=1/, `${name} must refuse the deploy\nstdout:${result.stdout}\nstderr:${result.stderr}`);
-      assert.match(log(), /percent sign, # or \?/);
+      assert.match(log(), /percent sign, #, \?/);
       assert.equal(curlCalls(callsLog).filter((c) => c.includes(" -T ")).length, 0, `${name}: nothing may be uploaded`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4857,11 +4859,11 @@ test("DUR-4977: a tracked file with # in its name can be left out by excluding i
   }
 });
 
-test("DUR-4977: an explicit allowlist or exclude entry with %, # or ? is refused", () => {
+test("DUR-4977: an explicit allowlist or exclude entry with %, #, ?, [ ] or { } is refused", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-urlchars-entry-test-"));
   try {
     const site = makeGitSite(dir);
-    for (const [allowlist, excludes] of [["index.html#x", ""], ["Apps/", "Apps/%2e%2e/data/"], ["Apps/a%2ephp", ""], ["Apps/?/", ""]]) {
+    for (const [allowlist, excludes] of [["index.html#x", ""], ["Apps/", "Apps/%2e%2e/data/"], ["Apps/a%2ephp", ""], ["Apps/?/", ""], ["Apps/{..}/x", ""], ["Apps/[a-b]/", ""], ["Apps/", "Apps/{..}/data/"], ["Apps/a}.php", ""]]) {
       const { result } = runSftpScript(
         dir,
         dir,
