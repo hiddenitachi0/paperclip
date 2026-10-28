@@ -212,16 +212,22 @@ export function dataUriSha256(dataUri: string): string | null {
 }
 
 /**
- * A plain refusal when one of a cast member's pictures was flagged by the
- * age check (never sent anywhere), else null.
+ * A plain refusal when one of the pictures about to be sent was flagged by the
+ * age check (never sent anywhere), else null. The refusal set is company-wide
+ * (file ids and byte hashes), so it needs no person: a picture with no owner
+ * (`personName: null`: a look's style or background picture, or a shot's or
+ * storyline's character picture) is checked the same way as a cast member's.
  */
 export function castPictureRefusal(
-  pictures: ReadonlyArray<{ fileId: string; dataUri: string | null; personName: string }>,
+  pictures: ReadonlyArray<{ fileId: string; dataUri: string | null; personName: string | null }>,
   refusals: { fileIds: Set<string>; hashes: Set<string> },
 ): string | null {
   for (const p of pictures) {
     const hash = p.dataUri ? dataUriSha256(p.dataUri) : null;
     if (refusals.fileIds.has(p.fileId) || (hash && refusals.hashes.has(hash))) {
+      if (!p.personName) {
+        return "One of the pictures this would send as a reference (in the look, the shot or the storyline's character pictures) did not pass Media Studio's age check (only pictures clearly of an adult are ever sent), so nothing was made. Remove that picture from the look, the shot or the storyline's character pictures.";
+      }
       return `One of ${p.personName}'s pictures did not pass Media Studio's age check (only pictures clearly of an adult are ever sent), so nothing was made. Change ${p.personName}'s pictures on the Identities tab, or unlink ${p.personName} in the Cast section of step 1.`;
     }
   }

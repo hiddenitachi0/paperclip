@@ -150,6 +150,10 @@ describe("saved people: consent, age check, links", () => {
     expect(castPictureRefusal([{ fileId: "f1", dataUri: uri, personName: "Maja" }], { fileIds: new Set(), hashes: new Set() })).toBeNull();
     expect(castPictureRefusal([{ fileId: "f1", dataUri: uri, personName: "Maja" }], { fileIds: new Set(["f1"]), hashes: new Set() })).toMatch(/Maja's pictures did not pass/);
     expect(castPictureRefusal([{ fileId: "f2", dataUri: uri, personName: "Maja" }], { fileIds: new Set(), hashes: new Set([hash]) })).toMatch(/age check/);
+    // A picture with no owner (a look's style/background picture, a shot's or storyline's reference) is checked the same way.
+    expect(castPictureRefusal([{ fileId: "f3", dataUri: uri, personName: null }], { fileIds: new Set(), hashes: new Set() })).toBeNull();
+    expect(castPictureRefusal([{ fileId: "f3", dataUri: uri, personName: null }], { fileIds: new Set(["f3"]), hashes: new Set() })).toMatch(/pictures this would send as a reference.*age check/);
+    expect(castPictureRefusal([{ fileId: "f3", dataUri: uri, personName: null }], { fileIds: new Set(), hashes: new Set([hash]) })).toMatch(/age check/);
   });
 
   it("a member linked to a person who is gone is made from the description, with a plain note", () => {
