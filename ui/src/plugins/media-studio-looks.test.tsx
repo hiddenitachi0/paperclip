@@ -12,12 +12,8 @@ import {
   modelFilterNotice,
   type LookDraft,
 } from "../../../packages/plugins/media-studio/src/ui/index";
-import {
-  classifyLoras,
-  lorasForModel,
-  parseSogniLoraCatalog,
-  parseSogniModelCatalog,
-} from "../../../packages/plugins/media-studio/src/sogni-catalog";
+import { classifyLoras, lorasForModel, parseSogniLoraCatalog } from "../../../packages/plugins/sdk/src/media/index";
+import { parseSogniModelCatalog } from "../../../packages/plugins/media-studio/src/sogni-catalog";
 import loraCatalog from "../../../server/src/__tests__/fixtures/sogni/loras-comfy.json";
 import modelCatalog from "../../../server/src/__tests__/fixtures/sogni/model-catalog-image.json";
 

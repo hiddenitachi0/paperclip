@@ -1,5 +1,13 @@
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 import {
+  SAFE_FOR_WORK_AVOID,
+  classifyLoras,
+  lorasForModel,
+  madeForText,
+  type LoraFitCheck,
+  type SogniLoraInfo,
+} from "@paperclipai/plugin-sdk/media";
+import {
   FAL_FILL_MODEL,
   FAL_REFERENCE_MODEL,
   FalProvider,
@@ -36,13 +44,8 @@ import {
   SogniCatalog,
   checkSogniLoras,
   checkSogniOverrides,
-  classifyLoras,
-  lorasForModel,
-  madeForText,
   showNumber,
   sizeBoundsFor,
-  type LoraFitCheck,
-  type SogniLoraInfo,
   type SogniModelInfo,
 } from "./sogni-catalog.js";
 import {
@@ -993,7 +996,7 @@ async function prepareSogni(
         // model list) cannot be read, nobody can tell, so the owner/admin-saved
         // picks are sent as saved, as before (Sogni limits strengths itself).
         if (loras.known && info) {
-          const checks = classifyLoras(info, look.loras, loras.known, await sogniModelNames(catalog));
+          const checks = classifyLoras({ id: sogniCanonicalModelId(info.id), name: info.name }, look.loras, loras.known, await sogniModelNames(catalog));
           const skipped = checks.filter((check) => check.fit !== "fits");
           if (skipped.length > 0) {
             picks = picks.filter((pick) => !skipped.some((check) => check.id === pick.id));
@@ -1033,16 +1036,6 @@ async function prepareSogni(
   if (editing) input.maxReferences = max;
   return { info, editing, usesOwnModel };
 }
-
-/**
- * DUR-4133/DUR-4138: the fixed "things to avoid" text merged onto a picture
- * made with `safeForWork: true` — used for pictures nobody reviews before
- * they go out (the morning report's illustrations). DUR-4138: this text
- * (plus "fully clothed" in the prompt) is the *only* safety net `safeForWork`
- * adds now — it no longer touches the provider's own content-filter switch,
- * see the `safeForWork` block below.
- */
-export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermark, logo";
 
 /**
  * Validate the tool input and apply a saved look. Nothing here spends
