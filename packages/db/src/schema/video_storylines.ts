@@ -132,6 +132,13 @@ export const videoStorylines = pgTable(
     // VideoStorylineExportSettings in packages/shared.
     aspect: text("aspect").notNull().default("16:9"),
     exportSettings: jsonb("export_settings").$type<Record<string, unknown>>().notNull().default({}),
+    // Film studio Phase 0 (DUR-4895): 'sfw' or 'mature'. Strictest first --
+    // every existing and new storyline is 'sfw' until someone with the right
+    // to do so sets it, and contentRatingSetBy/At record who and when
+    // (null while it has never been set).
+    contentRating: text("content_rating").notNull().default("sfw"),
+    contentRatingSetBy: text("content_rating_set_by"),
+    contentRatingSetAt: timestamp("content_rating_set_at", { withTimezone: true }),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -145,6 +152,7 @@ export const videoStorylines = pgTable(
       "video_storylines_status_check",
       sql`${table.status} IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'needs_attention', 'failed', 'cancelled')`,
     ),
+    contentRatingCheck: check("video_storylines_content_rating_check", sql`${table.contentRating} IN ('sfw', 'mature')`),
     providerCheck: check("video_storylines_provider_check", sql`${table.providerId} IN ('fal', 'sogni')`),
     budgetCapCheck: check("video_storylines_budget_cap_check", sql`${table.budgetCapCents} IS NULL OR ${table.budgetCapCents} >= 0`),
     spentCentsCheck: check("video_storylines_spent_cents_check", sql`${table.spentCents} >= 0`),
