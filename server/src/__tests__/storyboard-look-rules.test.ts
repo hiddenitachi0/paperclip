@@ -439,7 +439,7 @@ d("storyboard stills apply the look rules (database)", () => {
     await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("age check") });
     expect(captured.pictures).toHaveLength(0);
 
-    // A cast that holds somebody else (the look's face picture is dropped there, its flagged "other" picture is not): same refusal on the cast path.
+    // The shot is confirmed with a cast pick (the cast gate needs one) that holds Maja and somebody else: same refusal on the cast path.
     const bo = {
       ...maja,
       id: `id-bo-${randomUUID().slice(0, 8)}`,
@@ -447,7 +447,8 @@ d("storyboard stills apply the look rules (database)", () => {
       crops: [{ role: "face", fileId: await file(companyId, "bo-face"), sourceFileId: null, box: null }],
     };
     await db.update(pluginState).set({ valueJson: [maja, bo] }).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId), eq(pluginState.stateKey, "identities")));
-    await storylines.setCast(companyId, storylineId, { members: [{ name: "Bo", identityId: bo.id }] }, ACTOR);
+    const mixedCast = await storylines.setCast(companyId, storylineId, { members: [{ name: "Maja", identityId: maja.id }, { name: "Bo", identityId: bo.id }] }, ACTOR);
+    await storylines.setShotCast(companyId, storylineId, shotId, mixedCast.cast.members.map((m) => m.id), ACTOR);
     await storylines.updateShot(companyId, storylineId, shotId, { prompt: "maja and Bo walk along the harbour" }, ACTOR);
     await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("age check") });
     expect(captured.pictures).toHaveLength(0);
