@@ -17,6 +17,8 @@
 import {
   DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES,
   MAX_COMPANY_ATTACHMENT_MAX_BYTES,
+  MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES,
+  MEDIA_VIDEO_FILE_HARD_MAX_BYTES,
 } from "@paperclipai/shared";
 
 export const DEFAULT_ALLOWED_TYPES: readonly string[] = [
@@ -120,4 +122,42 @@ export function normalizeIssueAttachmentMaxBytes(value: number | null | undefine
     return Math.min(DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES, MAX_ATTACHMENT_BYTES);
   }
   return Math.min(Math.floor(value), MAX_COMPANY_ATTACHMENT_MAX_BYTES, MAX_ATTACHMENT_BYTES);
+}
+
+// ---------- D18: video files (finished films, Media Studio videos) ----------
+
+/** Reads the server-wide ceiling for one video file: a positive byte count, never above the hard maximum. */
+export function parseVideoFileMaxBytes(raw: string | undefined): number {
+  const value = Number(raw);
+  if (!raw || !Number.isFinite(value) || value <= 0) return MEDIA_VIDEO_FILE_HARD_MAX_BYTES;
+  return Math.min(Math.floor(value), MEDIA_VIDEO_FILE_HARD_MAX_BYTES);
+}
+
+/**
+ * The largest video file this server keeps, for every company
+ * (`PAPERCLIP_VIDEO_FILE_MAX_BYTES`, at most 4 GB; 4 GB when unset). Each
+ * company's own limit (Media Studio settings, 2 GB by default) sits under it.
+ */
+export const MAX_VIDEO_FILE_BYTES = parseVideoFileMaxBytes(process.env.PAPERCLIP_VIDEO_FILE_MAX_BYTES);
+
+/** A video file, by its (normalised) content type: video/mp4, video/webm, video/quicktime, ... */
+export function isVideoContentType(contentType: string | null | undefined): boolean {
+  return normalizeContentType(contentType).startsWith("video/");
+}
+
+/** One company's per-file video limit in bytes, from its setting (or the default), under the server's ceiling. */
+export function normalizeVideoFileMaxBytes(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return Math.min(MEDIA_VIDEO_FILE_DEFAULT_MAX_BYTES, MAX_VIDEO_FILE_BYTES);
+  }
+  return Math.min(Math.floor(value), MAX_VIDEO_FILE_BYTES);
+}
+
+/**
+ * The limit that applies to one file: video files get the larger video
+ * limit (never less than they had before), everything else keeps the
+ * company's ordinary attachment limit.
+ */
+export function maxBytesForContentType(contentType: string | null | undefined, limits: { attachmentMaxBytes: number; videoFileMaxBytes: number }): number {
+  return isVideoContentType(contentType) ? Math.max(limits.attachmentMaxBytes, limits.videoFileMaxBytes) : limits.attachmentMaxBytes;
 }

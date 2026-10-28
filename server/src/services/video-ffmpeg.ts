@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -198,24 +199,43 @@ export interface StitchResult {
 export async function stitchClips(clipBuffers: readonly Buffer[]): Promise<StitchResult> {
   if (clipBuffers.length === 0) throw new Error("No clips to stitch");
   return withTempDir(async (dir) => {
-    const listLines: string[] = [];
+    const inputs: string[] = [];
     for (const [index, buffer] of clipBuffers.entries()) {
-      const filename = `clip-${String(index).padStart(6, "0")}.mp4`;
-      await writeFile(join(dir, filename), buffer);
-      // ffmpeg's concat demuxer file list format; single-quoted, no escaping needed since we control the filenames.
-      listLines.push(`file '${filename}'`);
+      const path = join(dir, `clip-${String(index).padStart(6, "0")}.mp4`);
+      await writeFile(path, buffer);
+      inputs.push(path);
     }
-    const listPath = join(dir, "list.txt");
-    await writeFile(listPath, listLines.join("\n"));
     const outputPath = join(dir, "out.mp4");
-    await execFileAsync(
-      FFMPEG_BINARY,
-      ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath],
-      { timeout: STITCH_TIMEOUT_MS, cwd: dir },
-    );
+    await stitchClipFiles(inputs, outputPath, dir);
     const buffer = await readFile(outputPath);
     return { buffer, contentType: "video/mp4" };
   });
+}
+
+/** One line of ffmpeg's concat-demuxer list: the path single-quoted, any quote in it escaped the way the demuxer reads it. */
+export function concatListLine(filePath: string): string {
+  return `file '${filePath.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * D18: the file-based stitch -- the same concat (`-c copy`) as stitchClips,
+ * but from clip files already on disk to an output file, so a long film is
+ * never held in memory. Only our own work files are listed (never a path
+ * from a request); the list lives in `workDir`.
+ */
+export async function stitchClipFiles(inputPaths: readonly string[], outputPath: string, workDir: string): Promise<void> {
+  if (inputPaths.length === 0) throw new Error("No clips to stitch");
+  const listPath = join(workDir, `list-${randomUUID()}.txt`);
+  await writeFile(listPath, inputPaths.map((path) => concatListLine(path)).join("\n"));
+  try {
+    await execFileAsync(
+      FFMPEG_BINARY,
+      ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath],
+      { timeout: STITCH_TIMEOUT_MS, cwd: workDir },
+    );
+  } finally {
+    await rm(listPath, { force: true });
+  }
 }
 
 /**
@@ -383,54 +403,79 @@ export async function normalizeClipsForStitch(
       await writeFile(path, buffer);
       inputs.push(path);
     }
-    // No target (older callers): the first clip's size, 30 fps, letterbox -- the round-1 behaviour.
-    const first = await probeVideoSize(inputs[0]!);
-    const width = evenDimension(target?.width ?? first.width);
-    const height = evenDimension(target?.height ?? first.height);
-    const fps = target ? clampExportFps(target.fps) : NORMALIZED_FPS;
-    const fit = target?.fit ?? "fit";
-    const probedAudio = await Promise.all(inputs.map((path) => probeHasAudioStream(path)));
-    const hasAudio = probedAudio.map((has, index) => has && clipOptions[index]?.audio !== "strip");
-    const anyAudio = hasAudio.some(Boolean);
+    const normalized = await normalizeClipFilesForStitch(inputs, clipOptions, target, dir);
     const buffers: Buffer[] = [];
-    const durationsSeconds: number[] = [];
-    for (const [index, input] of inputs.entries()) {
-      const output = join(dir, `norm-${String(index).padStart(6, "0")}.mp4`);
-      const opts = clipOptions[index];
-      const args = ["-y", ...clipTrimInputArgs(opts?.trimMs), "-i", input];
-      if (anyAudio && !hasAudio[index]) {
-        args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
-      }
-      args.push("-map", "0:v:0");
-      if (anyAudio) args.push("-map", hasAudio[index] ? "0:a:0" : "1:a:0");
-      const size = target ? await probeVideoSize(input) : first;
-      const videoFilter = `${target ? buildFitFilter(size, { width, height }, fit) : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`},setsar=1,fps=${fps},format=yuv420p`;
-      let clipVideoFilter = videoFilter;
-      const audioFilters: string[] = [];
-      // A trimmed clip is already cut where the person chose; frame-exact trims would count the wrong frames.
-      if ((opts?.trimEdgeFrames || opts?.trimLastFrame) && !opts?.trimMs) {
-        const probe = await probeFrames(input);
-        const dropFirst = opts.trimEdgeFrames ? 1 : 0;
-        if (probe && probe.frames >= 3) {
-          // Integers only, from ffprobe's own count -- never caller text.
-          clipVideoFilter = `trim=start_frame=${dropFirst}:end_frame=${Math.floor(probe.frames) - 1},setpts=PTS-STARTPTS,${videoFilter}`;
-          if (hasAudio[index] && dropFirst) audioFilters.push(`atrim=start=${(1 / probe.fps).toFixed(4)},asetpts=PTS-STARTPTS`);
-        }
-      }
-      if (hasAudio[index] && opts?.audio && typeof opts.audio === "object") {
-        audioFilters.push(`volume=${clampMusicVolumeDb(opts.audio.gainDb)}dB`);
-      }
-      args.push("-vf", clipVideoFilter, ...encoderArgs(target?.quality ?? "standard"), "-r", String(fps));
-      if (anyAudio && audioFilters.length > 0) args.push("-af", audioFilters.join(","));
-      if (anyAudio) args.push("-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest");
-      else args.push("-an");
-      args.push("-movflags", "+faststart", output);
-      await execFileAsync(FFMPEG_BINARY, args, { timeout: STITCH_TIMEOUT_MS, cwd: dir });
-      buffers.push(await readFile(output));
-      durationsSeconds.push(await probeDurationSeconds(output));
-    }
-    return { buffers, durationsSeconds };
+    for (const path of normalized.paths) buffers.push(await readFile(path));
+    return { buffers, durationsSeconds: normalized.durationsSeconds };
   });
+}
+
+export interface NormalizedClipFiles {
+  /** One normalized clip file per input, in order, inside the caller's work folder. */
+  paths: string[];
+  /** Real duration of each normalized clip, via ffprobe. */
+  durationsSeconds: number[];
+}
+
+/**
+ * D18: normalizeClipsForStitch on files -- clip files already on disk in,
+ * normalized clip files out (`norm-NNNNNN.mp4` in `outDir`) -- so a long
+ * film's clips are never all held in memory at once.
+ */
+export async function normalizeClipFilesForStitch(
+  inputs: readonly string[],
+  clipOptions: ReadonlyArray<NormalizeClipOptions | undefined> = [],
+  target: NormalizeTarget | undefined,
+  outDir: string,
+): Promise<NormalizedClipFiles> {
+  if (inputs.length === 0) throw new Error("No clips to stitch");
+  // No target (older callers): the first clip's size, 30 fps, letterbox -- the round-1 behaviour.
+  const first = await probeVideoSize(inputs[0]!);
+  const width = evenDimension(target?.width ?? first.width);
+  const height = evenDimension(target?.height ?? first.height);
+  const fps = target ? clampExportFps(target.fps) : NORMALIZED_FPS;
+  const fit = target?.fit ?? "fit";
+  const probedAudio = await Promise.all(inputs.map((path) => probeHasAudioStream(path)));
+  const hasAudio = probedAudio.map((has, index) => has && clipOptions[index]?.audio !== "strip");
+  const anyAudio = hasAudio.some(Boolean);
+  const paths: string[] = [];
+  const durationsSeconds: number[] = [];
+  for (const [index, input] of inputs.entries()) {
+    const output = join(outDir, `norm-${String(index).padStart(6, "0")}.mp4`);
+    const opts = clipOptions[index];
+    const args = ["-y", ...clipTrimInputArgs(opts?.trimMs), "-i", input];
+    if (anyAudio && !hasAudio[index]) {
+      args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+    }
+    args.push("-map", "0:v:0");
+    if (anyAudio) args.push("-map", hasAudio[index] ? "0:a:0" : "1:a:0");
+    const size = target ? await probeVideoSize(input) : first;
+    const videoFilter = `${target ? buildFitFilter(size, { width, height }, fit) : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`},setsar=1,fps=${fps},format=yuv420p`;
+    let clipVideoFilter = videoFilter;
+    const audioFilters: string[] = [];
+    // A trimmed clip is already cut where the person chose; frame-exact trims would count the wrong frames.
+    if ((opts?.trimEdgeFrames || opts?.trimLastFrame) && !opts?.trimMs) {
+      const probe = await probeFrames(input);
+      const dropFirst = opts.trimEdgeFrames ? 1 : 0;
+      if (probe && probe.frames >= 3) {
+        // Integers only, from ffprobe's own count -- never caller text.
+        clipVideoFilter = `trim=start_frame=${dropFirst}:end_frame=${Math.floor(probe.frames) - 1},setpts=PTS-STARTPTS,${videoFilter}`;
+        if (hasAudio[index] && dropFirst) audioFilters.push(`atrim=start=${(1 / probe.fps).toFixed(4)},asetpts=PTS-STARTPTS`);
+      }
+    }
+    if (hasAudio[index] && opts?.audio && typeof opts.audio === "object") {
+      audioFilters.push(`volume=${clampMusicVolumeDb(opts.audio.gainDb)}dB`);
+    }
+    args.push("-vf", clipVideoFilter, ...encoderArgs(target?.quality ?? "standard"), "-r", String(fps));
+    if (anyAudio && audioFilters.length > 0) args.push("-af", audioFilters.join(","));
+    if (anyAudio) args.push("-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest");
+    else args.push("-an");
+    args.push("-movflags", "+faststart", output);
+    await execFileAsync(FFMPEG_BINARY, args, { timeout: STITCH_TIMEOUT_MS, cwd: outDir });
+    paths.push(output);
+    durationsSeconds.push(await probeDurationSeconds(output));
+  }
+  return { paths, durationsSeconds };
 }
 
 /** The ffmpeg xfade+acrossfade filter_complex for merging two already-decoded inputs ([0] = everything so far, [1] = the next clip) with a crossfade. Pure string-building, no I/O -- see buildXfadeFilterComplexTests for the injection-safety coverage. */
@@ -502,36 +547,72 @@ export async function stitchClipsWithTransitions(shots: readonly ShotTransitionI
   if (shots.length === 1) return stitchClips([shots[0]!.buffer]);
 
   return withTempDir(async (dir) => {
-    let accumulatedPath = join(dir, "acc-0.mp4");
-    await writeFile(accumulatedPath, shots[0]!.buffer);
-    let pendingCutRun: Buffer[] = [];
-
-    async function flushCutRun(nextBuffer?: Buffer): Promise<void> {
-      if (pendingCutRun.length === 0) return;
-      const stitched = await stitchClips(pendingCutRun);
-      const nextPath = join(dir, `acc-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
-      await writeFile(nextPath, stitched.buffer);
-      accumulatedPath = nextPath;
-      pendingCutRun = [];
-      void nextBuffer;
+    const inputs: ShotTransitionFileInput[] = [];
+    for (const [index, shot] of shots.entries()) {
+      const path = join(dir, `shot-${String(index).padStart(6, "0")}.mp4`);
+      await writeFile(path, shot.buffer);
+      inputs.push({ path, transitionIn: shot.transitionIn, transitionDurationMs: shot.transitionDurationMs });
     }
+    const outputPath = await stitchClipFilesWithTransitions(inputs, dir);
+    return { buffer: await readFile(outputPath), contentType: "video/mp4" };
+  });
+}
 
-    for (let i = 1; i < shots.length; i += 1) {
-      const shot = shots[i]!;
-      if (shot.transitionIn === "cut") {
-        if (pendingCutRun.length === 0) pendingCutRun.push(await readFile(accumulatedPath));
-        pendingCutRun.push(shot.buffer);
-        continue;
-      }
-      await flushCutRun();
-      const nextClipPath = join(dir, `next-${i}.mp4`);
-      await writeFile(nextClipPath, shot.buffer);
-      accumulatedPath = await xfadePair(dir, accumulatedPath, nextClipPath, shot.transitionIn, shot.transitionDurationMs);
+export interface ShotTransitionFileInput {
+  /** A normalized clip file in the work folder. */
+  path: string;
+  transitionIn: "cut" | XfadeName;
+  transitionDurationMs: number;
+}
+
+/**
+ * D18: stitchClipsWithTransitions on files. Same pairwise plan (runs of cuts
+ * joined by concat, each crossfade made by xfade), but every step reads and
+ * writes files in `workDir`, and each in-between result is deleted as soon
+ * as the next one replaces it, so a long film needs about twice its own
+ * size on disk and almost nothing in memory. Returns the finished file's
+ * path (inside `workDir`); the input files are left for the caller.
+ */
+export async function stitchClipFilesWithTransitions(shots: readonly ShotTransitionFileInput[], workDir: string): Promise<string> {
+  if (shots.length === 0) throw new Error("No clips to stitch");
+  const scratchPath = (prefix: string) => join(workDir, `${prefix}-${randomUUID()}.mp4`);
+  if (shots.length === 1) {
+    const outputPath = scratchPath("acc");
+    await stitchClipFiles([shots[0]!.path], outputPath, workDir);
+    return outputPath;
+  }
+
+  let accumulatedPath = shots[0]!.path;
+  const madeHere = new Set<string>();
+  let pendingCutRun: string[] = [];
+
+  async function advanceTo(nextPath: string): Promise<void> {
+    const previous = accumulatedPath;
+    accumulatedPath = nextPath;
+    madeHere.add(nextPath);
+    if (madeHere.delete(previous)) await rm(previous, { force: true });
+  }
+
+  async function flushCutRun(): Promise<void> {
+    if (pendingCutRun.length === 0) return;
+    const nextPath = scratchPath("acc");
+    await stitchClipFiles(pendingCutRun, nextPath, workDir);
+    pendingCutRun = [];
+    await advanceTo(nextPath);
+  }
+
+  for (let i = 1; i < shots.length; i += 1) {
+    const shot = shots[i]!;
+    if (shot.transitionIn === "cut") {
+      if (pendingCutRun.length === 0) pendingCutRun.push(accumulatedPath);
+      pendingCutRun.push(shot.path);
+      continue;
     }
     await flushCutRun();
-
-    return { buffer: await readFile(accumulatedPath), contentType: "video/mp4" };
-  });
+    await advanceTo(await xfadePair(workDir, accumulatedPath, shot.path, shot.transitionIn, shot.transitionDurationMs));
+  }
+  await flushCutRun();
+  return accumulatedPath;
 }
 
 async function xfadePair(dir: string, accumulatedPath: string, nextPath: string, transition: XfadeName, durationMs: number): Promise<string> {
@@ -546,7 +627,8 @@ async function xfadePair(dir: string, accumulatedPath: string, nextPath: string,
   await execFileAsync(
     FFMPEG_BINARY,
     ["-y", "-i", accumulatedPath, "-i", nextPath, "-filter_complex", filter, ...maps, outputPath],
-    { timeout: STITCH_TIMEOUT_MS, cwd: dir },
+    // The whole film so far is re-encoded here, so a long film gets longer (D18).
+    { timeout: ffmpegTimeoutMsFor(accumulatedDuration), cwd: dir },
   );
   return outputPath;
 }
@@ -627,32 +709,40 @@ export async function addMusicBed(video: StitchResult, music: MusicBedInput): Pr
     const musicPath = join(dir, "music.audio");
     await writeFile(videoPath, video.buffer);
     await writeFile(musicPath, music.buffer);
-    const [videoDuration, hasExistingAudio, musicDuration] = await Promise.all([
-      probeDurationSeconds(videoPath),
-      probeHasAudioStream(videoPath),
-      probeDurationSeconds(musicPath),
-    ]);
-    const { filter, output } = buildMusicLaneFilterComplex({
-      volumeDb: music.volumeDb,
-      videoDurationSeconds: videoDuration,
-      musicDurationSeconds: musicDuration,
-      hasExistingAudio,
-      trimInMs: music.trimInMs,
-      trimOutMs: music.trimOutMs,
-      offsetMs: music.offsetMs,
-      fadeInMs: music.fadeInMs,
-      fadeOutMs: music.fadeOutMs,
-      mode: music.mode,
-    });
     const outputPath = join(dir, "with-music.mp4");
-    await execFileAsync(
-      FFMPEG_BINARY,
-      // The music may be an uploaded file: local files only, never a playlist reaching out (security review DUR-4745).
-      ["-y", "-i", videoPath, "-protocol_whitelist", "file", "-i", musicPath, "-filter_complex", filter, "-map", "0:v", "-map", output, "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", outputPath],
-      { timeout: ffmpegTimeoutMsFor(videoDuration), cwd: dir },
-    );
+    await addMusicBedToFile(videoPath, { ...music, path: musicPath }, outputPath, dir);
     return { buffer: await readFile(outputPath), contentType: "video/mp4" };
   });
+}
+
+/** The music lane for addMusicBedToFile: the same settings as MusicBedInput, with the music as a file on disk. */
+export type MusicBedFileInput = Omit<MusicBedInput, "buffer"> & { path: string };
+
+/** D18: addMusicBed on files -- the film and the music read from disk, the result written to `outputPath`. */
+export async function addMusicBedToFile(videoPath: string, music: MusicBedFileInput, outputPath: string, workDir: string): Promise<void> {
+  const [videoDuration, hasExistingAudio, musicDuration] = await Promise.all([
+    probeDurationSeconds(videoPath),
+    probeHasAudioStream(videoPath),
+    probeDurationSeconds(music.path),
+  ]);
+  const { filter, output } = buildMusicLaneFilterComplex({
+    volumeDb: music.volumeDb,
+    videoDurationSeconds: videoDuration,
+    musicDurationSeconds: musicDuration,
+    hasExistingAudio,
+    trimInMs: music.trimInMs,
+    trimOutMs: music.trimOutMs,
+    offsetMs: music.offsetMs,
+    fadeInMs: music.fadeInMs,
+    fadeOutMs: music.fadeOutMs,
+    mode: music.mode,
+  });
+  await execFileAsync(
+    FFMPEG_BINARY,
+    // The music may be an uploaded file: local files only, never a playlist reaching out (security review DUR-4745).
+    ["-y", "-i", videoPath, "-protocol_whitelist", "file", "-i", music.path, "-filter_complex", filter, "-map", "0:v", "-map", output, "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", outputPath],
+    { timeout: ffmpegTimeoutMsFor(videoDuration), cwd: workDir },
+  );
 }
 
 // ─── Loudness: an even, never-clipping sound track on every export ─────────
@@ -797,21 +887,32 @@ export async function normalizeLoudness(video: StitchResult): Promise<LoudnessRe
   return withTempDir(async (dir) => {
     const inputPath = join(dir, "film.mp4");
     await writeFile(inputPath, video.buffer);
-    if (!(await probeHasAudioStream(inputPath))) return { ...video, mode: "no-audio" };
-    const duration = await probeDurationSeconds(inputPath).catch(() => 0);
-    const timeout = ffmpegTimeoutMsFor(duration);
-    let measured: LoudnormMeasurement | null = null;
-    try {
-      const { stderr } = await execFileAsync(FFMPEG_BINARY, buildLoudnessMeasureArgs(inputPath), { timeout, maxBuffer: 16 * 1024 * 1024, cwd: dir });
-      measured = parseLoudnormMeasurement(stderr);
-    } catch (err) {
-      const withStderr = err as { stderr?: unknown };
-      measured = typeof withStderr.stderr === "string" ? parseLoudnormMeasurement(withStderr.stderr) : null;
-    }
     const outputPath = join(dir, "film-loudness.mp4");
-    await execFileAsync(FFMPEG_BINARY, buildLoudnessApplyArgs(inputPath, outputPath, buildLoudnessFilter(measured)), { timeout, cwd: dir });
-    return { buffer: await readFile(outputPath), contentType: video.contentType, mode: measured ? "two-pass" : "one-pass" };
+    const mode = await normalizeLoudnessFile(inputPath, outputPath, dir);
+    if (mode === "no-audio") return { ...video, mode };
+    return { buffer: await readFile(outputPath), contentType: video.contentType, mode };
   });
+}
+
+/**
+ * D18: normalizeLoudness on files. Writes the evened-out film to
+ * `outputPath`; for a film without a sound track nothing is written and
+ * "no-audio" comes back (keep the input as it is).
+ */
+export async function normalizeLoudnessFile(inputPath: string, outputPath: string, workDir: string): Promise<LoudnessResult["mode"]> {
+  if (!(await probeHasAudioStream(inputPath))) return "no-audio";
+  const duration = await probeDurationSeconds(inputPath).catch(() => 0);
+  const timeout = ffmpegTimeoutMsFor(duration);
+  let measured: LoudnormMeasurement | null = null;
+  try {
+    const { stderr } = await execFileAsync(FFMPEG_BINARY, buildLoudnessMeasureArgs(inputPath), { timeout, maxBuffer: 16 * 1024 * 1024, cwd: workDir });
+    measured = parseLoudnormMeasurement(stderr);
+  } catch (err) {
+    const withStderr = err as { stderr?: unknown };
+    measured = typeof withStderr.stderr === "string" ? parseLoudnormMeasurement(withStderr.stderr) : null;
+  }
+  await execFileAsync(FFMPEG_BINARY, buildLoudnessApplyArgs(inputPath, outputPath, buildLoudnessFilter(measured)), { timeout, cwd: workDir });
+  return measured ? "two-pass" : "one-pass";
 }
 
 /** Whether a file has a picture at all (false when ffprobe cannot read it). */
@@ -1217,16 +1318,44 @@ export function untrustedInputArgs(format: "mov" | "matroska" | null): string[] 
   return ["-protocol_whitelist", "file", ...(format ? ["-f", format] : [])];
 }
 
-export async function probeMediaFile(filePath: string, format: "mov" | "matroska" | null = null): Promise<ProbedMedia | null> {
+export async function probeMediaFile(filePath: string, format: "mov" | "matroska" | null = null, timeoutMs = PROBE_TIMEOUT_MS): Promise<ProbedMedia | null> {
   try {
     const { stdout } = await execFileAsync(FFPROBE_BINARY, ["-v", "error", ...untrustedInputArgs(format), "-show_streams", "-show_format", "-of", "json", filePath], {
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
     });
     return readProbeJson(JSON.parse(stdout));
   } catch {
     return null;
   }
+}
+
+/**
+ * D18 security review (F3): whether a file that claims to be a video really
+ * is one, before a large one is kept. Its first bytes must look like MP4/MOV
+ * or WebM/Matroska (sniffVideoContainer), and ffprobe -- reading the local
+ * file only (-protocol_whitelist file, so never the network), as the
+ * container those bytes name (no format guessing), within a time limit --
+ * must find a picture stream in it. Four lucky bytes are not enough: a
+ * "free" box followed by anything else is refused here. Any failure (no
+ * ffprobe on the server, an error, the time limit) counts as "not a video".
+ * The path is always one the server made.
+ */
+export async function verifyVideoFile(filePath: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+  const head = Buffer.alloc(16);
+  try {
+    const handle = await open(filePath, "r");
+    try {
+      await handle.read(head, 0, head.length, 0);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return false;
+  }
+  const format = sniffVideoContainer(head);
+  if (!format) return false;
+  return (await probeMediaFile(filePath, format, opts.timeoutMs ?? PROBE_TIMEOUT_MS)) !== null;
 }
 
 export interface ProcessedUploadVideo {
@@ -1247,46 +1376,77 @@ export class UploadProcessingError extends Error {}
 /** Turns an uploaded video into its working copy, light preview and poster (design 2.5). */
 export async function processUploadedVideo(raw: Buffer, opts: { fps: number; maxSeconds: number }): Promise<ProcessedUploadVideo> {
   return withTempDir(async (dir) => {
-    const format = sniffVideoContainer(raw);
-    if (!format) throw new UploadProcessingError("This file is not a video this server can use. Upload an MP4, MOV or WebM video.");
+    if (!sniffVideoContainer(raw)) throw new UploadProcessingError("This file is not a video this server can use. Upload an MP4, MOV or WebM video.");
     const input = join(dir, "raw.video");
     await writeFile(input, raw);
-    const media = await probeMediaFile(input, format);
-    if (!media) throw new UploadProcessingError("This file could not be read as a video. Try saving it as an MP4 or MOV and upload it again.");
-    if (media.durationSeconds > opts.maxSeconds + 0.5) {
-      throw new UploadProcessingError(`This video is ${Math.round(media.durationSeconds)} seconds long; this company allows up to ${opts.maxSeconds} seconds per upload. Shorten it and upload it again.`);
-    }
-    const hdr = isHdrMedia(media);
-    const toneMap = hdr && (await ffmpegHasFilter("zscale")) && (await ffmpegHasFilter("tonemap"));
-    const working = join(dir, "working.mp4");
-    await execFileAsync(FFMPEG_BINARY, buildUploadTranscodeArgs({ input, output: working, media, fps: opts.fps, toneMap, inputFormat: format }), {
-      timeout: ffmpegTimeoutMsFor(media.durationSeconds * 3),
-      cwd: dir,
-    });
-    const workingMedia = await probeMediaFile(working);
-    if (!workingMedia) throw new UploadProcessingError("The video could not be converted. Try another file.");
-    const preview = join(dir, "preview.mp4");
-    await execFileAsync(FFMPEG_BINARY, buildPreviewArgs({ input: working, output: preview, width: workingMedia.width, height: workingMedia.height, hasAudio: workingMedia.hasAudio }), {
-      timeout: ffmpegTimeoutMsFor(media.durationSeconds),
-      cwd: dir,
-    });
-    const poster = join(dir, "poster.jpg");
-    const posterSize = fitInside(workingMedia.width, workingMedia.height, 0, 480);
-    await execFileAsync(FFMPEG_BINARY, ["-y", "-i", working, "-vf", `scale=${posterSize.width}:${posterSize.height}`, "-frames:v", "1", "-q:v", "4", poster], {
-      timeout: FRAME_EXTRACT_TIMEOUT_MS,
-      cwd: dir,
-    });
-    return {
-      working: await readFile(working),
-      preview: await readFile(preview),
-      poster: await readFile(poster),
-      media,
-      output: { width: workingMedia.width, height: workingMedia.height, durationSeconds: workingMedia.durationSeconds || media.durationSeconds },
-      wasHdr: hdr,
-      wasVariableFrameRate: isVariableFrameRate(media),
-      note: hdr && !toneMap ? "This video was filmed in HDR, and this server's ffmpeg cannot convert HDR colours, so it may look washed out." : null,
-    };
+    const { workingPath, previewPath, posterPath, ...rest } = await processUploadedVideoFile(input, opts, dir);
+    return { ...rest, working: await readFile(workingPath), preview: await readFile(previewPath), poster: await readFile(posterPath) };
   });
+}
+
+/** What processUploadedVideoFile made: the three files (in the caller's work folder) and what was learned about the video. */
+export type ProcessedUploadVideoFiles = Omit<ProcessedUploadVideo, "working" | "preview" | "poster"> & {
+  workingPath: string;
+  previewPath: string;
+  posterPath: string;
+};
+
+/** The first bytes of a file on disk (to sniff what it really is), never the whole file. */
+async function readFileHead(filePath: string, bytes: number): Promise<Buffer> {
+  const handle = await open(filePath, "r");
+  try {
+    const head = Buffer.alloc(bytes);
+    const { bytesRead } = await handle.read(head, 0, bytes, 0);
+    return head.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * D18: processUploadedVideo on files -- the uploaded video read from disk
+ * (up to the company's video limit, 2 GB by default), the working copy,
+ * preview and poster written to `outDir` -- so a long upload is never held
+ * in memory.
+ */
+export async function processUploadedVideoFile(input: string, opts: { fps: number; maxSeconds: number }, outDir: string): Promise<ProcessedUploadVideoFiles> {
+  const format = sniffVideoContainer(await readFileHead(input, 16));
+  if (!format) throw new UploadProcessingError("This file is not a video this server can use. Upload an MP4, MOV or WebM video.");
+  const media = await probeMediaFile(input, format);
+  if (!media) throw new UploadProcessingError("This file could not be read as a video. Try saving it as an MP4 or MOV and upload it again.");
+  if (media.durationSeconds > opts.maxSeconds + 0.5) {
+    throw new UploadProcessingError(`This video is ${Math.round(media.durationSeconds)} seconds long; this company allows up to ${opts.maxSeconds} seconds per upload. Shorten it and upload it again.`);
+  }
+  const hdr = isHdrMedia(media);
+  const toneMap = hdr && (await ffmpegHasFilter("zscale")) && (await ffmpegHasFilter("tonemap"));
+  const working = join(outDir, "working.mp4");
+  await execFileAsync(FFMPEG_BINARY, buildUploadTranscodeArgs({ input, output: working, media, fps: opts.fps, toneMap, inputFormat: format }), {
+    timeout: ffmpegTimeoutMsFor(media.durationSeconds * 3),
+    cwd: outDir,
+  });
+  const workingMedia = await probeMediaFile(working);
+  if (!workingMedia) throw new UploadProcessingError("The video could not be converted. Try another file.");
+  const preview = join(outDir, "preview.mp4");
+  await execFileAsync(FFMPEG_BINARY, buildPreviewArgs({ input: working, output: preview, width: workingMedia.width, height: workingMedia.height, hasAudio: workingMedia.hasAudio }), {
+    timeout: ffmpegTimeoutMsFor(media.durationSeconds),
+    cwd: outDir,
+  });
+  const poster = join(outDir, "poster.jpg");
+  const posterSize = fitInside(workingMedia.width, workingMedia.height, 0, 480);
+  await execFileAsync(FFMPEG_BINARY, ["-y", "-i", working, "-vf", `scale=${posterSize.width}:${posterSize.height}`, "-frames:v", "1", "-q:v", "4", poster], {
+    timeout: FRAME_EXTRACT_TIMEOUT_MS,
+    cwd: outDir,
+  });
+  return {
+    workingPath: working,
+    previewPath: preview,
+    posterPath: poster,
+    media,
+    output: { width: workingMedia.width, height: workingMedia.height, durationSeconds: workingMedia.durationSeconds || media.durationSeconds },
+    wasHdr: hdr,
+    wasVariableFrameRate: isVariableFrameRate(media),
+    note: hdr && !toneMap ? "This video was filmed in HDR, and this server's ffmpeg cannot convert HDR colours, so it may look washed out." : null,
+  };
 }
 
 /** One clip cut from an uploaded video's working copy. */

@@ -39,7 +39,14 @@ const FAKE_DRIVER_OPTIONS = {
   },
 };
 
-function makeFakeReservedConnection(unsafeRows: unknown[]) {
+/**
+ * Rows every compiled query comes back with: a fixed list, or a function of
+ * the query text and its parameters for a test whose route runs more than
+ * one kind of scoped query.
+ */
+export type FakeUnsafeRows = unknown[] | ((query: string, params: unknown[]) => unknown[]);
+
+function makeFakeReservedConnection(unsafeRows: FakeUnsafeRows) {
   // DUR-381: the raw tagged-template calls runInCompanyScope/runInCompanyScopeBypass
   // make directly on `reserved` (set_config, the paperclip_app_bypass role
   // check, RESET) never go through `.unsafe()` -- only drizzle's own query
@@ -52,16 +59,17 @@ function makeFakeReservedConnection(unsafeRows: unknown[]) {
   Object.assign(reserved, {
     release: () => {},
     options: FAKE_DRIVER_OPTIONS,
-    unsafe: (..._args: unknown[]) => {
-      const result: Promise<unknown[]> & { values?: () => Promise<unknown[]> } = Promise.resolve(unsafeRows);
-      result.values = () => Promise.resolve(unsafeRows);
+    unsafe: (...args: unknown[]) => {
+      const rows = typeof unsafeRows === "function" ? unsafeRows(String(args[0] ?? ""), (args[1] as unknown[] | undefined) ?? []) : unsafeRows;
+      const result: Promise<unknown[]> & { values?: () => Promise<unknown[]> } = Promise.resolve(rows);
+      result.values = () => Promise.resolve(rows);
       return result;
     },
   });
   return reserved;
 }
 
-export function withFakeCompanyScopeReserve<T extends object>(fakeDb: T, opts: { unsafeRows?: unknown[] } = {}): T {
+export function withFakeCompanyScopeReserve<T extends object>(fakeDb: T, opts: { unsafeRows?: FakeUnsafeRows } = {}): T {
   const unsafeRows = opts.unsafeRows ?? [];
   Object.defineProperty(fakeDb, "$client", {
     value: {

@@ -1,4 +1,7 @@
-import { buffer as streamToBuffer } from "node:stream/consumers";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, videoShots, videoStorylines } from "@paperclipai/db";
@@ -7,18 +10,19 @@ import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
+import { companyVideoFileMaxBytes, instanceVideoFileMaxMb, mediaWorkDir } from "./media-video-limits.js";
 import type { VideoStorylineActor } from "./video-storylines.js";
 import {
-  addMusicBed,
+  addMusicBedToFile,
   checkFfmpegAvailable,
-  normalizeClipsForStitch,
-  normalizeLoudness,
+  normalizeClipFilesForStitch,
+  normalizeLoudnessFile,
   renderTitleCard,
-  stitchClips,
-  stitchClipsWithTransitions,
-  type MusicBedInput,
+  stitchClipFiles,
+  stitchClipFilesWithTransitions,
+  type MusicBedFileInput,
   type NormalizeClipOptions,
-  type ShotTransitionInput,
+  type ShotTransitionFileInput,
 } from "./video-ffmpeg.js";
 import { runMediaJob } from "./media-job-queue.js";
 import { buildStitchPlan } from "./video-storyline-transitions.js";
@@ -77,6 +81,27 @@ function qualityExplanation(issues: readonly VideoStorylineQualityIssue[]): stri
 
 const STITCH_TICK_BATCH = 5;
 
+/** The music lane to lay under the film: its settings now, its stored file fetched into the work folder when the film is made. */
+type MusicBedPlan = Omit<MusicBedFileInput, "path"> & { objectKey: string };
+
+/** Drops work files that are no longer needed, so a long film needs about twice its size on disk, not five times. */
+async function removeFiles(paths: readonly string[]): Promise<void> {
+  await Promise.all(paths.map((path) => rm(path, { force: true }).catch(() => undefined)));
+}
+
+function megabytes(bytes: number): string {
+  return `${Math.ceil(bytes / (1024 * 1024))} MB`;
+}
+
+/** D18: plain words for a finished film over the company's per-file video limit. */
+export function filmTooLargeMessage(filmBytes: number, maxBytes: number): string {
+  return (
+    `The finished film is ${megabytes(filmBytes)}, more than this company keeps for one video file (${megabytes(maxBytes)}), so it was not saved. ` +
+    `An owner or admin can raise "Largest film or saved video" in Media Studio's settings (this server allows up to ${instanceVideoFileMaxMb()} MB), ` +
+    `or the film can be made shorter or with Standard quality. Then press "Combine again".`
+  );
+}
+
 export interface VideoStorylineStitchDeps {
   now?: () => Date;
 }
@@ -84,10 +109,10 @@ export interface VideoStorylineStitchDeps {
 export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDeps = {}) {
   const nowOf = () => deps.now?.() ?? new Date();
 
-  async function downloadClip(companyId: string, objectKey: string): Promise<Buffer> {
-    const storage = getStorageService();
-    const object = await storage.getObject(companyId, objectKey);
-    return streamToBuffer(object.stream);
+  /** D18: a stored clip (or music file) streamed straight to a work file, never read into memory. */
+  async function downloadTo(companyId: string, objectKey: string, filePath: string): Promise<void> {
+    const object = await getStorageService().getObject(companyId, objectKey);
+    await pipeline(object.stream, createWriteStream(filePath));
   }
 
   /**
@@ -96,20 +121,20 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
    * resolver yet (no licensed-source picker exists), so a storyline left
    * with one set is treated the same as "ffmpeg unavailable": parked with
    * stitchBlockedReason, never silently stitched without the music the user
-   * asked for.
+   * asked for. The file itself is fetched into the film's work folder when
+   * the film is made.
    */
   async function loadMusicBed(
     companyId: string,
     storyline: typeof videoStorylines.$inferSelect,
-  ): Promise<MusicBedInput | "unsupported" | null> {
+  ): Promise<MusicBedPlan | "unsupported" | null> {
     if (storyline.musicSourceKey) return "unsupported";
     if (!storyline.musicAssetId) return null;
     const [asset] = await db.select().from(assets).where(and(eq(assets.id, storyline.musicAssetId), eq(assets.companyId, companyId)));
     if (!asset) return "unsupported";
-    const buffer = await downloadClip(companyId, asset.objectKey);
     // Phase 2 music lane: trim, start offset, fades and mix/replace.
     return {
-      buffer,
+      objectKey: asset.objectKey,
       volumeDb: storyline.musicVolumeDb,
       trimInMs: storyline.musicTrimInMs,
       trimOutMs: storyline.musicTrimOutMs,
@@ -195,7 +220,13 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
 
     await db.update(videoStorylines).set({ status: "stitching", stitchBlockedReason: null, updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
 
+    // D18: the whole film is made on disk, in one work folder per stitch
+    // (clips streamed in from storage, ffmpeg file to file, the finished film
+    // streamed back into storage), so a long film is never held in memory.
+    let workDir: string | null = null;
     try {
+      workDir = await mkdtemp(join(await mediaWorkDir(), "paperclip-film-"));
+      const dir = workDir;
       // At most a few heavy ffmpeg jobs at once on the shared box (media-job-queue.ts).
       const built = await runMediaJob(`stitch ${storyline.id}`, async () => {
         // The first item always joins with "cut" -- there is nothing before it.
@@ -206,7 +237,7 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         type BuiltItem = {
           objectKey: string | null;
           buffer?: Buffer;
-          transitionIn: ShotTransitionInput["transitionIn"];
+          transitionIn: ShotTransitionFileInput["transitionIn"];
           transitionDurationMs: number;
           normalize?: NormalizeClipOptions;
           writtenSeconds: number;
@@ -234,60 +265,106 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
           items.push({ objectKey: null, buffer, transitionIn: "cut", transitionDurationMs: 0, writtenSeconds: exportSettings.credits.seconds, allowStill: true, allowSilence: true });
         }
         const allCut = items.every((item, index) => index === 0 || item.transitionIn === "cut");
-        const rawClips: Buffer[] = [];
-        for (const item of items) {
-          rawClips.push(item.buffer ?? (await downloadClip(storyline.companyId, item.objectKey!)));
+        const rawPaths: string[] = [];
+        for (const [index, item] of items.entries()) {
+          const rawPath = join(dir, `raw-${String(index).padStart(6, "0")}.mp4`);
+          if (item.buffer) await writeFile(rawPath, item.buffer);
+          else await downloadTo(storyline.companyId, item.objectKey!, rawPath);
+          rawPaths.push(rawPath);
         }
         // Same size/frame rate/codecs for every clip first -- see
         // normalizeClipsForStitch -- and the real length of each one.
-        const normalized = await normalizeClipsForStitch(rawClips, items.map((item) => item.normalize), target);
-        let result: Awaited<ReturnType<typeof stitchClips>>;
+        const normalized = await normalizeClipFilesForStitch(rawPaths, items.map((item) => item.normalize), target, dir);
+        await removeFiles(rawPaths);
+        let filmPath: string;
         if (allCut) {
-          result = await stitchClips(normalized.buffers);
+          filmPath = join(dir, "film.mp4");
+          await stitchClipFiles(normalized.paths, filmPath, dir);
         } else {
-          const inputs: ShotTransitionInput[] = items.map((item, index) => ({
-            buffer: normalized.buffers[index]!,
+          const inputs: ShotTransitionFileInput[] = items.map((item, index) => ({
+            path: normalized.paths[index]!,
             transitionIn: index === 0 ? "cut" : item.transitionIn,
             transitionDurationMs: item.transitionDurationMs,
           }));
-          result = await stitchClipsWithTransitions(inputs);
+          filmPath = await stitchClipFilesWithTransitions(inputs, dir);
         }
+        await removeFiles(normalized.paths.filter((path) => path !== filmPath));
         if (musicBed) {
-          result = await addMusicBed(result, musicBed);
+          const musicPath = join(dir, "music.audio");
+          await downloadTo(storyline.companyId, musicBed.objectKey, musicPath);
+          const withMusic = join(dir, "film-music.mp4");
+          await addMusicBedToFile(filmPath, { ...musicBed, path: musicPath }, withMusic, dir);
+          await removeFiles([filmPath, musicPath]);
+          filmPath = withMusic;
         }
         // An even, never-clipping sound track. If this step fails the film
         // is kept as it is (the check may then warn about loud peaks)
         // rather than losing the whole export over the sound.
         try {
-          const evened = await normalizeLoudness(result);
-          result = { buffer: evened.buffer, contentType: evened.contentType };
+          const evened = join(dir, "film-even.mp4");
+          if ((await normalizeLoudnessFile(filmPath, evened, dir)) !== "no-audio") {
+            await removeFiles([filmPath]);
+            filmPath = evened;
+          }
         } catch (err) {
           logger.warn({ err, storylineId: storyline.id }, "video-storyline-stitch: evening out the sound failed; keeping the film as stitched");
         }
-        return { stitched: result, normalized, items };
+        return { filmPath, durationsSeconds: normalized.durationsSeconds, items };
       });
-      const { stitched, normalized, items: builtItems } = built;
-      const durationSeconds = Math.round(normalized.durationsSeconds.reduce((sum, seconds) => sum + seconds, 0));
+      const { filmPath, durationsSeconds: clipSeconds, items: builtItems } = built;
+      const durationSeconds = Math.round(clipSeconds.reduce((sum, seconds) => sum + seconds, 0));
+
+      // D18: one finished film may be up to this company's video file limit
+      // (2 GB by default). A longer one is not stored; the person is told
+      // what to change, and "Combine again" works once the limit is raised.
+      const filmBytes = (await stat(filmPath)).size;
+      const maxBytes = await companyVideoFileMaxBytes(db, storyline.companyId);
+      if (filmBytes > maxBytes) {
+        const message = filmTooLargeMessage(filmBytes, maxBytes);
+        await db
+          .update(videoStorylines)
+          .set({
+            status: "needs_attention",
+            errorMessage: message,
+            stitchBlockedReason: null,
+            qualityCheckIssues: [{ code: "stitch_failed", message, shotIndex: null, timeSeconds: null, severity: "blocking" }],
+            qualityCheckedAt: nowOf(),
+            updatedAt: nowOf(),
+          })
+          .where(eq(videoStorylines.id, storyline.id));
+        await logActivity(db, {
+          companyId: storyline.companyId,
+          actorType: "agent",
+          actorId: storyline.createdByAgentId ?? storyline.createdByUserId ?? "system",
+          agentId: storyline.createdByAgentId,
+          action: "video_storyline.needs_attention",
+          entityType: "video_storyline",
+          entityId: storyline.id,
+          details: { reason: "film_too_large", byteSize: filmBytes, maxBytes, durationSeconds },
+        });
+        return "needs_attention";
+      }
 
       // DUR-4318: check the stitched file before it is ever shown as "done".
       // Planned against each clip's REAL length: providers snap or round
       // clip lengths (Kling only makes 5s/10s clips), so the written shot
       // durations are not what the film is made of.
       const shotPlans: VideoQualityCheckShotPlan[] = builtItems.map((item, index) => ({
-        durationSeconds: normalized.durationsSeconds[index] ?? item.writtenSeconds,
+        durationSeconds: clipSeconds[index] ?? item.writtenSeconds,
         transitionIn: index === 0 ? "cut" : item.transitionIn,
         transitionDurationMs: item.transitionDurationMs,
         allowStill: item.allowStill,
         allowSilence: item.allowSilence,
       }));
-      const qualityCheck = await runVideoQualityCheck(stitched.buffer, { shots: shotPlans, expectAudio: musicBed !== null });
+      const qualityCheck = await runVideoQualityCheck(filmPath, { shots: shotPlans, expectAudio: musicBed !== null });
 
-      const stored = await getStorageService().putFile({
+      const stored = await getStorageService().putFileFromPath({
         companyId: storyline.companyId,
         namespace: `video-storylines/${storyline.id}`,
         originalFilename: `${storyline.title || "storyline"}.mp4`,
-        contentType: stitched.contentType,
-        body: stitched.buffer,
+        contentType: "video/mp4",
+        filePath: filmPath,
+        maxBytes,
       });
       // Warnings never block: only a truly broken film waits on "needs_attention".
       const blocked = qualityCheck.blocking;
@@ -354,6 +431,9 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         })
         .where(eq(videoStorylines.id, storyline.id));
       return "failed";
+    } finally {
+      // The clips, the in-between files and the film itself (now in storage, or not kept) go with the work folder.
+      if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 

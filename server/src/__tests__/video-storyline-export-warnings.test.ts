@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -38,6 +38,13 @@ vi.mock("../storage/index.ts", () => ({
       storedObjects.set(objectKey, { body: input.body, contentType: input.contentType });
       return { provider: "local_disk", objectKey, contentType: input.contentType, byteSize: input.body.byteLength, sha256: `sha-${objectKey}`, originalFilename: input.originalFilename };
     },
+    // D18: finished films are streamed in from a file on disk.
+    putFileFromPath: async (input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; filePath: string }) => {
+      const body = await (await import("node:fs/promises")).readFile(input.filePath);
+      const objectKey = `${input.companyId}/${input.namespace}/${Math.random().toString(36).slice(2)}-${input.originalFilename ?? "file"}`;
+      storedObjects.set(objectKey, { body, contentType: input.contentType });
+      return { provider: "local_disk", objectKey, contentType: input.contentType, byteSize: body.byteLength, sha256: `sha-${objectKey}`, originalFilename: input.originalFilename };
+    },
     getObject: async (_companyId: string, objectKey: string) => {
       const found = storedObjects.get(objectKey);
       if (!found) throw new Error(`no such object ${objectKey}`);
@@ -62,6 +69,16 @@ vi.mock("../services/video-quality-check.ts", async (importOriginal) => {
       }
       return actual.runVideoQualityCheck(...args);
     },
+  };
+});
+
+/** D18: lets a test force the company's per-file video limit without making a 2 GB film. */
+const forcedLimit = vi.hoisted(() => ({ bytes: null as number | null }));
+vi.mock("../services/media-video-limits.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/media-video-limits.ts")>();
+  return {
+    ...actual,
+    companyVideoFileMaxBytes: async (...args: Parameters<typeof actual.companyVideoFileMaxBytes>) => forcedLimit.bytes ?? actual.companyVideoFileMaxBytes(...args),
   };
 });
 
@@ -315,5 +332,48 @@ d("storyline export: warnings never block, the sound is evened out, real problem
     expect((await request(app).post(`${base}/stitch/accept-warnings`)).status).toBe(409);
     expect((await request(app).post(`${base}/stitch/retry`)).status).toBe(200);
     expect((await row(storylineId)).errorMessage).toBeNull();
+  }, 120_000);
+
+  it("D18: a film over the company's video file limit is not stored and says what to change; it is made on disk and the work folder is removed", async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), "paperclip-d18-film-work-"));
+    const previousWorkDir = process.env.PAPERCLIP_MEDIA_WORK_DIR;
+    process.env.PAPERCLIP_MEDIA_WORK_DIR = workRoot;
+    try {
+      const { companyId, storylineId, base } = await seed({ status: "ready_to_stitch" });
+      const app = appFor(companyId);
+      const stitch = videoStorylineStitchService(db);
+
+      forcedLimit.bytes = 1_000;
+      try {
+        expect(await stitch.stitchOne(await row(storylineId))).toBe("needs_attention");
+      } finally {
+        forcedLimit.bytes = null;
+      }
+      const parked = await row(storylineId);
+      expect(parked.status).toBe("needs_attention");
+      expect(parked.finalObjectKey).toBeNull();
+      expect(parked.errorMessage).toContain("more than this company keeps for one video file (1 MB)");
+      expect(parked.errorMessage).toContain("Combine again");
+      expect(parked.qualityCheckIssues).toEqual([expect.objectContaining({ code: "stitch_failed", severity: "blocking" })]);
+      expect(await readdir(workRoot)).toEqual([]);
+      // Nothing to accept; "Combine again" under the normal limit (2 GB) finishes it.
+      expect((await request(app).post(`${base}/stitch/accept-warnings`)).status).toBe(409);
+      expect((await request(app).post(`${base}/stitch/retry`)).status).toBe(200);
+      expect(await stitch.stitchOne(await row(storylineId))).toBe("stitched");
+      const done = await row(storylineId);
+      expect(done.status).toBe("done");
+      expect(done.finalByteSize).toBeGreaterThan(1_000);
+      expect(storedObjects.get(done.finalObjectKey!)?.body.byteLength).toBe(done.finalByteSize);
+      expect(await readdir(workRoot)).toEqual([]);
+
+      const film = await download(app, `${base}/final/content`);
+      expect(film.status).toBe(200);
+      expect(film.headers["accept-ranges"]).toBe("bytes");
+      expect((film.body as Buffer).byteLength).toBe(done.finalByteSize);
+    } finally {
+      if (previousWorkDir === undefined) delete process.env.PAPERCLIP_MEDIA_WORK_DIR;
+      else process.env.PAPERCLIP_MEDIA_WORK_DIR = previousWorkDir;
+      await rm(workRoot, { recursive: true, force: true });
+    }
   }, 120_000);
 });

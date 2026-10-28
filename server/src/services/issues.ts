@@ -59,6 +59,7 @@ import {
   type ChildModelEffortInheritance,
 } from "@paperclipai/shared";
 import { logActivity } from "./activity-log.js";
+import { assertRoomForLargeVideo } from "./media-storage-quota.js";
 import {
   clampIssueRequestDepth,
   extractAgentMentionIds,
@@ -7215,6 +7216,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       originalFilename?: string | null;
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
+      /**
+       * D18 security review F2: a video larger than the company's ordinary
+       * file limit counts against its media storage limit. When set, the
+       * limit is checked under the company's media storage lock in the same
+       * transaction as the insert (413 when it does not fit).
+       */
+      largeVideoQuotaBytes?: number | null;
     }) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
@@ -7236,6 +7244,9 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       }
 
       return withCompanyScope(rawDb, issue.companyId, async (tx) => {
+        if (input.largeVideoQuotaBytes != null) {
+          await assertRoomForLargeVideo(tx, issue.companyId, input.byteSize, input.largeVideoQuotaBytes, { lock: true });
+        }
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -7298,8 +7309,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       originalFilename?: string | null;
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
+      /** As for createAttachment: a large video's row is checked against the company's media storage limit (D18 F2). */
+      largeVideoQuotaBytes?: number | null;
     }) =>
       withCompanyScope(rawDb, input.companyId, async (tx) => {
+        if (input.largeVideoQuotaBytes != null) {
+          await assertRoomForLargeVideo(tx, input.companyId, input.byteSize, input.largeVideoQuotaBytes, { lock: true });
+        }
         const [asset] = await tx
           .insert(assets)
           .values({

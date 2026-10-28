@@ -153,9 +153,18 @@ import {
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import {
   isInlineAttachmentContentType,
-  normalizeIssueAttachmentMaxBytes,
   normalizeContentType,
 } from "../attachment-types.js";
+import { parseByteRangeHeader } from "../http/byte-range.js";
+import {
+  assertLargeUploadIsVideo,
+  discardUpload,
+  receiveCompanyFileUpload,
+  uploadLimitBytes,
+  type ReceivedUpload,
+} from "../http/file-uploads.js";
+import { assertRoomForLargeVideo, largeVideoNamespace } from "../services/media-storage-quota.js";
+import { companyFileLimits, isLargeVideoUpload, type CompanyFileLimits } from "../services/media-video-limits.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
@@ -2025,37 +2034,6 @@ export function issueRoutes(
     };
   }
 
-  type ParsedAttachmentRange =
-    | { kind: "none" }
-    | { kind: "invalid" }
-    | { kind: "range"; start: number; end: number };
-
-  function parseAttachmentRangeHeader(raw: string | undefined, contentLength: number): ParsedAttachmentRange {
-    if (!raw) return { kind: "none" };
-    if (!Number.isSafeInteger(contentLength) || contentLength <= 0) return { kind: "invalid" };
-
-    const prefix = "bytes=";
-    if (!raw.toLowerCase().startsWith(prefix)) return { kind: "invalid" };
-    const spec = raw.slice(prefix.length).trim();
-    if (!spec || spec.includes(",")) return { kind: "invalid" };
-
-    const [startRaw, endRaw] = spec.split("-", 2);
-    if (endRaw === undefined) return { kind: "invalid" };
-
-    if (startRaw === "") {
-      const suffixLength = Number.parseInt(endRaw, 10);
-      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return { kind: "invalid" };
-      const start = Math.max(contentLength - suffixLength, 0);
-      return { kind: "range", start, end: contentLength - 1 };
-    }
-
-    const start = Number.parseInt(startRaw, 10);
-    if (!Number.isSafeInteger(start) || start < 0 || start >= contentLength) return { kind: "invalid" };
-    const end = endRaw === "" ? contentLength - 1 : Number.parseInt(endRaw, 10);
-    if (!Number.isSafeInteger(end) || end < start) return { kind: "invalid" };
-    return { kind: "range", start, end: Math.min(end, contentLength - 1) };
-  }
-
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
   }
@@ -2225,17 +2203,101 @@ export function issueRoutes(
     return parsed;
   }
 
-  async function runSingleFileUpload(req: Request, res: Response, fileSizeLimit: number) {
-    const upload = multer({
-      storage: multer.memoryStorage(),
-      limits: { fileSize: fileSizeLimit, files: 1 },
-    });
-    await new Promise<void>((resolve, reject) => {
-      upload.single("file")(req, res, (err: unknown) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+  /**
+   * Receives the one "file" field of a task attachment or company file
+   * upload. Every file keeps the company's attachment limit and stays in
+   * memory, as before. D18: only when the operator opted in and the company
+   * has Media Studio switched on (companyFileLimits, security review F1) may
+   * a video go up to the company's Media Studio video limit; it is spooled
+   * to disk past the ordinary limit, holding one of the company's upload
+   * slots (F2), and must really be a video (F3). Answers the 4xx itself and
+   * returns null when there is nothing to store; otherwise the caller hands
+   * the upload to storeUpload, or calls discardUpload.
+   */
+  async function receiveUpload(req: Request, res: Response, companyId: string, noun: "Attachment" | "File"): Promise<{ file: ReceivedUpload; limits: CompanyFileLimits } | null> {
+    const company = await companiesSvc.getById(companyId);
+    const limits = await companyFileLimits(db, companyId, company, { kind: "upload" });
+    let file: ReceivedUpload | undefined;
+    try {
+      file = await receiveCompanyFileUpload(req, res, limits, companyId);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: `${noun} exceeds ${uploadLimitBytes(err, limits)} bytes` });
+          return null;
+        }
+        res.status(400).json({ error: err.message });
+        return null;
+      }
+      throw err;
+    }
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return null;
+    }
+    if (file.size <= 0) {
+      await discardUpload(file);
+      res.status(422).json({ error: `${noun} is empty` });
+      return null;
+    }
+    try {
+      await assertLargeUploadIsVideo(file, limits);
+    } catch (err) {
+      await discardUpload(file);
+      throw err;
+    }
+    return { file, limits };
+  }
+
+  /**
+   * Stores a received upload: from memory, or streamed from its spool file
+   * (a large video), then discards the upload (spool file and upload slot)
+   * whatever happens. A large video (security review F2) must first fit the
+   * company's media storage limit, and is stored under the large-videos
+   * namespace so it keeps counting against that limit; its row is checked
+   * again with saveUploadRow. `largeVideoQuotaBytes` is null for an
+   * ordinary file.
+   */
+  async function storeUpload(companyId: string, namespace: string, upload: { file: ReceivedUpload; limits: CompanyFileLimits }) {
+    const { file, limits } = upload;
+    try {
+      const contentType = normalizeContentType(file.mimetype);
+      const originalFilename = file.originalname || null;
+      // A large video without a quota cannot happen (companyFileLimits sets both); refuse it rather than leave it uncounted.
+      const largeVideoQuotaBytes = isLargeVideoUpload(file.size, limits) ? (limits.storageQuotaBytes ?? 0) : null;
+      if (largeVideoQuotaBytes !== null) {
+        await assertRoomForLargeVideo(db, companyId, file.size, largeVideoQuotaBytes, { lock: false });
+      }
+      const target = largeVideoQuotaBytes !== null ? largeVideoNamespace(namespace) : namespace;
+      const stored = file.path
+        ? await storage.putFileFromPath({ companyId, namespace: target, originalFilename, contentType, filePath: file.path })
+        : await storage.putFile({ companyId, namespace: target, originalFilename, contentType, body: file.buffer ?? Buffer.alloc(0) });
+      return { stored, largeVideoQuotaBytes };
+    } finally {
+      await discardUpload(file);
+    }
+  }
+
+  /**
+   * Saves the row for a stored upload. A large video's row is checked
+   * against the company's media storage limit under the same lock and in the
+   * same transaction as the insert (F2), so two uploads at once cannot both
+   * fit the last free space; when it does not fit, its stored file is
+   * removed again.
+   */
+  async function saveUploadRow<T>(
+    companyId: string,
+    upload: { stored: { objectKey: string }; largeVideoQuotaBytes: number | null },
+    create: (largeVideoQuotaBytes: number | null) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await create(upload.largeVideoQuotaBytes);
+    } catch (err) {
+      if (upload.largeVideoQuotaBytes !== null) {
+        await storage.deleteObject(companyId, upload.stored.objectKey).catch(() => undefined);
+      }
+      throw err;
+    }
   }
 
   async function assertCanManageIssueApprovalLinks(
@@ -9963,61 +10025,35 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
-    const company = await companiesSvc.getById(companyId);
-    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
-
-    try {
-      await runSingleFileUpload(req, res, attachmentMaxBytes);
-    } catch (err) {
-      if (err instanceof multer.MulterError) {
-        if (err.code === "LIMIT_FILE_SIZE") {
-          res.status(422).json({ error: `Attachment exceeds ${attachmentMaxBytes} bytes` });
-          return;
-        }
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      throw err;
-    }
-
-    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
-    if (!file) {
-      res.status(400).json({ error: "Missing file field 'file'" });
-      return;
-    }
-    const contentType = normalizeContentType(file.mimetype);
-    if (file.buffer.length <= 0) {
-      res.status(422).json({ error: "Attachment is empty" });
-      return;
-    }
+    const received = await receiveUpload(req, res, companyId, "Attachment");
+    if (!received) return;
 
     const parsedMeta = createIssueAttachmentMetadataSchema.safeParse(req.body ?? {});
     if (!parsedMeta.success) {
+      await discardUpload(received.file);
       res.status(400).json({ error: "Invalid attachment metadata", details: parsedMeta.error.issues });
       return;
     }
 
-    const actor = getActorInfo(req);
-    const stored = await storage.putFile({
-      companyId,
-      namespace: `issues/${issueId}`,
-      originalFilename: file.originalname || null,
-      contentType,
-      body: file.buffer,
-    });
+    const upload = await storeUpload(companyId, `issues/${issueId}`, received);
+    const { stored } = upload;
 
-    const attachment = await svc.createAttachment({
-      issueId,
-      issueCommentId: parsedMeta.data.issueCommentId ?? null,
-      provider: stored.provider,
-      objectKey: stored.objectKey,
-      contentType: stored.contentType,
-      byteSize: stored.byteSize,
-      sha256: stored.sha256,
-      originalFilename: stored.originalFilename,
-      createdByAgentId: actor.agentId,
-      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-    });
+    const actor = getActorInfo(req);
+    const attachment = await saveUploadRow(companyId, upload, (largeVideoQuotaBytes) =>
+      svc.createAttachment({
+        issueId,
+        issueCommentId: parsedMeta.data.issueCommentId ?? null,
+        provider: stored.provider,
+        objectKey: stored.objectKey,
+        contentType: stored.contentType,
+        byteSize: stored.byteSize,
+        sha256: stored.sha256,
+        originalFilename: stored.originalFilename,
+        createdByAgentId: actor.agentId,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+        largeVideoQuotaBytes,
+      }),
+    );
 
     await logActivity(db, {
       companyId,
@@ -10050,54 +10086,27 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
-    const company = await companiesSvc.getById(companyId);
-    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+    const received = await receiveUpload(req, res, companyId, "File");
+    if (!received) return;
 
-    try {
-      await runSingleFileUpload(req, res, attachmentMaxBytes);
-    } catch (err) {
-      if (err instanceof multer.MulterError) {
-        if (err.code === "LIMIT_FILE_SIZE") {
-          res.status(422).json({ error: `File exceeds ${attachmentMaxBytes} bytes` });
-          return;
-        }
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      throw err;
-    }
-
-    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
-    if (!file) {
-      res.status(400).json({ error: "Missing file field 'file'" });
-      return;
-    }
-    const contentType = normalizeContentType(file.mimetype);
-    if (file.buffer.length <= 0) {
-      res.status(422).json({ error: "File is empty" });
-      return;
-    }
+    const upload = await storeUpload(companyId, "company-files", received);
+    const { stored } = upload;
 
     const actor = getActorInfo(req);
-    const stored = await storage.putFile({
-      companyId,
-      namespace: "company-files",
-      originalFilename: file.originalname || null,
-      contentType,
-      body: file.buffer,
-    });
-
-    const created = await svc.createCompanyFile({
-      companyId,
-      provider: stored.provider,
-      objectKey: stored.objectKey,
-      contentType: stored.contentType,
-      byteSize: stored.byteSize,
-      sha256: stored.sha256,
-      originalFilename: stored.originalFilename,
-      createdByAgentId: actor.agentId,
-      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-    });
+    const created = await saveUploadRow(companyId, upload, (largeVideoQuotaBytes) =>
+      svc.createCompanyFile({
+        companyId,
+        provider: stored.provider,
+        objectKey: stored.objectKey,
+        contentType: stored.contentType,
+        byteSize: stored.byteSize,
+        sha256: stored.sha256,
+        originalFilename: stored.originalFilename,
+        createdByAgentId: actor.agentId,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+        largeVideoQuotaBytes,
+      }),
+    );
 
     await logActivity(db, {
       companyId,
@@ -10129,7 +10138,7 @@ export function issueRoutes(
     assertCompanyAccess(req, attachment.companyId);
 
     const contentLength = attachment.byteSize;
-    const range = parseAttachmentRangeHeader(
+    const range = parseByteRangeHeader(
       typeof req.headers.range === "string" ? req.headers.range : undefined,
       contentLength,
     );
@@ -10169,6 +10178,10 @@ export function issueRoutes(
 
     object.stream.on("error", (err) => {
       next(err);
+    });
+    // A video player that seeks drops its earlier request: release the file at once (D18: videos up to 2 GB).
+    res.on("close", () => {
+      if (!object.stream.destroyed) object.stream.destroy?.();
     });
     if (range.kind === "range") {
       const rangeLength = range.end - range.start + 1;
