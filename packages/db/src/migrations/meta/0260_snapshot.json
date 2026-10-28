@@ -1,6 +1,6 @@
 {
-  "id": "8ac2a7c8-8f49-4685-b4d6-5f3a111d2514",
-  "prevId": "939d9ee0-ebd9-4f12-aaa7-a5d4c60d2a7f",
+  "id": "3958df62-3517-489b-8892-f2637acd0fbb",
+  "prevId": "5ec5f857-a50e-45bb-af35-57b677cfeb4d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -30173,6 +30173,932 @@
       },
       "isRLSEnabled": false
     },
+    "public.media_loras": {
+      "name": "media_loras",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ref": {
+          "name": "ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "trigger_words": {
+          "name": "trigger_words",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "family": {
+          "name": "family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "compatible_model_ids": {
+          "name": "compatible_model_ids",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "content_tag": {
+          "name": "content_tag",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unreviewed'"
+        },
+        "provider_nsfw": {
+          "name": "provider_nsfw",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "provider_sexual": {
+          "name": "provider_sexual",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "strength_min": {
+          "name": "strength_min",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "strength_max": {
+          "name": "strength_max",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "strength_default": {
+          "name": "strength_default",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0.6
+        },
+        "recommended_min": {
+          "name": "recommended_min",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recommended_max": {
+          "name": "recommended_max",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "builtin_key": {
+          "name": "builtin_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewed_by_user_id": {
+          "name": "reviewed_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewed_at": {
+          "name": "reviewed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_loras_company_idx": {
+          "name": "media_loras_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_loras_company_ref_uq": {
+          "name": "media_loras_company_ref_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"media_loras\".\"archived_at\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_loras_company_builtin_uq": {
+          "name": "media_loras_company_builtin_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "builtin_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"media_loras\".\"builtin_key\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_loras_company_id_companies_id_fk": {
+          "name": "media_loras_company_id_companies_id_fk",
+          "tableFrom": "media_loras",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_loras_provider_check": {
+          "name": "media_loras_provider_check",
+          "value": "\"media_loras\".\"provider\" IN ('sogni', 'fal')"
+        },
+        "media_loras_source_check": {
+          "name": "media_loras_source_check",
+          "value": "\"media_loras\".\"source\" IN ('catalog', 'personal', 'url')"
+        },
+        "media_loras_content_tag_check": {
+          "name": "media_loras_content_tag_check",
+          "value": "\"media_loras\".\"content_tag\" IN ('sfw', 'mature', 'refused', 'unreviewed')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.media_model_setup_trials": {
+      "name": "media_model_setup_trials",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "setup_id": {
+          "name": "setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storyline_id": {
+          "name": "storyline_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "persona_id": {
+          "name": "persona_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "inputs": {
+          "name": "inputs",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "prompt": {
+          "name": "prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_file_id": {
+          "name": "result_file_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scores": {
+          "name": "scores",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "flagged_by_check": {
+          "name": "flagged_by_check",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "flagged_by_provider": {
+          "name": "flagged_by_provider",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "cost_cents": {
+          "name": "cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "seconds_taken": {
+          "name": "seconds_taken",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rater_kind": {
+          "name": "rater_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'human'"
+        },
+        "rater_id": {
+          "name": "rater_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_model_setup_trials_setup_idx": {
+          "name": "media_model_setup_trials_setup_idx",
+          "columns": [
+            {
+              "expression": "setup_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_model_setup_trials_company_idx": {
+          "name": "media_model_setup_trials_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_model_setup_trials_storyline_idx": {
+          "name": "media_model_setup_trials_storyline_idx",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_model_setup_trials_company_id_companies_id_fk": {
+          "name": "media_model_setup_trials_company_id_companies_id_fk",
+          "tableFrom": "media_model_setup_trials",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "media_model_setup_trials_setup_id_media_model_setups_id_fk": {
+          "name": "media_model_setup_trials_setup_id_media_model_setups_id_fk",
+          "tableFrom": "media_model_setup_trials",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "media_model_setup_trials_storyline_id_video_storylines_id_fk": {
+          "name": "media_model_setup_trials_storyline_id_video_storylines_id_fk",
+          "tableFrom": "media_model_setup_trials",
+          "tableTo": "video_storylines",
+          "columnsFrom": [
+            "storyline_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "media_model_setup_trials_persona_id_personas_id_fk": {
+          "name": "media_model_setup_trials_persona_id_personas_id_fk",
+          "tableFrom": "media_model_setup_trials",
+          "tableTo": "personas",
+          "columnsFrom": [
+            "persona_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_model_setup_trials_rater_kind_check": {
+          "name": "media_model_setup_trials_rater_kind_check",
+          "value": "\"media_model_setup_trials\".\"rater_kind\" IN ('human', 'ai')"
+        },
+        "media_model_setup_trials_cost_check": {
+          "name": "media_model_setup_trials_cost_check",
+          "value": "\"media_model_setup_trials\".\"cost_cents\" IS NULL OR \"media_model_setup_trials\".\"cost_cents\" >= 0"
+        },
+        "media_model_setup_trials_seconds_check": {
+          "name": "media_model_setup_trials_seconds_check",
+          "value": "\"media_model_setup_trials\".\"seconds_taken\" IS NULL OR \"media_model_setup_trials\".\"seconds_taken\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.media_model_setups": {
+      "name": "media_model_setups",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "family": {
+          "name": "family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "model_id": {
+          "name": "model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "edit_model_id": {
+          "name": "edit_model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "loras": {
+          "name": "loras",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "params": {
+          "name": "params",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "content_rating": {
+          "name": "content_rating",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'sfw'"
+        },
+        "mature_enabled_by_user_id": {
+          "name": "mature_enabled_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'draft'"
+        },
+        "approved_by_user_id": {
+          "name": "approved_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tags": {
+          "name": "tags",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "favorite": {
+          "name": "favorite",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "builtin_key": {
+          "name": "builtin_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_model_setups_company_kind_idx": {
+          "name": "media_model_setups_company_kind_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_model_setups_company_name_uq": {
+          "name": "media_model_setups_company_name_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "lower(\"name\")",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_model_setups_company_builtin_uq": {
+          "name": "media_model_setups_company_builtin_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "builtin_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"media_model_setups\".\"builtin_key\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_model_setups_company_id_companies_id_fk": {
+          "name": "media_model_setups_company_id_companies_id_fk",
+          "tableFrom": "media_model_setups",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_model_setups_kind_check": {
+          "name": "media_model_setups_kind_check",
+          "value": "\"media_model_setups\".\"kind\" IN ('image', 'video')"
+        },
+        "media_model_setups_provider_check": {
+          "name": "media_model_setups_provider_check",
+          "value": "\"media_model_setups\".\"provider\" IN ('sogni', 'fal', 'higgsfield', 'comfyui') AND (\"media_model_setups\".\"kind\" = 'image' OR \"media_model_setups\".\"provider\" IN ('sogni', 'fal'))"
+        },
+        "media_model_setups_content_rating_check": {
+          "name": "media_model_setups_content_rating_check",
+          "value": "\"media_model_setups\".\"content_rating\" IN ('sfw', 'mature')"
+        },
+        "media_model_setups_status_check": {
+          "name": "media_model_setups_status_check",
+          "value": "\"media_model_setups\".\"status\" IN ('draft', 'approved', 'archived')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.media_project_defaults": {
+      "name": "media_project_defaults",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "default_image_setup_id": {
+          "name": "default_image_setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_video_setup_id": {
+          "name": "default_video_setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_content_rating": {
+          "name": "default_content_rating",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'sfw'"
+        },
+        "default_continuity_mode": {
+          "name": "default_continuity_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'stills'"
+        },
+        "setups_seeded_at": {
+          "name": "setups_seeded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_by_user_id": {
+          "name": "updated_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_project_defaults_company_uq": {
+          "name": "media_project_defaults_company_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_project_defaults_company_id_companies_id_fk": {
+          "name": "media_project_defaults_company_id_companies_id_fk",
+          "tableFrom": "media_project_defaults",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "media_project_defaults_default_image_setup_id_media_model_setups_id_fk": {
+          "name": "media_project_defaults_default_image_setup_id_media_model_setups_id_fk",
+          "tableFrom": "media_project_defaults",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "default_image_setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "media_project_defaults_default_video_setup_id_media_model_setups_id_fk": {
+          "name": "media_project_defaults_default_video_setup_id_media_model_setups_id_fk",
+          "tableFrom": "media_project_defaults",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "default_video_setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_project_defaults_content_rating_check": {
+          "name": "media_project_defaults_content_rating_check",
+          "value": "\"media_project_defaults\".\"default_content_rating\" IN ('sfw', 'mature')"
+        },
+        "media_project_defaults_continuity_mode_check": {
+          "name": "media_project_defaults_continuity_mode_check",
+          "value": "\"media_project_defaults\".\"default_continuity_mode\" IN ('stills', 'keyframes')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.media_studio_direct_creations": {
       "name": "media_studio_direct_creations",
       "schema": "",
@@ -44492,6 +45418,30 @@
           "primaryKey": false,
           "notNull": false
         },
+        "default_image_setup_id": {
+          "name": "default_image_setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_video_setup_id": {
+          "name": "default_video_setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_content_rating": {
+          "name": "default_content_rating",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_continuity_mode": {
+          "name": "default_continuity_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_by_user_id": {
           "name": "created_by_user_id",
           "type": "text",
@@ -44642,6 +45592,32 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "video_storyline_directors_default_image_setup_id_media_model_setups_id_fk": {
+          "name": "video_storyline_directors_default_image_setup_id_media_model_setups_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "default_image_setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_default_video_setup_id_media_model_setups_id_fk": {
+          "name": "video_storyline_directors_default_video_setup_id_media_model_setups_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "default_video_setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -44659,6 +45635,14 @@
         "video_storyline_directors_shot_seconds_check": {
           "name": "video_storyline_directors_shot_seconds_check",
           "value": "\"video_storyline_directors\".\"default_shot_seconds\" IS NULL OR (\"video_storyline_directors\".\"default_shot_seconds\" >= 1 AND \"video_storyline_directors\".\"default_shot_seconds\" <= 60)"
+        },
+        "video_storyline_directors_content_rating_check": {
+          "name": "video_storyline_directors_content_rating_check",
+          "value": "\"video_storyline_directors\".\"default_content_rating\" IS NULL OR \"video_storyline_directors\".\"default_content_rating\" IN ('sfw', 'mature')"
+        },
+        "video_storyline_directors_continuity_mode_check": {
+          "name": "video_storyline_directors_continuity_mode_check",
+          "value": "\"video_storyline_directors\".\"default_continuity_mode\" IS NULL OR \"video_storyline_directors\".\"default_continuity_mode\" IN ('stills', 'keyframes')"
         },
         "video_storyline_directors_temperature_check": {
           "name": "video_storyline_directors_temperature_check",
@@ -44936,6 +45920,18 @@
         },
         "director_id": {
           "name": "director_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image_setup_id": {
+          "name": "image_setup_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "video_setup_id": {
+          "name": "video_setup_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
@@ -45233,6 +46229,32 @@
           "tableTo": "video_storyline_directors",
           "columnsFrom": [
             "director_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storylines_image_setup_id_media_model_setups_id_fk": {
+          "name": "video_storylines_image_setup_id_media_model_setups_id_fk",
+          "tableFrom": "video_storylines",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "image_setup_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storylines_video_setup_id_media_model_setups_id_fk": {
+          "name": "video_storylines_video_setup_id_media_model_setups_id_fk",
+          "tableFrom": "video_storylines",
+          "tableTo": "media_model_setups",
+          "columnsFrom": [
+            "video_setup_id"
           ],
           "columnsTo": [
             "id"
