@@ -422,6 +422,51 @@ d("storyline model change", () => {
       expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(1000);
     });
 
+    it("re-rendering a shot during a running film does not start a second chain or overshoot the cap (DUR-4937)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await db.update(videoStorylines).set({ budgetCapCents: 1000 }).where(eq(videoStorylines.id, storylineId));
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      await render.reRenderShot(companyId, storylineId, shotIds[2]!, ACTOR);
+      for (let i = 0; i < 8; i++) await render.tick();
+      expect(rec.started).toHaveLength(4);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "done", "done", "done"]);
+      for (const id of shotIds) expect(await jobsOf(id)).toHaveLength(1);
+      const after = await storylineRow(storylineId);
+      expect(after.spentCents).toBeLessThanOrEqual(1000);
+      expect(after.status).toBe("ready_to_stitch");
+    });
+
+    it("the chain counts a re-rendered shot in flight against the cap before it starts the next shot (DUR-4937)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await db.update(videoStorylines).set({ budgetCapCents: 1000 }).where(eq(videoStorylines.id, storylineId));
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      // The cap is lowered after the run started (startRender prices the whole film against it).
+      await db.update(videoStorylines).set({ budgetCapCents: 700 }).where(eq(videoStorylines.id, storylineId));
+      await render.reRenderShot(companyId, storylineId, shotIds[2]!, ACTOR);
+      for (let i = 0; i < 8; i++) await render.tick();
+      expect(rec.started).toHaveLength(2);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(700);
+    });
+
+    it("beginShotRender refuses a shot that is already rendering and does not call the provider (DUR-4937)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      const rec = recordingService({ model: KLING_16, provider: "fal", done: false });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      const storyline = await storylineRow(storylineId);
+      const running = await shotRow(shotIds[0]!);
+      expect(running.status).toBe("rendering");
+      await expect(render.beginShotRender(companyId, storyline, running, "actor")).rejects.toMatchObject({ status: 409 });
+      expect(rec.started).toHaveLength(1);
+      // The shared test database ticks every running job: settle this one so it cannot leak into other tests.
+      await db.update(videoShotRenderJobs).set({ status: "failed" }).where(eq(videoShotRenderJobs.storylineId, storylineId));
+      await db.update(videoStorylines).set({ status: "cancelled" }).where(eq(videoStorylines.id, storylineId));
+    });
+
     it("a rendering film whose cap has gone does not start the next shot", async () => {
       const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
       const rec = recordingService({ model: KLING_16, provider: "fal" });

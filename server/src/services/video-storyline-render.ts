@@ -1,5 +1,5 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoMediaSpend, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import { sendableDataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
@@ -281,13 +281,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.recomputeEstimate(companyId, storylineId);
   }
 
-  /** Excludes 'dropped' shots -- dropped shots never render and are never counted toward "is this storyline finished?" (see DUR-4317/DUR-4320's storyboard gate). */
+  /**
+   * Excludes 'dropped' shots -- dropped shots never render and are never counted toward "is this storyline finished?" (see DUR-4317/DUR-4320's storyboard gate).
+   * Also skips shots that are queued or rendering: a re-render of one shot during a running film must not make the chain
+   * start the shot it is already rendering a second time (DUR-4937).
+   */
   async function nextPendingShot(storylineId: string) {
     const [row] = await db
       .select()
       .from(videoShots)
       // Phase 2: only AI shots render; uploaded videos and photos are prepared by ffmpeg (video-storyline-clips.ts).
-      .where(and(eq(videoShots.storylineId, storylineId), ne(videoShots.status, "done"), ne(videoShots.storyboardStatus, "dropped"), eq(videoShots.clipKind, "generated")))
+      .where(and(eq(videoShots.storylineId, storylineId), notInArray(videoShots.status, ["done", "queued", "rendering"]), ne(videoShots.storyboardStatus, "dropped"), eq(videoShots.clipKind, "generated")))
       .orderBy(asc(videoShots.orderIndex))
       .limit(1);
     return row ?? null;
@@ -371,7 +375,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     storyline: typeof videoStorylines.$inferSelect,
     shot: typeof videoShots.$inferSelect,
     actorId: string,
-    opts: { companyKeyOnly?: boolean } = {},
+    opts: { companyKeyOnly?: boolean; alreadyQueued?: boolean } = {},
   ) {
     if (shot.clipKind !== "generated") {
       throw unprocessable(`Clip ${shot.orderIndex + 1} is your own video or photo; it is prepared on the server, never rendered by an AI service.`);
@@ -453,6 +457,19 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       input.prompt = `${input.prompt}\nFrame: ${storyline.aspect === "9:16" ? "vertical 9:16" : "square 1:1"}.`;
     }
     const shotNumber = shot.orderIndex + 1;
+    // DUR-4937: claim the shot before the paid call, so a shot already queued or rendering is never started a second
+    // time (two ticks, or a re-render racing the chain). A caller that already moved the shot to "queued" under the
+    // storyline lock (a re-render, an animated photo) is that claim; every other caller's shot must still be idle.
+    if (!opts.alreadyQueued) {
+      const claimed = await db
+        .update(videoShots)
+        .set({ status: "queued", updatedAt: nowOf() })
+        .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "failed"])))
+        .returning({ id: videoShots.id });
+      if (claimed.length === 0) {
+        throw conflict(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
+      }
+    }
     let handle: MediaJobHandle;
     try {
       handle = await provider.start(input);
@@ -880,7 +897,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
     try {
-      await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
+      await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId, { alreadyQueued: true });
     } catch (err) {
       // A storyline that is "rendering" (a run already going) is paused rather than left with nothing running, with
       // the shot's own reason; any other status is left as it was.
@@ -1350,8 +1367,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     // Fail closed (DUR-4915): a missing cap stops the chain, the same as a cap that is used up. The approval
     // threshold needs no check here: only startRender puts a storyline into "rendering", and it enforces it.
+    // Shots still queued or rendering (a re-render during the run) have not settled into spentCents yet (DUR-4937).
     const nextEstimate = estimateShotRenderCents(storyline, [next]);
-    if (storyline.budgetCapCents === null || spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, next.id);
+    if (storyline.budgetCapCents === null || spentCents + inFlightCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       await db
         .update(videoStorylines)
         .set({
