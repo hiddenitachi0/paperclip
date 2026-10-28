@@ -4862,6 +4862,31 @@ test("DUR-4977: a symlink in the checkout is refused, never uploaded (curl would
   }
 });
 
+test("DUR-4977: an explicit file entry reaching through a symlinked directory is refused too", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-symlink-dir-test-"));
+  try {
+    const site = makeGitSite(dir);
+    mkdirSync(path.join(dir, "outside"), { recursive: true });
+    writeFileSync(path.join(dir, "outside", "secret.txt"), "runner secret");
+    spawnSync("ln", ["-s", path.join(dir, "outside"), path.join(site, "pub")]);
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const callsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog });
+    const { result, log } = runSftpScript(
+      dir,
+      binDir,
+      `upload_via_sftp "aid-1" "${site}" "pub/secret.txt" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1" "${SFTP_PIN}" ""
+       echo "STATUS=$?"`,
+    );
+    assert.match(result.stdout, /STATUS=1/);
+    assert.match(log(), /resolves outside/);
+    assert.ok(!curlCalls(callsLog).some((c) => c.includes(" -T ")), "nothing may be uploaded");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The staging folder sits inside the served docroot, so it must be gone after
 // every run -- including runs that failed while staging or while swapping.
 for (const scenario of [

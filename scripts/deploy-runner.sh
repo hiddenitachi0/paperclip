@@ -1538,7 +1538,7 @@ sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_
       # alone. Older libssh2 builds need the public half as well, so derive it
       # when ssh-keygen is here; it is best-effort and never fatal, because
       # curl without --pubkey is also valid.
-      if command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -y -f "$key_file" >"$tmp_dir/id_key.pub" 2>/dev/null && [ -s "$tmp_dir/id_key.pub" ]; then
+      if command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -y -P "" -f "$key_file" >"$tmp_dir/id_key.pub" 2>/dev/null </dev/null && [ -s "$tmp_dir/id_key.pub" ]; then
         curl_auth_args+=(--pubkey "$tmp_dir/id_key.pub")
       fi
       ;;
@@ -1776,6 +1776,8 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
   local staging_dir="$remote_path/.deploy-staging/$aid"
   local entry local_path staged_target failures=0 staged=0
   local -a staged_entries=()
+  local real_target_dir
+  real_target_dir="$(realpath "$target_dir" 2>/dev/null)"
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     # DUR-4236 follow-up: the swap loop below feeds $entry into curl's -Q quote
@@ -1793,11 +1795,23 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
         ;;
     esac
     local_path="$target_dir/$entry"
-    if [ -L "$local_path" ]; then
+    # A link at the file itself, or in any directory above it (an explicit
+    # file entry can reach through a tracked directory symlink), would make
+    # curl publish something outside the checkout: the resolved path must stay
+    # inside it. Fails closed if realpath is unavailable.
+    if [ -L "$local_path" ] || [ -z "$real_target_dir" ]; then
       log "runner: $aid SFTP allowlist entry $entry is a symlink -- refusing to upload it (curl would follow the link and publish its target)"
       failures=$((failures + 1))
       continue
     fi
+    case "$(realpath "$local_path" 2>/dev/null)" in
+      "$real_target_dir"/*) ;;
+      *)
+        log "runner: $aid SFTP allowlist entry $entry resolves outside $target_dir through a symlinked directory -- refusing to upload it"
+        failures=$((failures + 1))
+        continue
+        ;;
+    esac
     if [ ! -f "$local_path" ]; then
       log "runner: $aid SFTP allowlist entry $entry does not exist in $target_dir -- nothing uploaded for it"
       failures=$((failures + 1))
