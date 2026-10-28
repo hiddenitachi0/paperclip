@@ -87,9 +87,30 @@ export const CODE_RENDER_EXPLANATION =
   "A finished video counts its length; checks, previews and failed or stopped jobs count the time the renderer spent on them. " +
   "When a limit is reached the agent stops and asks a person.";
 
-// HTML comments, and opening tags (quoted attribute values may hold ">").
-const HTML_COMMENT_PATTERN = /<!--[\s\S]*?-->/g;
-const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*\s*\/?>/g;
+// Opening tags (quoted attribute values may hold ">"). An unquoted name or
+// value never holds "<", so a failed match ends at the next "<" instead of
+// rescanning the rest of the file: entries are agent-supplied and up to
+// several MB, and a quadratic scan here would stall the whole process.
+const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*\s*\/?>/g;
+
+/**
+ * Drops HTML comments in one pass. A comment with no "-->" is left as it is,
+ * like /<!--[\s\S]*?-->/g would, but without that pattern's rescan of the
+ * rest of the file from every "<!--" (quadratic on a long run of them).
+ */
+function stripHtmlComments(html: string): string {
+  let kept = "";
+  let from = 0;
+  for (;;) {
+    const open = html.indexOf("<!--", from);
+    if (open === -1) break;
+    const close = html.indexOf("-->", open + 4);
+    if (close === -1) break;
+    kept += html.slice(from, open);
+    from = close + 3;
+  }
+  return kept + html.slice(from);
+}
 
 const TIMING_ATTRIBUTE_PATTERNS = {
   "data-start": /\sdata-start\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
@@ -117,7 +138,7 @@ function timingAttribute(tag: string, name: keyof typeof TIMING_ATTRIBUTE_PATTER
  */
 export function estimateCompositionSeconds(html: string): number | null {
   let longest: number | null = null;
-  for (const tag of html.replace(HTML_COMMENT_PATTERN, "").match(OPENING_TAG_PATTERN) ?? []) {
+  for (const tag of stripHtmlComments(html).match(OPENING_TAG_PATTERN) ?? []) {
     const duration = timingAttribute(tag, "data-duration");
     if (duration === null) continue;
     const end = (timingAttribute(tag, "data-start") ?? 0) + duration;

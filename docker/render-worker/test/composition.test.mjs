@@ -81,6 +81,13 @@ describe("findRemoteReferences", () => {
     assert.deepEqual(findRemoteReferences(text).sort(), ["//cdn.test/lib.js", "//fonts.test/f.css", "//img.test/b.png"]);
   });
 
+  it("finds a url() address in linear time after a long run of spaces", () => {
+    const text = `a { background: url(${" ".repeat(2_000_000)}) } b { background: url( "//img.test/c.png") }`;
+    const started = Date.now();
+    assert.deepEqual(findRemoteReferences(text), ["//img.test/c.png"]);
+    assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started} ms`);
+  });
+
   it("ignores XML namespaces and JavaScript comments", () => {
     const text = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"></svg><script>// just a comment\nconst a = 1; // another</script>`;
     assert.deepEqual(findRemoteReferences(text), []);
@@ -147,6 +154,22 @@ describe("compositionLengthSeconds (D7: the length a job is held to before it re
 
   it("is null when the composition names no length", () => {
     assert.equal(compositionLengthSeconds("<html><body>hi</body></html>"), null);
+  });
+
+  it("reads multi-MB hostile entries in linear time (no stall on '<' runs, unclosed tags or comments)", () => {
+    const tail = '<div data-composition-id="main" data-duration="7"></div>';
+    for (const junk of ["<a ".repeat(1_500_000), "<a b=".repeat(1_000_000), "<!--".repeat(1_200_000)]) {
+      const started = Date.now();
+      const seconds = compositionLengthSeconds(junk + tail);
+      assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started} ms for ${junk.slice(0, 5)}...`);
+      // An unclosed comment hides nothing: its "<!--" stays and the tag after it is still read.
+      assert.equal(seconds, 7);
+    }
+  });
+
+  it("still drops closed comments and keeps text between them", () => {
+    const html = '<!-- a --><div data-duration="3"></div><!-- <div data-duration="99"></div> --><!-- open';
+    assert.equal(compositionLengthSeconds(html), 3);
   });
 
   it("assertCompositionLength refuses a composition longer than the job may be, before anything runs", () => {

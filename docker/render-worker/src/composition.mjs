@@ -104,9 +104,30 @@ export function validateComposition(input, limits = DEFAULT_COMPOSITION_LIMITS) 
   return { entry, files };
 }
 
-// HTML comments, and opening tags (quoted attribute values may hold ">").
-const HTML_COMMENT_PATTERN = /<!--[\s\S]*?-->/g;
-const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*\s*\/?>/g;
+// Opening tags (quoted attribute values may hold ">"). An unquoted name or
+// value never holds "<", so a failed match ends at the next "<" instead of
+// rescanning the rest of the file: entries are agent-supplied and up to
+// several MB, and a quadratic scan here would stall the whole process.
+const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*\s*\/?>/g;
+
+/**
+ * Drops HTML comments in one pass. A comment with no "-->" is left as it is,
+ * like /<!--[\s\S]*?-->/g would, but without that pattern's rescan of the
+ * rest of the file from every "<!--" (quadratic on a long run of them).
+ */
+function stripHtmlComments(html) {
+  let kept = "";
+  let from = 0;
+  for (;;) {
+    const open = html.indexOf("<!--", from);
+    if (open === -1) break;
+    const close = html.indexOf("-->", open + 4);
+    if (close === -1) break;
+    kept += html.slice(from, open);
+    from = close + 3;
+  }
+  return kept + html.slice(from);
+}
 const TIMING_ATTRIBUTE_PATTERNS = {
   "data-start": /\sdata-start\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
   "data-duration": /\sdata-duration\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
@@ -131,7 +152,7 @@ function timingAttribute(tag, name) {
  */
 export function compositionLengthSeconds(html) {
   let longest = null;
-  for (const tag of String(html).replace(HTML_COMMENT_PATTERN, "").match(OPENING_TAG_PATTERN) ?? []) {
+  for (const tag of stripHtmlComments(String(html)).match(OPENING_TAG_PATTERN) ?? []) {
     const duration = timingAttribute(tag, "data-duration");
     if (duration === null) continue;
     const end = (timingAttribute(tag, "data-start") ?? 0) + duration;
@@ -178,7 +199,9 @@ const ABSOLUTE_URL_PATTERN = /\b(?:https?|wss?|ftp):\/\/[^\s"'`()<>\\]+/gi;
 // often a JavaScript comment than an address.
 const PROTOCOL_RELATIVE_PATTERNS = [
   /\b(?:src|href|srcset|poster|data|action|formaction)\s*=\s*["']\s*(\/\/[^"'\s]+)/gi,
-  /url\(\s*["']?\s*(\/\/[^"')\s]+)/gi,
+  // One optional quote between the spaces: two adjacent \s* runs here were
+  // quadratic on a long run of spaces after "url(".
+  /url\(\s*(?:["']\s*)?(\/\/[^"')\s]+)/gi,
   /@import\s+["'](\/\/[^"']+)/gi,
 ];
 
