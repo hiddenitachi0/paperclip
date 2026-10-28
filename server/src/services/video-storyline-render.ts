@@ -219,6 +219,17 @@ export class RenderStartError extends Error {
   }
 }
 
+/**
+ * Raised by beginShotRender when another caller already holds the shot (queued, rendering or done). The shot is that
+ * caller's: the loser must leave it alone (never mark it failed, which would hand it to a third caller) and stop.
+ */
+export class ShotClaimLostError extends HttpError {
+  constructor(message: string) {
+    super(409, message);
+    this.name = "ShotClaimLostError";
+  }
+}
+
 export interface VideoStorylineRenderDeps {
   now?: () => Date;
   /** Test seam: the provider client for a shot render (production builds the real Fal/Sogni client). */
@@ -467,7 +478,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "failed"])))
         .returning({ id: videoShots.id });
       if (claimed.length === 0) {
-        throw conflict(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
+        throw new ShotClaimLostError(`Shot ${shotNumber} is already rendering or has finished, so it was not started again.`);
       }
     }
     let handle: MediaJobHandle;
@@ -708,6 +719,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     try {
       await beginShotRender(companyId, refreshed, lockedPending.shot, actor.agentId ?? actor.actorId);
     } catch (err) {
+      if (err instanceof ShotClaimLostError) {
+        // Another caller holds the shot (DUR-4937): leave the shot alone, only undo the film's own move to "rendering".
+        await db
+          .update(videoStorylines)
+          .set({ status: lockedPending.previousStatus, updatedAt: nowOf() })
+          .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.status, "rendering")));
+        throw err;
+      }
       // Compensate: the storyline goes back to where it was (with the reason),
       // the shot shows its own reason, and the person gets the same sentence.
       const reason = await recordShotStartFailure(companyId, refreshed, lockedPending.shot, err, { status: lockedPending.previousStatus, errorPrefix: "The render did not start. " });
@@ -1390,6 +1409,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     try {
       await beginShotRender(companyId, refreshedStoryline, next, storyline.createdByAgentId ?? storyline.createdByUserId ?? "system");
     } catch (err) {
+      // Another caller already holds this shot (DUR-4937): its run continues the chain, so there is nothing to record.
+      if (err instanceof ShotClaimLostError) return;
       // The next shot could not start: pause with its reason instead of
       // leaving the storyline "rendering" with nothing running.
       await recordShotStartFailure(companyId, refreshedStoryline, next, err, {

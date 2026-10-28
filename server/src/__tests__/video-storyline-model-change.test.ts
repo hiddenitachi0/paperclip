@@ -147,7 +147,7 @@ d("storyline model change", () => {
   const jobsOf = (shotId: string) => db.select().from(videoShotRenderJobs).where(eq(videoShotRenderJobs.shotId, shotId));
 
   /** A stand-in service that records what it was built and asked with. */
-  function recordingService(answer: { model: string; provider: "fal" | "sogni"; done?: boolean; meta?: Record<string, unknown> }) {
+  function recordingService(answer: { model: string; provider: "fal" | "sogni"; done?: boolean; meta?: Record<string, unknown>; onStart?: (startNumber: number) => Promise<void> }) {
     const built: Array<{ providerId: string; model: string | null }> = [];
     const started: Array<{ model?: string; durationSeconds?: number }> = [];
     const buildProvider = (providerId: string, _apiKey: string, model: string | null): Provider => {
@@ -156,6 +156,7 @@ d("storyline model change", () => {
         name: providerId,
         start: async (input: { model?: string; durationSeconds?: number }) => {
           started.push({ model: input.model, durationSeconds: input.durationSeconds });
+          await answer.onStart?.(started.length);
           return { externalId: `wf-${started.length}`, model: answer.model, provider: answer.provider };
         },
         poll: async () =>
@@ -462,6 +463,110 @@ d("storyline model change", () => {
       expect(running.status).toBe("rendering");
       await expect(render.beginShotRender(companyId, storyline, running, "actor")).rejects.toMatchObject({ status: 409 });
       expect(rec.started).toHaveLength(1);
+      // The shared test database ticks every running job: settle this one so it cannot leak into other tests.
+      await db.update(videoShotRenderJobs).set({ status: "failed" }).where(eq(videoShotRenderJobs.storylineId, storylineId));
+      await db.update(videoStorylines).set({ status: "cancelled" }).where(eq(videoStorylines.id, storylineId));
+    });
+
+    /**
+     * Holds the re-render's paid call open (as a slow provider would) so the test can act while it is in flight:
+     * `hold()` arms the next provider.start, `entered` resolves once that call is waiting, `release()` lets it return.
+     */
+    function heldStart() {
+      let armed = false;
+      let release!: () => void;
+      let entered!: () => void;
+      let gate = Promise.resolve();
+      let enteredPromise = Promise.resolve();
+      return {
+        hold() {
+          armed = true;
+          gate = new Promise<void>((resolve) => (release = resolve));
+          enteredPromise = new Promise<void>((resolve) => (entered = resolve));
+        },
+        entered: () => enteredPromise,
+        release: () => release(),
+        onStart: async () => {
+          if (!armed) return;
+          armed = false;
+          entered();
+          await gate;
+        },
+      };
+    }
+
+    it("a chain that loses the claim to a re-render leaves the winner's shot alone and the provider is started once (DUR-4937 F1)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
+      await db.update(videoStorylines).set({ budgetCapCents: 750 }).where(eq(videoStorylines.id, storylineId));
+      const held = heldStart();
+      const rec = recordingService({ model: KLING_16, provider: "fal", onStart: held.onStart });
+      let beforeKey: (() => Promise<void>) | null = null;
+      // Key lookups in the tick: the poll of shot 1, then the chain preparing shot 2 (the third is inside beginShotRender).
+      let keyCalls = 0;
+      const render = videoStorylineRenderService(db, {
+        buildProvider: rec.buildProvider as never,
+        resolveApiKey: async () => {
+          keyCalls += 1;
+          const hook = keyCalls === 3 ? beforeKey : null;
+          if (hook) {
+            beforeKey = null;
+            await hook();
+          }
+          return "fal-key";
+        },
+      });
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      // The tick finishes shot 1 and the chain goes to start shot 2; a re-render of shot 2 wins the claim mid-way
+      // and its paid call stays in flight while the chain gives up.
+      let reRender: Promise<unknown> = Promise.resolve();
+      beforeKey = async () => {
+        held.hold();
+        reRender = render.reRenderShot(companyId, storylineId, shotIds[1]!, ACTOR);
+        await held.entered();
+      };
+      await render.tick();
+      expect(beforeKey).toBeNull();
+      // A third caller tries to start the same shot while the re-render's call is still out.
+      await render.startRender(companyId, storylineId, ACTOR, {}).catch(() => undefined);
+      held.release();
+      await reRender;
+      for (let i = 0; i < 6; i++) await render.tick();
+      expect(rec.started).toHaveLength(3);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "done", "done"]);
+      for (const id of shotIds) expect(await jobsOf(id)).toHaveLength(1);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(750);
+    });
+
+    it("startRender that loses the claim to a re-render leaves the winner's shot alone and puts the film back (DUR-4937 F1)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      const statusBefore = (await storylineRow(storylineId)).status;
+      const held = heldStart();
+      const rec = recordingService({ model: KLING_16, provider: "fal", done: false, onStart: held.onStart });
+      let beforeKey: (() => Promise<void>) | null = null;
+      const render = videoStorylineRenderService(db, {
+        buildProvider: rec.buildProvider as never,
+        resolveApiKey: async () => {
+          const hook = beforeKey;
+          beforeKey = null;
+          if (hook) await hook();
+          return "fal-key";
+        },
+      });
+      let reRender: Promise<unknown> = Promise.resolve();
+      beforeKey = async () => {
+        held.hold();
+        reRender = render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+        await held.entered();
+      };
+      await expect(render.startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({ status: 409 });
+      expect((await storylineRow(storylineId)).status).toBe(statusBefore);
+      // A second start while the re-render's call is still out must not find the shot free.
+      await render.startRender(companyId, storylineId, ACTOR, {}).catch(() => undefined);
+      held.release();
+      await reRender;
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["rendering", "draft"]);
+      expect(await jobsOf(shotIds[0]!)).toHaveLength(1);
       // The shared test database ticks every running job: settle this one so it cannot leak into other tests.
       await db.update(videoShotRenderJobs).set({ status: "failed" }).where(eq(videoShotRenderJobs.storylineId, storylineId));
       await db.update(videoStorylines).set({ status: "cancelled" }).where(eq(videoStorylines.id, storylineId));
