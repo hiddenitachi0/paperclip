@@ -113,6 +113,12 @@ export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[]
   if (hasOwn(deployPolicy, "sftpAllowlist")) {
     paths.push("deployPolicy.sftpAllowlist");
   }
+  if (hasOwn(deployPolicy, "sftpExclude")) {
+    paths.push("deployPolicy.sftpExclude");
+  }
+  if (hasOwn(deployPolicy, "sftpHostKeySha256")) {
+    paths.push("deployPolicy.sftpHostKeySha256");
+  }
   if (hasOwn(deployPolicy, "mode")) {
     paths.push("deployPolicy.mode");
   }

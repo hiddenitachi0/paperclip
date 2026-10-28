@@ -260,6 +260,29 @@ describe("project deployment settings routes", () => {
       expect(mockProjectService.update).not.toHaveBeenCalled();
     });
 
+    // DUR-4977: the pin and the exclude list decide where the deploy key goes
+    // and which files reach the live site -- as board-only as the host itself.
+    it.each([
+      ["sftpHostKeySha256", "XyVDcJxCMYWpsR0kQiqyNEJeJurMgLq7t8lZPMznJQ8"],
+      ["sftpExclude", ["Apps/data/"]],
+    ])("refuses an agent key that tries to set %s on an existing project", async (field, value) => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            [field]: value,
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain(`deployPolicy.${field}`);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
     it("refuses an agent key that tries to set the requesting agent on an existing project", async () => {
       const app = await createApp(agentActor);
       const res = await request(app)

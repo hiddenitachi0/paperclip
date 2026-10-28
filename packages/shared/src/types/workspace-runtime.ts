@@ -242,9 +242,24 @@ export interface ProjectDeployPolicy {
   sftpRemotePath?: string;
   /**
    * Explicit list of local (repo-relative) files the deploy runner may
-   * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068).
+   * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068). An
+   * entry ending in "/" means every file git tracks under that folder at the
+   * approved commit (never the working tree).
    */
   sftpAllowlist?: string[];
+  /**
+   * Files and folders removed from the resolved upload set, e.g.
+   * "Apps/data/" or "Apps/Turnus/turnus-store.php". Exact repo-relative
+   * paths, or a path ending in "/" for a whole folder.
+   */
+  sftpExclude?: string[];
+  /**
+   * Pin for the SFTP host's public key: the base64 SHA-256 of it, without a
+   * "SHA256:" prefix. Passed to curl as --hostpubsha256 on every SFTP call so
+   * the key is never offered to a host that merely answers on the address.
+   * Required when the transport is "sftp" and the policy is enabled.
+   */
+  sftpHostKeySha256?: string;
   /**
    * DUR-4162: how many past successful/needs-attention releases deploy
    * history keeps for this project (default 10 when unset). Bounds how far

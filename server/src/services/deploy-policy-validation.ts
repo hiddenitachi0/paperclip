@@ -56,6 +56,31 @@ function hasWhitespace(value: string) {
 }
 
 /**
+ * DUR-4977: the SFTP allowlist and exclude lists are matched as exact strings
+ * against the files git tracks, and every resolved path ends up inside a curl
+ * quote command that cannot escape anything. So the strict form is required
+ * for both: a plain relative path (a single trailing "/" is allowed and means
+ * "this whole folder"), no "..", ".", empty or backslash pieces, no
+ * whitespace and no quote characters. Returns why `value` is unusable, or
+ * null when it is fine.
+ */
+function describeSftpPathProblem(value: string): string | null {
+  if (isAbsolutePath(value)) return "it is an absolute path";
+  if (/\s/.test(value)) return "it contains a space";
+  if (/['"\\]/.test(value)) return "it contains a quote or backslash character";
+  const body = value.endsWith("/") ? value.slice(0, -1) : value;
+  const segments = body.split("/");
+  if (segments.some((segment) => segment === "..")) return 'it contains a ".." segment';
+  if (segments.some((segment) => segment === "" || segment === ".")) {
+    return 'it contains an empty or "." segment (write it like Apps/data/ — no "./", no "//")';
+  }
+  return null;
+}
+
+// Base64 of a SHA-256 digest: 43 characters, optionally with its one "=".
+const SFTP_HOST_KEY_SHA256_PATTERN = /^[A-Za-z0-9+/]{43}=?$/;
+
+/**
  * Returns the list of things wrong with `policy`, each a complete sentence an
  * operator can act on. Empty when the policy is fine to store (and, when
  * `enabled` is true, fine to switch on).
@@ -180,11 +205,40 @@ export function describeDeployPolicyProblems(
     }
     for (const entry of policy.sftpAllowlist ?? []) {
       const trimmedEntry = entry.trim();
-      if (trimmedEntry && !isRelativeInsideProject(trimmedEntry)) {
+      if (!trimmedEntry) continue;
+      const why = describeSftpPathProblem(trimmedEntry);
+      if (why) {
         problems.push(
-          `Each file in the SFTP allowlist must be a path inside the project folder, with no ".." segments and no absolute path (got "${entry}").`,
+          `Each item in the SFTP allowlist must be a file or a folder (ending in "/") inside the project folder, ` +
+            `with no ".." segments and no absolute path (got "${entry}": ${why}).`,
         );
       }
+    }
+    for (const entry of policy.sftpExclude ?? []) {
+      const trimmedEntry = entry.trim();
+      if (!trimmedEntry) continue;
+      const why = describeSftpPathProblem(trimmedEntry);
+      if (why) {
+        problems.push(
+          `Each item in the SFTP exclude list must be a file path or a folder path ending in "/" inside the ` +
+            `project folder (got "${entry}": ${why}).`,
+        );
+      }
+    }
+    const sftpHostKeySha256 = (policy.sftpHostKeySha256 ?? "").trim();
+    if (sftpHostKeySha256) {
+      if (!SFTP_HOST_KEY_SHA256_PATTERN.test(sftpHostKeySha256)) {
+        problems.push(
+          "The SFTP host key pin must be the base64 SHA-256 of the host's public key — 43 characters, " +
+            'without a "SHA256:" prefix. Get it with: ssh-keyscan -t ed25519 <host> | ssh-keygen -lf - ' +
+            "and copy what follows SHA256:.",
+        );
+      }
+    } else if (enabled) {
+      problems.push(
+        "Fill in the SFTP host key pin before letting agents request deploys. Without it the deploy key could be " +
+          "handed to whatever answers on the host's address.",
+      );
     }
     if (policy.sftpPort !== undefined && (!Number.isInteger(policy.sftpPort) || policy.sftpPort <= 0)) {
       problems.push(`The SFTP port must be a positive whole number (got "${policy.sftpPort}").`);
