@@ -87,7 +87,7 @@ Rendering uses the server's own computer, so there are limits on video minutes, 
 
 - one render may be at most 10 minutes long (unless the operator changed it);
 - `durationSeconds` must match the composition: a render whose `data-start`/`data-duration` run longer than it asks for is refused (`duration_mismatch`), and a video that comes out longer is not saved;
-- each agent may use a set number of minutes per day, and the company a set number in total. A finished video counts its length; a check, a contact sheet and a failed or cancelled job count the time the renderer spent on it, so a failing job still uses up minutes;
+- each agent may use a set number of minutes per day, and the company a set number in total. A finished video counts its length, or the time the renderer spent on it if that was longer (a slow video uses up more); a check, a contact sheet and a failed or cancelled job count the time the renderer spent on it, so a failing job still uses up minutes;
 - only two jobs per company may wait or run at once.
 
 When a call answers `429` or `422` with a limit reason (`too_long`, `duration_mismatch`, `too_many_at_once`, `agent_daily_cap`, `company_daily_cap`, `budget_paused`, `budget_hard_stop`), **stop**. Do not retry in a loop and do not split the work to get around the limit. Wait for a running job to finish (`too_many_at_once`), or tell the person on the task in one plain sentence what limit was reached and ask how to go on. If the answer is `503`, the renderer is not set up on this server: say so on the task and stop.

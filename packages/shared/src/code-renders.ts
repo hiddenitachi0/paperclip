@@ -19,13 +19,13 @@ import { z } from "zod";
  * an agent that reaches one gets a plain "ask a person" answer.
  *
  * What a job counts against the daily caps (D7), so no job runs for free:
- *   - a finished render: its video length -- the length it asked for, the
- *     length its composition names, or the real length if that is longer;
+ *   - a finished render: the longest of the length it asked for, the length
+ *     its composition names, its real length, and the time the renderer
+ *     really spent on it;
  *   - a check, a contact sheet, and any failed or cancelled job: the time the
  *     renderer really spent on it;
- *   - a render still waiting or running: the length it reserved; a check or
- *     contact sheet: what it reserved, or the time it has run so far if that
- *     is more.
+ *   - any job still waiting or running: what it reserved, or the time it has
+ *     run so far if that is more.
  */
 
 export const CODE_RENDER_KINDS = ["check", "snapshot", "render"] as const;
@@ -84,7 +84,7 @@ export const CODE_RENDER_MAX_JOB_SECONDS = 1_800;
 export const CODE_RENDER_EXPLANATION =
   "Code-drawn videos (charts, titles, explainers) are made on this server's own computer, so they cost no AI money. " +
   "To keep the server free for everything else, each agent may use a limited number of minutes per day, the company a limited number in total, and only a few jobs run at once. " +
-  "A finished video counts its length; checks, previews and failed or stopped jobs count the time the renderer spent on them. " +
+  "A finished video counts its length, or the time the renderer spent on it if that was longer; checks, previews and failed or stopped jobs count the time the renderer spent on them. " +
   "When a limit is reached the agent stops and asks a person.";
 
 // Opening tags (quoted attribute values may hold ">"). An unquoted name or
@@ -228,8 +228,8 @@ export interface CodeRenderJob {
   videoSeconds: number | null;
   /**
    * What this job counts against the daily caps, in seconds: held while it
-   * waits or runs, then its video length (a finished render) or the
-   * renderer's real time (everything else).
+   * waits or runs, then the renderer's real time (a finished render: its
+   * video length instead, if that is longer).
    */
   chargedSeconds: number;
   /** 0-100 while the worker renders. */

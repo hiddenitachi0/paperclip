@@ -187,13 +187,12 @@ function guessedRunSeconds(startedAt: Date | string | null | undefined, at: Date
 
 /**
  * What a row counts against the daily caps right now. Finished: its charge.
- * A render in flight: its reservation (it is charged its video length, which
- * the worker holds to that). A check or contact sheet in flight: its
- * reservation, or its run time so far if that is more (it is charged its run
- * time). secondsTodayIn sums the same rule in SQL.
+ * Any job in flight: its reservation, or its run time so far if that is more
+ * (every finished job is charged at least its run time). secondsTodayIn sums
+ * the same rule in SQL.
  */
 function chargedSecondsOf(row: Row, at: Date): number {
-  if (!isActive(row.status) || row.kind === "render") return row.requestedSeconds;
+  if (!isActive(row.status)) return row.requestedSeconds;
   return Math.max(row.requestedSeconds, guessedRunSeconds(row.startedAt, at) ?? 0);
 }
 
@@ -366,8 +365,8 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     const conditions = [eq(codeRenderJobs.companyId, companyId), gte(codeRenderJobs.createdAt, startOfUtcDay(at))];
     if (agentId) conditions.push(eq(codeRenderJobs.createdByAgentId, agentId));
     const runSoFar = sql`least(greatest(coalesce(ceil(extract(epoch from (${at.toISOString()}::timestamptz - ${codeRenderJobs.startedAt})))::int, 0), 0), ${CODE_RENDER_MAX_JOB_SECONDS})`;
-    const inFlightCheck = and(inArray(codeRenderJobs.status, [...CODE_RENDER_ACTIVE_STATUSES]), sql`${codeRenderJobs.kind} <> 'render'`);
-    const charged = sql`case when ${inFlightCheck} then greatest(${codeRenderJobs.requestedSeconds}, ${runSoFar}) else ${codeRenderJobs.requestedSeconds} end`;
+    const inFlight = inArray(codeRenderJobs.status, [...CODE_RENDER_ACTIVE_STATUSES]);
+    const charged = sql`case when ${inFlight} then greatest(${codeRenderJobs.requestedSeconds}, ${runSoFar}) else ${codeRenderJobs.requestedSeconds} end`;
     const [row] = await tx
       .select({ total: sql<number>`coalesce(sum(${charged}), 0)::int` })
       .from(codeRenderJobs)
@@ -464,10 +463,15 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     return guessedRunSeconds(row.startedAt, now()) ?? 0;
   }
 
-  /** A finished render keeps the longer of its reservation and its real length; any other finished job keeps its run time. */
+  /**
+   * A finished render keeps the longest of its reservation, its real length
+   * and the renderer's time on it (a slow 1-second render must not cost 1 s
+   * of a cap that counts renderer minutes); any other finished job keeps its
+   * run time.
+   */
   function finishedCharge(row: Row, state: CodeRenderWorkerJob): number {
     if (row.kind !== "render") return busySeconds(row, state);
-    return Math.max(row.requestedSeconds, Math.ceil(state.result?.durationSeconds ?? 0));
+    return Math.max(row.requestedSeconds, Math.ceil(state.result?.durationSeconds ?? 0), busySeconds(row, state));
   }
 
   async function assertIssueInCompany(companyId: string, issueId: string) {
@@ -631,7 +635,9 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
       const message = err instanceof Error ? err.message : String(err);
       await release(row.workerJobId);
       // The renderer did the work either way: a finished job keeps its charge.
-      const chargedSeconds = err instanceof CodeRenderLengthError ? Math.max(row.requestedSeconds, Math.ceil(err.videoSeconds)) : finishedCharge(claimed, state);
+      const chargedSeconds = err instanceof CodeRenderLengthError
+        ? Math.max(row.requestedSeconds, Math.ceil(err.videoSeconds), busySeconds(claimed, state))
+        : finishedCharge(claimed, state);
       const error = err instanceof CodeRenderLengthError ? err.message : `The video was made but could not be saved: ${message}`;
       const updated = await update(claimed, { status: "failed", error, progressPct: null, finishedAt: now(), requestedSeconds: chargedSeconds });
       if (updated) await logJob(updated, "code_render.failed", { error: updated.error, chargedSeconds });

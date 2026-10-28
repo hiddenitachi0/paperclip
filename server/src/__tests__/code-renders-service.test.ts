@@ -472,7 +472,7 @@ d("codeRenderService (worker mocked)", () => {
         expect(await svc.cancel(companyId, waiting.id, { agentId, userId: null })).toMatchObject({ status: "cancelled", chargedSeconds: 0 });
       });
 
-      it("counts a check in flight at its run time so far once that passes its reservation; a render in flight at its reservation", async () => {
+      it("counts any job in flight at its run time so far once that passes its reservation", async () => {
         const { companyId, agentId } = await seedCompany();
         const worker = new FakeWorker();
         const svc = service(worker, { agentDailyVideoSeconds: 1000, maxActiveJobsPerCompany: 10 });
@@ -482,20 +482,22 @@ d("codeRenderService (worker mocked)", () => {
         const seen = await svc.get(companyId, check.id);
         expect(seen.status).toBe("running");
         expect(seen.chargedSeconds).toBeGreaterThanOrEqual(400);
-        // A render that takes longer than its video is long is charged its length.
+        // A render that runs longer than its video is long counts its run time, not its length.
         const render = await svc.submit(companyId, { agentId, userId: null }, renderInput({ durationSeconds: 20 }));
         worker.start(await workerJobIdOf(render.id), 400);
-        expect(await svc.get(companyId, render.id)).toMatchObject({ status: "running", chargedSeconds: 20 });
+        const rendering = await svc.get(companyId, render.id);
+        expect(rendering.status).toBe("running");
+        expect(rendering.chargedSeconds).toBeGreaterThanOrEqual(400);
         const used = (await svc.usage(companyId)).companySecondsToday;
-        expect(used).toBeGreaterThanOrEqual(420);
-        expect(used).toBeLessThan(430);
+        expect(used).toBeGreaterThanOrEqual(800);
+        expect(used).toBeLessThan(820);
         await expect(svc.submit(companyId, { agentId, userId: null }, renderInput({ durationSeconds: 600, files: [{ path: "index.html", content: htmlOf(600) }] }))).rejects.toMatchObject({
           status: 429,
           details: { reason: "agent_daily_cap" },
         });
       });
 
-      it("charges a finished check or contact sheet its real run time, and a finished render its real length", async () => {
+      it("charges a finished check or contact sheet its real run time, and a finished render the longer of its real length and its run time", async () => {
         const { companyId, agentId } = await seedCompany();
         const worker = new FakeWorker();
         const svc = service(worker, { maxActiveJobsPerCompany: 10 });
@@ -508,9 +510,31 @@ d("codeRenderService (worker mocked)", () => {
         expect(await svc.get(companyId, sheet.id)).toMatchObject({ status: "done", chargedSeconds: 42 });
 
         const render = await svc.submit(companyId, { agentId, userId: null }, renderInput({ durationSeconds: 20 }));
-        worker.finish(await workerJobIdOf(render.id), { durationSeconds: 20.3 }, { body: Buffer.from("MP4"), contentType: "video/mp4" }, ranFor(160));
+        worker.finish(await workerJobIdOf(render.id), { durationSeconds: 20.3 }, { body: Buffer.from("MP4"), contentType: "video/mp4" }, ranFor(5));
         expect(await svc.get(companyId, render.id)).toMatchObject({ status: "done", videoSeconds: 20.3, chargedSeconds: 21 });
-        expect((await svc.usage(companyId)).companySecondsToday).toBe(7 + 42 + 21);
+
+        const slow = await svc.submit(companyId, { agentId, userId: null }, renderInput({ durationSeconds: 20 }));
+        worker.finish(await workerJobIdOf(slow.id), { durationSeconds: 20.3 }, { body: Buffer.from("MP4"), contentType: "video/mp4" }, ranFor(160));
+        expect(await svc.get(companyId, slow.id)).toMatchObject({ status: "done", videoSeconds: 20.3, chargedSeconds: 160 });
+        expect((await svc.usage(companyId)).companySecondsToday).toBe(7 + 42 + 21 + 160);
+      });
+
+      it("charges a slow 1-second render the renderer's time, so looping tiny renders reaches the cap (SR N1)", async () => {
+        const { companyId, agentId } = await seedCompany();
+        const worker = new FakeWorker();
+        const svc = service(worker, { agentDailyVideoSeconds: 300, maxActiveJobsPerCompany: 10 });
+        const tiny = () => renderInput({ durationSeconds: 1, files: [{ path: "index.html", content: htmlOf(1) }] });
+        for (let i = 0; i < 2; i++) {
+          const job = await svc.submit(companyId, { agentId, userId: null }, tiny());
+          // A busy-waiting composition: 125 s of renderer time for 1 s of video.
+          worker.finish(await workerJobIdOf(job.id), { durationSeconds: 1 }, { body: Buffer.from("MP4"), contentType: "video/mp4" }, ranFor(125));
+          expect(await svc.get(companyId, job.id)).toMatchObject({ status: "done", videoSeconds: 1, chargedSeconds: 125 });
+        }
+        expect((await svc.usage(companyId)).companySecondsToday).toBe(250);
+        await expect(svc.submit(companyId, { agentId, userId: null }, renderInput({ durationSeconds: 60, files: [{ path: "index.html", content: htmlOf(60) }] }))).rejects.toMatchObject({
+          status: 429,
+          details: { reason: "agent_daily_cap", usedSeconds: 250 },
+        });
       });
 
       it("re-checks the real length: a video longer than allowed is not saved, and is charged its real length", async () => {
