@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
-import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
+import { CAST_IDENTITIES_ACTION, EMPTY_CAST, ShotCastConfirm, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { StoryWriterSection } from "./story-writer-panel.js";
@@ -3910,6 +3910,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listCastIdentities = usePluginAction(CAST_IDENTITIES_ACTION);
   const [castIdentities, setCastIdentities] = useState<CastIdentityOption[]>([]);
   const [castIdentityError, setCastIdentityError] = useState<string | null>(null);
+  const [castIdentitiesLoaded, setCastIdentitiesLoaded] = useState(false);
   useEffect(() => {
     if (!companyId || !selectedId) return;
     let cancelled = false;
@@ -3918,6 +3919,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       .then((r) => {
         if (cancelled) return;
         setCastIdentities(castIdentityOptions(r));
+        setCastIdentitiesLoaded(true);
         setCastIdentityError(null);
       })
       .catch((e) => {
@@ -4725,6 +4727,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       sceneNotes={sortedScenes.map((sc) => sc.notes)}
                       editable={editable}
                       identities={castIdentities}
+                      identitiesLoaded={castIdentitiesLoaded}
                       identityError={castIdentityError}
                       onSaved={async () => {
                         await loadStorylines();
@@ -4776,6 +4779,22 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
+                    castConfirm={
+                      <ShotCastConfirm
+                        key={selectedId}
+                        base={base}
+                        cast={selected.cast ?? EMPTY_CAST}
+                        shots={detailFor === selectedId ? shots : []}
+                        identities={castIdentities}
+                        identitiesLoaded={castIdentitiesLoaded}
+                        identityError={castIdentityError}
+                        editable={editable}
+                        onSaved={async () => {
+                          await loadStorylines();
+                        }}
+                        onLinkPerson={() => setActiveStep("cast")}
+                      />
+                    }
                     onShotLook={(shotId, pictureLookId) =>
                       void (async () => {
                         setError(null);
