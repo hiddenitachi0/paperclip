@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   addMusicBed,
+  addMusicBedToFile,
   assertFilterSafePath,
   buildFitFilter,
   buildMusicLaneFilterComplex,
@@ -13,17 +14,23 @@ import {
   buildTrimClipArgs,
   buildUploadTranscodeArgs,
   checkFfmpegAvailable,
+  concatListLine,
   fitInside,
   isHdrMedia,
   isVariableFrameRate,
+  normalizeClipFilesForStitch,
   normalizeClipsForStitch,
+  normalizeLoudnessFile,
   prepareTrimmedClip,
   processUploadedVideo,
+  processUploadedVideoFile,
   readProbeJson,
   renderStillClip,
   renderTitleCard,
   sniffAudioContainer,
   sniffVideoContainer,
+  stitchClipFiles,
+  stitchClipFilesWithTransitions,
   untrustedInputArgs,
   wrapTitleText,
   type ProbedMedia,
@@ -286,4 +293,84 @@ real("real ffmpeg: trim, fps, crop-fill, drawtext, HDR/VFR upload, photo clips, 
       expect(duration(out.buffer)).toBeLessThan(3.3);
     }
   });
+});
+
+describe("D18: file-based film making", () => {
+  it("writes concat list lines that keep a quote in a work-folder path inside its quotes", () => {
+    expect(concatListLine("/tmp/work/norm-000001.mp4")).toBe("file '/tmp/work/norm-000001.mp4'");
+    expect(concatListLine("/data/Anna's work/a.mp4")).toBe("file '/data/Anna'\\''s work/a.mp4'");
+  });
+});
+
+real("D18 real ffmpeg: a film made file to file", () => {
+  const clipFile = (name: string, seconds: number) => {
+    const out = path.join(dir, name);
+    execFileSync("ffmpeg", [
+      "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+      "-t", String(seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out,
+    ]);
+    return out;
+  };
+  const seconds = (file: string) => Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file]).toString().trim());
+
+  it("normalizes, joins cuts and a crossfade, adds music and evens the sound without leaving in-between files", async () => {
+    const work = mkdtempSync(path.join(os.tmpdir(), "paperclip-d18-film-"));
+    try {
+      const raw = [clipFile("d18-a.mp4", 2), clipFile("d18-b.mp4", 2), clipFile("d18-c.mp4", 2)];
+      const normalized = await normalizeClipFilesForStitch(raw, [], { width: 160, height: 120, fps: 25, fit: "fit", quality: "standard" }, work);
+      expect(normalized.paths).toHaveLength(3);
+      expect(normalized.durationsSeconds.every((s) => s > 1.8 && s < 2.3)).toBe(true);
+
+      const film = await stitchClipFilesWithTransitions(
+        [
+          { path: normalized.paths[0]!, transitionIn: "cut", transitionDurationMs: 0 },
+          { path: normalized.paths[1]!, transitionIn: "cut", transitionDurationMs: 0 },
+          { path: normalized.paths[2]!, transitionIn: "fade", transitionDurationMs: 500 },
+        ],
+        work,
+      );
+      // Two cuts and one half-second crossfade: about 5.5 seconds.
+      expect(seconds(film)).toBeGreaterThan(5.2);
+      expect(seconds(film)).toBeLessThan(5.9);
+      // Only the inputs and the finished film are left: every in-between join was removed.
+      expect(readdirSync(work).sort()).toEqual([...normalized.paths.map((p) => path.basename(p)), path.basename(film)].sort());
+
+      const music = path.join(work, "music.m4a");
+      execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100", "-t", "1", "-c:a", "aac", music]);
+      const withMusic = path.join(work, "with-music.mp4");
+      await addMusicBedToFile(film, { path: music, volumeDb: -6, mode: "mix" }, withMusic, work);
+      expect(seconds(withMusic)).toBeGreaterThan(5.2);
+
+      const evened = path.join(work, "evened.mp4");
+      expect(await normalizeLoudnessFile(withMusic, evened, work)).toMatch(/pass/);
+      expect(statSync(evened).size).toBeGreaterThan(1000);
+
+      const joined = path.join(work, "joined.mp4");
+      await stitchClipFiles(normalized.paths, joined, work);
+      expect(seconds(joined)).toBeGreaterThan(5.7);
+      expect(readdirSync(work).some((name) => name.startsWith("list-"))).toBe(false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("converts an uploaded video straight from disk into working copy, preview and poster files", async () => {
+    const work = mkdtempSync(path.join(os.tmpdir(), "paperclip-d18-upload-"));
+    try {
+      const input = clipFile("d18-upload.mp4", 2);
+      const out = await processUploadedVideoFile(input, { fps: 25, maxSeconds: 60 }, work);
+      expect(path.dirname(out.workingPath)).toBe(work);
+      expect(statSync(out.workingPath).size).toBeGreaterThan(1000);
+      expect(statSync(out.previewPath).size).toBeGreaterThan(500);
+      expect(readFileSync(out.posterPath).subarray(0, 2).toString("hex")).toBe("ffd8");
+      expect(out.output.durationSeconds).toBeGreaterThan(1.8);
+      const notVideo = path.join(work, "notes.mp4");
+      writeFileSync(notVideo, "#EXTM3U\nfile:///etc/passwd\n");
+      await expect(processUploadedVideoFile(notVideo, { fps: 25, maxSeconds: 60 }, work)).rejects.toThrow(/not a video this server can use/);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

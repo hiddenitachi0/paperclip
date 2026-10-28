@@ -167,6 +167,11 @@ export function parseMaxVolumeDb(stderrOutput: string): number | null {
   return match ? Number.parseFloat(match[1]!) : null;
 }
 
+/** The film as a file for ffmpeg: a path is used as it is; a buffer goes to a scratch file first. */
+async function withVideoFile<T>(video: Buffer | string, fn: (filePath: string) => Promise<T>): Promise<T> {
+  return typeof video === "string" ? fn(video) : withTempFile(video, fn);
+}
+
 async function withTempFile<T>(buffer: Buffer, fn: (filePath: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "paperclip-video-quality-check-"));
   try {
@@ -179,9 +184,9 @@ async function withTempFile<T>(buffer: Buffer, fn: (filePath: string) => Promise
 }
 
 /** Runs an ffmpeg filter pass and returns its stderr log, regardless of whether ffmpeg exits non-zero (it legitimately can for a `-f null -` scan; the detector output we want is in the log either way). */
-async function runFilterScan(filePath: string, args: string[]): Promise<string> {
+async function runFilterScan(filePath: string, args: string[], timeoutMs: number): Promise<string> {
   try {
-    const { stderr } = await execFileAsync(FFMPEG_BINARY, args, { timeout: SCAN_TIMEOUT_MS, maxBuffer: SCAN_MAX_BUFFER_BYTES });
+    const { stderr } = await execFileAsync(FFMPEG_BINARY, args, { timeout: timeoutMs, maxBuffer: SCAN_MAX_BUFFER_BYTES });
     return stderr;
   } catch (err) {
     const withStderr = err as { stderr?: unknown };
@@ -190,15 +195,21 @@ async function runFilterScan(filePath: string, args: string[]): Promise<string> 
   }
 }
 
-async function scanBlackAndFrozenStretches(filePath: string): Promise<{ black: DetectedRange[]; frozen: DetectedRange[] }> {
+/** D18: a scan decodes the whole film, so a long film gets longer (5 minutes plus real time). */
+function scanTimeoutMsFor(durationSeconds: number): number {
+  const seconds = Number.isFinite(durationSeconds) && durationSeconds > 0 ? Math.min(durationSeconds, 6 * 3600) : 0;
+  return SCAN_TIMEOUT_MS + Math.round(seconds * 1000);
+}
+
+async function scanBlackAndFrozenStretches(filePath: string, timeoutMs: number): Promise<{ black: DetectedRange[]; frozen: DetectedRange[] }> {
   const filter = `blackdetect=d=${BLACK_MIN_DURATION_SECONDS}:pic_th=${BLACK_PIC_THRESHOLD},freezedetect=n=${FREEZE_NOISE_THRESHOLD_DB}:d=${FREEZE_MIN_DURATION_SECONDS}`;
-  const stderr = await runFilterScan(filePath, ["-i", filePath, "-vf", filter, "-an", "-f", "null", "-"]);
+  const stderr = await runFilterScan(filePath, ["-i", filePath, "-vf", filter, "-an", "-f", "null", "-"], timeoutMs);
   return { black: parseBlackDetect(stderr), frozen: parseFreezeDetect(stderr) };
 }
 
-async function scanAudioIssues(filePath: string): Promise<{ silence: DetectedRange[]; maxVolumeDb: number | null }> {
+async function scanAudioIssues(filePath: string, timeoutMs: number): Promise<{ silence: DetectedRange[]; maxVolumeDb: number | null }> {
   const filter = `silencedetect=noise=${SILENCE_NOISE_THRESHOLD_DB}:d=${SILENCE_MIN_DURATION_SECONDS},volumedetect`;
-  const stderr = await runFilterScan(filePath, ["-i", filePath, "-af", filter, "-vn", "-f", "null", "-"]);
+  const stderr = await runFilterScan(filePath, ["-i", filePath, "-af", filter, "-vn", "-f", "null", "-"], timeoutMs);
   return { silence: parseSilenceDetect(stderr), maxVolumeDb: parseMaxVolumeDb(stderr) };
 }
 
@@ -220,19 +231,20 @@ function issue(code: VideoQualityIssueCode, message: string, shotIndex: number |
 }
 
 /**
- * Runs the full check against an already-stitched file (passed as a buffer;
- * written to a scratch temp file for ffmpeg/ffprobe, cleaned up afterward).
+ * Runs the full check against an already-stitched file: a buffer (written to
+ * a scratch temp file for ffmpeg/ffprobe, cleaned up afterward), or -- D18,
+ * long films -- the path of the film file already on disk, read in place.
  * Never throws for a file that ffmpeg/ffprobe can open -- check failures are
  * reported in the returned issues (code "check_error") rather than bubbling
  * an exception, so a transient probe hiccup does not crash the stitch tick.
  */
-export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQualityCheckPlan): Promise<VideoQualityCheckResult> {
+export async function runVideoQualityCheck(video: Buffer | string, plan: VideoQualityCheckPlan): Promise<VideoQualityCheckResult> {
   const timeline = buildShotTimeline(plan.shots);
   const expectedDuration = expectedTotalDurationSeconds(plan.shots);
   const issues: VideoStorylineQualityIssue[] = [];
 
   try {
-    await withTempFile(videoBuffer, async (filePath) => {
+    await withVideoFile(video, async (filePath) => {
       // A film without a picture (or a file nothing can read) is truly broken; nothing else is worth checking.
       if (!(await probeHasVideoStream(filePath))) {
         issues.push(issue("missing_video_stream", "The finished film has no picture, or the file cannot be read.", null, null));
@@ -258,7 +270,8 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
         );
       }
 
-      const { black, frozen } = await scanBlackAndFrozenStretches(filePath);
+      const scanTimeoutMs = scanTimeoutMsFor(actualDuration);
+      const { black, frozen } = await scanBlackAndFrozenStretches(filePath, scanTimeoutMs);
       for (const range of black) {
         if (stretchIsExpected(timeline, plan.shots, range, "allowStill")) continue;
         issues.push(
@@ -283,7 +296,7 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
       }
 
       if (hasAudioStream) {
-        const { silence, maxVolumeDb } = await scanAudioIssues(filePath);
+        const { silence, maxVolumeDb } = await scanAudioIssues(filePath, scanTimeoutMs);
         for (const range of silence) {
           if (stretchIsExpected(timeline, plan.shots, range, "allowSilence")) continue;
           issues.push(

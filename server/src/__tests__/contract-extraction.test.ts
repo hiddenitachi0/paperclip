@@ -11,6 +11,15 @@ import { buildDocx, buildPdf, buildZip, docxEntries } from "./helpers/contract-f
 
 const SENTENCE = "The tenant shall give six months written notice before the lease ends.";
 
+// Deflating 120 MB takes seconds on a busy CI runner: build the bomb once, and
+// give the tests that inflate large archives more than vitest's 5 s default.
+const SLOW = { timeout: 60_000 };
+let cachedBomb: Buffer | null = null;
+function zipBomb() {
+  cachedBomb ??= buildZip([...docxEntries([SENTENCE]), { name: "word/media/bomb.bin", data: Buffer.alloc(120 * 1024 * 1024) }]);
+  return cachedBomb;
+}
+
 function guardCode(buffer: Buffer, limits = DEFAULT_DOCX_GUARD_LIMITS) {
   try {
     inspectDocxArchive(buffer, limits);
@@ -63,18 +72,18 @@ describe("inspectDocxArchive (DUR-4853)", () => {
     expect(guardCode(buildZip(many), { ...DEFAULT_DOCX_GUARD_LIMITS, maxEntries: 10 })).toBe("too_many_entries");
   });
 
-  it("rejects a zip bomb: a few hundred KB that inflates past the cap", () => {
-    const bomb = buildZip([...docxEntries([SENTENCE]), { name: "word/media/bomb.bin", data: Buffer.alloc(120 * 1024 * 1024) }]);
+  it("rejects a zip bomb: a few hundred KB that inflates past the cap", SLOW, () => {
+    const bomb = zipBomb();
     expect(bomb.length).toBeLessThan(500 * 1024);
     expect(guardCode(bomb)).toMatch(/^(entry_too_large|archive_too_large)$/);
   });
 
-  it("rejects a high-ratio archive that stays under the size caps", () => {
+  it("rejects a high-ratio archive that stays under the size caps", SLOW, () => {
     const squashed = buildZip([...docxEntries([SENTENCE]), { name: "word/media/zeros.bin", data: Buffer.alloc(40 * 1024 * 1024) }]);
     expect(guardCode(squashed)).toBe("compression_ratio");
   });
 
-  it("does not trust declared sizes: an entry that lies about its size is caught by the real inflate", () => {
+  it("does not trust declared sizes: an entry that lies about its size is caught by the real inflate", SLOW, () => {
     const lying = buildZip([
       ...docxEntries([SENTENCE]),
       { name: "word/media/liar.bin", data: Buffer.alloc(20 * 1024 * 1024), declaredSize: 10 },
@@ -128,8 +137,8 @@ describe("extractContractText (DUR-4853)", () => {
     expect(result.textStatus).toBe("failed");
   });
 
-  it("fails closed on a zip-bomb DOCX without reading it into memory", async () => {
-    const bomb = buildZip([...docxEntries([SENTENCE]), { name: "word/media/bomb.bin", data: Buffer.alloc(120 * 1024 * 1024) }]);
+  it("fails closed on a zip-bomb DOCX without reading it into memory", SLOW, async () => {
+    const bomb = zipBomb();
     const result = await extractContractText("docx", bomb);
     expect(result).toMatchObject({ textStatus: "failed", reason: "rejected" });
   });
@@ -145,8 +154,8 @@ describe("extractContractText (DUR-4853)", () => {
     expect(result).toMatchObject({ textStatus: "failed", reason: "timeout" });
   });
 
-  it("never puts document text in a failure result", async () => {
-    const bomb = buildZip([...docxEntries([SENTENCE]), { name: "word/media/bomb.bin", data: Buffer.alloc(120 * 1024 * 1024) }]);
+  it("never puts document text in a failure result", SLOW, async () => {
+    const bomb = zipBomb();
     const failures = [
       await extractContractText("docx", bomb),
       await extractContractText("pdf", Buffer.from("%PDF-1.7\n" + SENTENCE)),

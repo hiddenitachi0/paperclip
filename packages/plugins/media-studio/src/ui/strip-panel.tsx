@@ -123,6 +123,10 @@ export interface StripClip {
   sourceLengthMs?: number | null;
   providerId?: string | null;
   model?: string | null;
+  /** True when a person pinned this shot to its own video model ("keep this shot on X"). */
+  pinned?: boolean;
+  /** What the next render of this shot will use (the pin, else the film's); null for your own videos and photos. */
+  willUse?: { providerId: string; model: string | null } | null;
   estimatedCostCents?: number | null;
 }
 
@@ -299,7 +303,7 @@ export function AddFootage(props: { apiBase: string; strip: StripSummary; busy: 
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Add your own video or photo</summary>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
         <p style={muted}>
-          Videos up to {strip.footage?.maxVideoMb ?? 300} MB and {Math.round((strip.footage?.maxVideoSeconds ?? 600) / 60)} minutes; photos up to {strip.footage?.maxPhotoMb ?? 20} MB.
+          Videos up to {strip.footage?.maxVideoMb ?? 2048} MB and {Math.round((strip.footage?.maxVideoSeconds ?? 600) / 60)} minutes; photos up to {strip.footage?.maxPhotoMb ?? 20} MB.
           {strip.storage ? ` This company uses ${sizeText(strip.storage.usedBytes)} of ${sizeText(strip.storage.quotaBytes)}.` : ""} Phone HDR colour and uneven frame rates are fixed for you.
         </p>
         <label style={{ display: "flex", gap: 6 }}>
