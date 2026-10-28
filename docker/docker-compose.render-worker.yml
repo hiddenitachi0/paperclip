@@ -83,8 +83,15 @@ services:
       RENDER_WORKER_CONCURRENCY: "1"
       RENDER_WORKER_BROWSERS_PER_JOB: "2"
       RENDER_WORKER_MAX_QUEUE: "8"
-      # A job (check, snapshot or render) is stopped after this long.
+      # No job (check, snapshot or render) runs longer than this.
       RENDER_WORKER_JOB_TIMEOUT_SECONDS: "1800"
+      # Each kind's own, shorter limit (D7): a check, a contact sheet, and a
+      # render's start-up allowance plus seconds per second of video asked
+      # for (at 30 fps; more fps get proportionally more).
+      RENDER_WORKER_CHECK_TIMEOUT_SECONDS: "180"
+      RENDER_WORKER_SNAPSHOT_TIMEOUT_SECONDS: "300"
+      RENDER_WORKER_RENDER_BASE_SECONDS: "120"
+      RENDER_WORKER_RENDER_SECONDS_PER_VIDEO_SECOND: "8"
       # Longest video the worker will hand back (30 min = the long-form cap).
       RENDER_WORKER_MAX_DURATION_SECONDS: "1800"
       # Largest finished file (2 GB, D18) and largest job upload.

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CompositionError,
+  assertCompositionLength,
+  compositionLengthSeconds,
   findRemoteReferences,
   normalizeCompositionPath,
   prepareCompositionFiles,
@@ -114,5 +116,47 @@ describe("vendored libraries", () => {
     const files = validateComposition({ files: [file("index.html", "<html></html>"), file("a.png", "https://example.com in a png")] }).files;
     const out = prepareCompositionFiles(files);
     assert.equal(out.files.length, 2);
+  });
+});
+
+describe("compositionLengthSeconds (D7: the length a job is held to before it renders)", () => {
+  it("reads the root composition's data-duration", () => {
+    const html = '<div id="root" data-composition-id="main" data-start="0" data-duration="20" data-width="1920"></div>';
+    assert.equal(compositionLengthSeconds(html), 20);
+  });
+
+  it("takes the latest end of any timed element, in either quote style or none", () => {
+    const html = [
+      '<div id="root" data-composition-id="main" data-duration="10">',
+      "<div class='clip' data-start='4' data-duration='12.5'></div>",
+      "<p class=clip data-start=2 data-duration=3 title=\"a > b\"></p>",
+      "</div>",
+    ].join("");
+    assert.equal(compositionLengthSeconds(html), 16.5);
+  });
+
+  it("ignores comments, non-numeric values and attributes that only look alike", () => {
+    const html = [
+      "<!-- <div data-duration=\"900\"></div> -->",
+      '<div data-composition-id="main" data-duration="8" data-duration-note="999"></div>',
+      '<div class="clip" data-start="intro" data-duration="5"></div>',
+      '<div class="clip" data-start="1" data-duration="${len}"></div>',
+    ].join("");
+    assert.equal(compositionLengthSeconds(html), 8);
+  });
+
+  it("is null when the composition names no length", () => {
+    assert.equal(compositionLengthSeconds("<html><body>hi</body></html>"), null);
+  });
+
+  it("assertCompositionLength refuses a composition longer than the job may be, before anything runs", () => {
+    const files = [{ path: "index.html", bytes: Buffer.from('<div data-composition-id="main" data-duration="600"></div>') }];
+    assert.throws(
+      () => assertCompositionLength("index.html", files, 1),
+      (error) => error instanceof CompositionError && error.code === "too_long" && /600 seconds/.test(error.message),
+    );
+    assert.equal(assertCompositionLength("index.html", files, 600), 600);
+    // Half a second of encoder slack, the same as the check after a render.
+    assert.equal(assertCompositionLength("index.html", files, 599.5), 600);
   });
 });

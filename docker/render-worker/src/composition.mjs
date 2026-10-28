@@ -104,6 +104,64 @@ export function validateComposition(input, limits = DEFAULT_COMPOSITION_LIMITS) 
   return { entry, files };
 }
 
+// HTML comments, and opening tags (quoted attribute values may hold ">").
+const HTML_COMMENT_PATTERN = /<!--[\s\S]*?-->/g;
+const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*\s*\/?>/g;
+const TIMING_ATTRIBUTE_PATTERNS = {
+  "data-start": /\sdata-start\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
+  "data-duration": /\sdata-duration\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
+};
+
+function timingAttribute(tag, name) {
+  const match = TIMING_ATTRIBUTE_PATTERNS[name].exec(tag);
+  if (!match) return null;
+  const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim().replace(/s$/i, "");
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * How long a composition says it runs, in seconds, read from its entry HTML:
+ * the latest `data-start` + `data-duration` of any timed element, the root's
+ * `data-duration` included; null when it names no length. Same rule as
+ * Paperclip's estimateCompositionSeconds (packages/shared/src/code-renders.ts):
+ * a job whose composition is longer than it may be is refused before any
+ * browser starts, instead of rendering for the whole time limit first.
+ */
+export function compositionLengthSeconds(html) {
+  let longest = null;
+  for (const tag of String(html).replace(HTML_COMMENT_PATTERN, "").match(OPENING_TAG_PATTERN) ?? []) {
+    const duration = timingAttribute(tag, "data-duration");
+    if (duration === null) continue;
+    const end = (timingAttribute(tag, "data-start") ?? 0) + duration;
+    if (longest === null || end > longest) longest = end;
+  }
+  return longest;
+}
+
+/** Encoder rounding allowed when a length is compared with the limit. */
+export const DURATION_SLACK_SECONDS = 0.5;
+
+/**
+ * Refuses (CompositionError "too_long") a composition whose entry file says
+ * it runs longer than `maxSeconds`. Returns the length it names, or null.
+ */
+export function assertCompositionLength(entry, files, maxSeconds) {
+  const file = files.find((f) => f.path === entry) ?? files.find((f) => f.path.toLowerCase() === entry.toLowerCase());
+  if (!file) return null;
+  const seconds = compositionLengthSeconds(file.bytes.toString("utf8"));
+  if (seconds !== null && seconds > maxSeconds + DURATION_SLACK_SECONDS) {
+    throw new CompositionError(
+      "too_long",
+      `The composition runs ${seconds} seconds (its data-start/data-duration), more than the ${maxSeconds} seconds allowed for this job. ` +
+        "Make it shorter, or ask for a render of its real length.",
+      { compositionSeconds: seconds, maxSeconds },
+    );
+  }
+  return seconds;
+}
+
 /** XML namespace names look like addresses but are never fetched. */
 const NAMESPACE_URIS = new Set([
   "http://www.w3.org/2000/svg",

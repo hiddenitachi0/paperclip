@@ -37,10 +37,10 @@ agent / person --HTTP--> Paperclip server --Unix socket (render-control volume)-
 | Other companies' files | The worker never fetches files. Paperclip reads each asset by (file id, company id) and sends the bytes inside the job, so a job can only carry its own company's files. Results are saved into the job's company. |
 | Host access | No Docker socket, no host bind mounts. Two named volumes only: `render-control` (the socket) and `render-jobs` (per-job folders, emptied on every start, each job's folder deleted when it is collected, cancelled or failed, or after `RENDER_WORKER_RESULT_TTL_SECONDS`). |
 | Paths | Composition paths are relative, plain ASCII, no `..`, no hidden files, allow-listed file types; files are written with `wx` (never overwriting or following a link). Nothing is ever unpacked from an archive. |
-| Resource limits | Compose: 2 CPUs, 3 GB memory (no swap), 1 GB `/dev/shm`, 512 processes, 4096 open files, 512 MB `/tmp`. Worker: one job at a time, a queue of 8, a wall-clock limit per job (30 min), a ceiling on video length (30 min) and on the output (2 GB), 300 MB per upload. A stopped job's whole process group is killed. |
+| Resource limits | Compose: 2 CPUs, 3 GB memory (no swap), 1 GB `/dev/shm`, 512 processes, 4096 open files, 512 MB `/tmp`. Worker: one job at a time, a queue of 8, a wall-clock limit per job kind (check 3 min, contact sheet 5 min, render 2 min + 8 s per second of video asked for at 30 fps, never above 30 min), a ceiling on video length (30 min) and on the output (2 GB), 300 MB per upload. A stopped job's whole process group is killed. |
 | Zombie processes | `init: true` reaps the browser's orphaned helpers (the September container-zombie incident). |
 | Secrets | The bearer token comes from `PAPERCLIP_SERVER_RENDER_WORKER_TOKEN` (the `PAPERCLIP_SERVER_` prefix keeps it out of agents' environments). The worker removes it from its own environment at start-up and starts every child (Hyperframes, Chrome, ffprobe) with an allow-listed environment, so no child can read it. Nothing secret is ever in a command line. |
-| Budgets | Rendering costs no provider money; the caps count video minutes per agent and company per day, jobs at once, and length per render. An agent that hits one is told to stop and ask a person. A paused or hard-stopped budget refuses every job. |
+| Budgets | Rendering costs no provider money; the caps count renderer minutes per agent and company per day (D7), jobs at once, and length per render. Every job counts: a finished render its video length, a check, a contact sheet and any failed or cancelled job the time the worker really spent on it (the worker's own start and finish times), and a job still in flight what it reserved. A render whose composition names a longer length than it asked for is refused before it runs. An agent that hits a cap is told to stop and ask a person. A paused or hard-stopped budget refuses every job. |
 | Telemetry, updates | `HYPERFRAMES_NO_TELEMETRY`, `DO_NOT_TRACK`, `HYPERFRAMES_NO_UPDATE_CHECK`, `HYPERFRAMES_NO_AUTO_INSTALL`, `HYPERFRAMES_SKIP_SKILLS` are set for every child; snapshot always runs with `--describe false` (no Gemini call). With no network, none of these could leave anyway. |
 | Licences | Hyperframes 0.8.150, Apache-2.0, licence text kept in `licenses/`; see `THIRD_PARTY_NOTICES.md`. Not Remotion. GSAP is **not** included unless the image is built with `WITH_GSAP=1` (its licence is not open source). |
 
@@ -93,15 +93,17 @@ The server's client is `server/src/services/code-render-worker-client.ts`. Every
 
 | Call | Body / answer |
 |---|---|
-| `POST /v1/jobs` | `{ kind: "check" \| "snapshot" \| "render", label, composition: { entry, files: [{ path, contentBase64 }] }, options: { fps, quality, frames, maxDurationSeconds } }` -> `202` job. `422` with `error` = `bad_path`, `bad_type`, `bad_entry`, `duplicate_path`, `too_large`, `remote_urls`, ... ; `413` too large; `429` queue full. |
-| `GET /v1/jobs/:id` | `{ id, kind, status: queued \| running \| done \| failed \| cancelled, progress: { pct, stage }, error, result: { passed, report, outputContentType, outputBytes, durationSeconds, width, height, frames } }`; `404` unknown (the worker restarted or the result expired). |
-| `GET /v1/jobs/:id/output` | The MP4 (render) or contact sheet JPEG (snapshot). |
-| `DELETE /v1/jobs/:id` | Cancels a waiting/running job, or deletes a finished job's files. |
+| `POST /v1/jobs` | `{ kind: "check" \| "snapshot" \| "render", label, composition: { entry, files: [{ path, contentBase64 }] }, options: { fps, quality, frames, maxDurationSeconds } }` -> `202` job. `422` with `error` = `bad_path`, `bad_type`, `bad_entry`, `duplicate_path`, `too_large`, `too_long`, `remote_urls`, ... ; `413` too large; `429` queue full. |
+| `GET /v1/jobs/:id` | `{ id, kind, status: queued \| running \| done \| failed \| cancelled, createdAt, startedAt, finishedAt, progress: { pct, stage }, error, result: { passed, report, outputContentType, outputBytes, durationSeconds, width, height, frames } }`; `404` unknown (the worker restarted or the result expired). |
+| `GET /v1/jobs/:id/output` | The MP4 (render) or contact sheet JPEG (snapshot), streamed with its `Content-Length`. The server streams it to a temp file and from there into storage; it is never held in memory. |
+| `DELETE /v1/jobs/:id` | Cancels a waiting/running job, or deletes a finished job's files. Answers the job as above (its `startedAt`/`finishedAt` are what Paperclip charges a cancelled or failed job by). |
 | `GET /v1/status` | Queue counts and the length ceiling. |
 | `GET /healthz` | Liveness, no token. |
 
-A render is refused after it ran if the video is longer than `maxDurationSeconds` (+0.5 s), larger than the output
-ceiling, or not a readable video. `--strict` makes Hyperframes fail on lint errors instead of rendering them.
+Any job is refused before it runs (`too_long`) when its entry file's `data-start` + `data-duration` name a length
+longer than `maxDurationSeconds` (+0.5 s); a render is stopped at its time limit, and refused after it ran if the
+video is longer than `maxDurationSeconds` (+0.5 s), larger than the output ceiling, or not a readable video.
+`--strict` makes Hyperframes fail on lint errors instead of rendering them.
 
 ## Paperclip API (agents and board)
 
@@ -114,8 +116,8 @@ Server-side caps (environment of the `server` container; defaults in `packages/s
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAPERCLIP_CODE_RENDER_MAX_VIDEO_SECONDS` | 600 | Longest single render (never above 1800). |
-| `PAPERCLIP_CODE_RENDER_AGENT_DAILY_SECONDS` | 1200 | Video seconds one agent may render per UTC day. |
-| `PAPERCLIP_CODE_RENDER_COMPANY_DAILY_SECONDS` | 3600 | Video seconds a company's agents may render per UTC day. People are not held to the daily caps. |
+| `PAPERCLIP_CODE_RENDER_AGENT_DAILY_SECONDS` | 1200 | Seconds one agent may use per UTC day: finished video, plus the renderer's time on checks, contact sheets and failed or cancelled jobs. |
+| `PAPERCLIP_CODE_RENDER_COMPANY_DAILY_SECONDS` | 3600 | The same, for all of a company's jobs together; agents are refused past it. People are not held to the daily caps, but their jobs count. |
 | `PAPERCLIP_CODE_RENDER_MAX_ACTIVE_JOBS` | 2 | Jobs waiting or running per company. |
 | `PAPERCLIP_CODE_RENDER_MAX_ASSET_MB` | 100 | Company files sent with one job (the server holds them in memory while it forwards the job). |
 

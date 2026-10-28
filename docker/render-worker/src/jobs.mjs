@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { CompositionError, prepareCompositionFiles, validateComposition } from "./composition.mjs";
+import { CompositionError, DURATION_SLACK_SECONDS, assertCompositionLength, prepareCompositionFiles, validateComposition } from "./composition.mjs";
 import {
   QUALITIES,
   buildCheckArgs,
@@ -64,6 +64,23 @@ export function normalizeOptions(kind, raw, config) {
 }
 
 /**
+ * How long one job may hold the renderer (D7: no job runs unbounded). A
+ * check or contact sheet gets its own short budget; a render gets a start-up
+ * allowance plus a multiple of the length it asked for (per second of video
+ * at 30 fps; more frames per second get proportionally more time). Never
+ * above the worker-wide job limit.
+ */
+export function jobTimeoutMs(kind, options, config) {
+  const ceiling = config.jobTimeoutMs;
+  if (kind === "check") return Math.min(ceiling, config.checkTimeoutMs ?? ceiling);
+  if (kind === "snapshot") return Math.min(ceiling, config.snapshotTimeoutMs ?? ceiling);
+  if (config.renderBaseTimeoutMs === undefined || config.renderTimeoutPerVideoSecond === undefined) return ceiling;
+  const frameRateFactor = Math.max(1, (options.fps ?? 30) / 30);
+  const perVideoSecondMs = config.renderTimeoutPerVideoSecond * frameRateFactor * 1000;
+  return Math.min(ceiling, Math.round(config.renderBaseTimeoutMs + options.maxDurationSeconds * perVideoSecondMs));
+}
+
+/**
  * Runs one job's Hyperframes command(s). Returns the result fields for the
  * job record, or throws JobFailure with a sentence a person can act on.
  */
@@ -75,7 +92,7 @@ export function createHyperframesRunner(config) {
 
   return async function run(job, { signal }) {
     const env = childEnv({ jobHome: job.paths.home, browserPath: config.browserPath });
-    const timeoutMs = config.jobTimeoutMs;
+    const timeoutMs = job.timeoutMs ?? config.jobTimeoutMs;
     const projectDir = job.paths.project;
 
     if (job.kind === "check") {
@@ -119,7 +136,12 @@ export function createHyperframesRunner(config) {
       },
     });
     if (res.cancelled) throw new JobFailure("The job was cancelled.");
-    if (res.timedOut) throw new JobFailure(`The render took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`);
+    if (res.timedOut) {
+      throw new JobFailure(
+        `The render took longer than ${Math.round(timeoutMs / 1000)} seconds, the time allowed for a video of ${job.options.maxDurationSeconds} seconds, and was stopped. ` +
+          "Check that the length asked for matches the composition's real length.",
+      );
+    }
     if (res.code !== 0 || !existsSync(outFile)) throw new JobFailure(`The render failed.\n${tail(res.stderr || res.stdout)}`);
     const info = await stat(outFile);
     if (info.size > config.maxOutputBytes) {
@@ -128,7 +150,7 @@ export function createHyperframesRunner(config) {
     const probed = await probe(outFile, env, signal);
     if (!probed?.hasVideo || probed.durationSeconds === null) throw new JobFailure("The render did not produce a readable video.");
     // Half a second of slack for encoder rounding.
-    if (probed.durationSeconds > job.options.maxDurationSeconds + 0.5) {
+    if (probed.durationSeconds > job.options.maxDurationSeconds + DURATION_SLACK_SECONDS) {
       throw new JobFailure(
         `The video is ${probed.durationSeconds.toFixed(1)} seconds long, more than the ${job.options.maxDurationSeconds} seconds allowed for this job.`,
       );
@@ -237,6 +259,9 @@ export function createJobManager({ config, runner, vendorAvailable = () => false
     const { entry, files } = validateComposition(body.composition, config.compositionLimits);
     const prepared = prepareCompositionFiles(files, vendorAvailable);
     const options = normalizeOptions(kind, body.options, config);
+    // Refused before any browser starts: a composition longer than this job
+    // may be would otherwise render until the time limit, then fail.
+    assertCompositionLength(entry, prepared.files, options.maxDurationSeconds);
     const label = typeof body.label === "string" ? body.label.replace(/[^A-Za-z0-9 ._:-]/g, "").slice(0, 120) : null;
 
     const id = newId();
@@ -268,6 +293,7 @@ export function createJobManager({ config, runner, vendorAvailable = () => false
       label,
       entry,
       options,
+      timeoutMs: jobTimeoutMs(kind, options, config),
       vendored: prepared.vendor,
       status: "queued",
       createdAt: now().toISOString(),

@@ -45,7 +45,16 @@ export function loadConfig(env = process.env) {
     concurrency: intFrom(env, "RENDER_WORKER_CONCURRENCY", 1, 1, 4),
     maxQueue: intFrom(env, "RENDER_WORKER_MAX_QUEUE", 8, 0, 100),
     renderWorkers: intFrom(env, "RENDER_WORKER_BROWSERS_PER_JOB", 2, 1, 4),
+    // The ceiling for any one job; each kind has its own, shorter budget below.
     jobTimeoutMs: intFrom(env, "RENDER_WORKER_JOB_TIMEOUT_SECONDS", 1800, 30, 4 * 3600) * 1000,
+    // A check or contact sheet does not render the whole video: a few minutes is plenty.
+    checkTimeoutMs: intFrom(env, "RENDER_WORKER_CHECK_TIMEOUT_SECONDS", 180, 30, 4 * 3600) * 1000,
+    snapshotTimeoutMs: intFrom(env, "RENDER_WORKER_SNAPSHOT_TIMEOUT_SECONDS", 300, 30, 4 * 3600) * 1000,
+    // A render may take this long to start, plus this many seconds per second
+    // of video it asked for: a job that asks for 1 second cannot hold the
+    // renderer for half an hour.
+    renderBaseTimeoutMs: intFrom(env, "RENDER_WORKER_RENDER_BASE_SECONDS", 120, 10, 3600) * 1000,
+    renderTimeoutPerVideoSecond: intFrom(env, "RENDER_WORKER_RENDER_SECONDS_PER_VIDEO_SECOND", 8, 1, 120),
     maxDurationSeconds,
     maxBodyBytes: intFrom(env, "RENDER_WORKER_MAX_BODY_MB", 300, 1, 4096) * 1024 * 1024,
     maxOutputBytes: intFrom(env, "RENDER_WORKER_MAX_OUTPUT_MB", 2048, 1, 8192) * 1024 * 1024,

@@ -11,7 +11,11 @@ import {
   runProcess,
   tail,
 } from "../src/hyperframes.mjs";
-import { readToken } from "../src/config.mjs";
+import { loadConfig, readToken } from "../src/config.mjs";
+import { JobFailure, createHyperframesRunner, jobTimeoutMs } from "../src/jobs.mjs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("childEnv", () => {
   it("is an allowlist: the worker's token and other variables never reach a child", () => {
@@ -145,5 +149,50 @@ describe("runProcess", () => {
     setTimeout(() => controller.abort(), 100);
     const res = await pending;
     assert.equal(res.cancelled, true);
+  });
+});
+
+describe("time budgets (D7: no job holds the renderer unbounded)", () => {
+  const config = loadConfig({});
+
+  it("gives checks and contact sheets their own short limit", () => {
+    assert.equal(config.checkTimeoutMs, 180_000);
+    assert.equal(config.snapshotTimeoutMs, 300_000);
+    assert.equal(jobTimeoutMs("check", { maxDurationSeconds: 1800 }, config), 180_000);
+    assert.equal(jobTimeoutMs("snapshot", { maxDurationSeconds: 1800 }, config), 300_000);
+  });
+
+  it("scales a render's limit with the length it asked for, under the worker-wide ceiling", () => {
+    assert.equal(jobTimeoutMs("render", { fps: 30, maxDurationSeconds: 1 }, config), 120_000 + 8_000);
+    assert.equal(jobTimeoutMs("render", { fps: 30, maxDurationSeconds: 20 }, config), 120_000 + 160_000);
+    assert.equal(jobTimeoutMs("render", { fps: 30, maxDurationSeconds: 1800 }, config), config.jobTimeoutMs);
+  });
+
+  it("gives a render with more frames per second proportionally more time, never less than at 30 fps", () => {
+    assert.equal(jobTimeoutMs("render", { fps: 60, maxDurationSeconds: 20 }, config), 120_000 + 320_000);
+    assert.equal(jobTimeoutMs("render", { fps: 12, maxDurationSeconds: 20 }, config), 120_000 + 160_000);
+  });
+
+  it("never lets a setting lift a kind's budget above the ceiling", () => {
+    const tight = loadConfig({ RENDER_WORKER_JOB_TIMEOUT_SECONDS: "60", RENDER_WORKER_CHECK_TIMEOUT_SECONDS: "999" });
+    assert.equal(jobTimeoutMs("check", { maxDurationSeconds: 10 }, tight), 60_000);
+    assert.equal(jobTimeoutMs("render", { maxDurationSeconds: 10 }, tight), 60_000);
+  });
+
+  it("the runner stops a check that never ends at the job's own budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "render-worker-budget-"));
+    try {
+      // Stands in for `hyperframes check` on a composition stuck in while(true){}.
+      const bin = join(dir, "hyperframes");
+      await writeFile(bin, "#!/bin/sh\nsleep 30\n");
+      await chmod(bin, 0o755);
+      const run = createHyperframesRunner({ ...config, hyperframesBin: bin });
+      const started = Date.now();
+      const job = { kind: "check", options: { maxDurationSeconds: 1800 }, timeoutMs: 300, paths: { project: dir, home: dir, out: dir } };
+      await assert.rejects(run(job, { signal: new AbortController().signal }), (error) => error instanceof JobFailure && /longer than/.test(error.message));
+      assert.ok(Date.now() - started < 10_000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

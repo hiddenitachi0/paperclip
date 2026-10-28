@@ -22,6 +22,11 @@ function testConfig(jobsDir) {
     maxBodyBytes: 64 * 1024,
     maxOutputBytes: 1024 * 1024,
     resultTtlMs: 60_000,
+    jobTimeoutMs: 1_800_000,
+    checkTimeoutMs: 180_000,
+    snapshotTimeoutMs: 300_000,
+    renderBaseTimeoutMs: 120_000,
+    renderTimeoutPerVideoSecond: 8,
     compositionLimits: DEFAULT_COMPOSITION_LIMITS,
   };
 }
@@ -31,7 +36,7 @@ function fakeRunner() {
   const gates = [];
   const calls = [];
   const runner = async (job, { signal }) => {
-    calls.push({ kind: job.kind, options: job.options, entry: job.entry });
+    calls.push({ kind: job.kind, options: job.options, entry: job.entry, timeoutMs: job.timeoutMs });
     if (job.label === "slow") {
       await new Promise((resolve, reject) => {
         gates.push(resolve);
@@ -125,6 +130,45 @@ describe("render worker HTTP API", () => {
     assert.equal(released.status, 200);
     assert.equal((await call(`/v1/jobs/${submitted.id}/output`)).status, 404);
     assert.equal(existsSync(join(dir, submitted.id)), false);
+  });
+
+  it("refuses, before anything runs, a composition longer than the job may be (D7)", async () => {
+    const before = fake.calls.length;
+    const long = '<div id="root" data-composition-id="main" data-start="0" data-duration="600"></div>';
+    for (const kind of ["render", "check", "snapshot"]) {
+      const res = await call("/v1/jobs", { method: "POST", body: JSON.stringify({ kind, composition: composition(long), options: { maxDurationSeconds: 1 } }) });
+      assert.equal(res.status, 422);
+      const body = await res.json();
+      assert.equal(body.error, "too_long");
+      assert.match(body.message, /600 seconds/);
+    }
+    assert.equal(fake.calls.length, before);
+    assert.ok((await readdir(dir)).length <= 1);
+  });
+
+  it("gives each job a time budget for its kind and length", async () => {
+    const html = '<div id="root" data-composition-id="main" data-duration="5"></div>';
+    const render = await (await call("/v1/jobs", { method: "POST", body: JSON.stringify({ kind: "render", composition: composition(html), options: { maxDurationSeconds: 5 } }) })).json();
+    await waitFor(render.id, ["done"]);
+    assert.equal(fake.calls.at(-1).timeoutMs, 120_000 + 5 * 8_000);
+    const check = await (await call("/v1/jobs", { method: "POST", body: JSON.stringify({ kind: "check", composition: composition(html) }) })).json();
+    await waitFor(check.id, ["done"]);
+    assert.equal(fake.calls.at(-1).timeoutMs, 180_000);
+    // Free both, so later tests that count job folders see none of these.
+    for (const id of [render.id, check.id]) assert.equal((await call(`/v1/jobs/${id}`, { method: "DELETE" })).status, 200);
+    for (let i = 0; i < 100 && [render.id, check.id].some((id) => existsSync(join(dir, id))); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  });
+
+  it("answers the job with the worker's start and finish times when it is released", async () => {
+    const submitted = await (await call("/v1/jobs", { method: "POST", body: JSON.stringify({ kind: "check", composition: composition() }) })).json();
+    await waitFor(submitted.id, ["done"]);
+    const released = await call(`/v1/jobs/${submitted.id}`, { method: "DELETE" });
+    assert.equal(released.status, 200);
+    const body = await released.json();
+    assert.equal(body.status, "done");
+    assert.ok(Date.parse(body.startedAt) <= Date.parse(body.finishedAt));
   });
 
   it("returns a check report", async () => {
