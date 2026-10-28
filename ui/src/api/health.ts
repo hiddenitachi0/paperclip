@@ -24,6 +24,8 @@ export type HealthStatus = {
   bootstrapInviteActive?: boolean;
   features?: {
     companyDeletionEnabled?: boolean;
+    /** True while the server's administrator has real-money crypto locked off (PAPERCLIP_CRYPTO_REAL_MONEY). */
+    cryptoRealMoneyLocked?: boolean;
   };
   serverInfo?: ServerInfoSnapshot;
   devServer?: DevServerHealthStatus;

@@ -20,6 +20,18 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_DEPLOYMENT_EXPOSURE` | `private` | Exposure policy when deployment mode is `authenticated` |
 | `PAPERCLIP_API_URL` | (auto-derived) | Paperclip API base URL. When set externally (e.g., via Kubernetes ConfigMap, load balancer, or reverse proxy), the server preserves the value instead of deriving it from the listen host and port. Useful for deployments where the public-facing URL differs from the local bind address. |
 
+## Real-money crypto lock
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERCLIP_CRYPTO_REAL_MONEY` | (unset = forbidden) | Server-wide lock on real-money ("main network") crypto. Only the exact value `allowed` permits real money; unset, empty, or any other value (`true`, `1`, `Allowed`) forbids it. Leave it unset unless the operator has decided real money may ever be used on this server. |
+
+While real money is forbidden the server refuses, with a 403 and a plain message: creating or importing a main-network wallet, turning on a company's real-money setting (even for an owner who types `REAL MONEY`), and every main-network signature (Bitcoin, Ethereum and Solana sends; Hyperliquid orders and withdrawals). The check is made at the signing layer and on every request, so flipping `company_crypto_settings.mainnet_enabled` in the database does not get around it. Existing main-network wallets and settings are treated as frozen without being changed (no wallet status is written), so removing the variable's restriction later needs no clean-up. Test-network wallets are unaffected.
+
+The server logs one warning at boot stating the lock state (never any secret), and instance administrators see a banner while the lock is on. Changing the variable takes effect after a server restart.
+
+Before first deploying a version with this lock, check that no main-network wallets exist; see the pre-deploy check on the ship-plan card.
+
 ## Secrets
 
 | Variable | Default | Description |

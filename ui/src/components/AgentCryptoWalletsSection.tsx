@@ -614,10 +614,12 @@ export function AgentCryptoWalletsSection({ companyId, agentId }: { companyId: s
         <p className="text-sm">
           {settings.allWalletsFrozen
             ? "All crypto wallets in this company are frozen right now."
-            : settings.mainnetEnabled
+            : settings.realMoneyLocked
+              ? "Real money is switched off on this server (administrator setting)"
+              : settings.mainnetEnabled
               ? "Real money is on for this company."
               : "Real money is off for this company: wallets use test networks."}{" "}
-          <span className="text-muted-foreground">Change this on the Trading page.</span>
+          {settings.realMoneyLocked ? null : <span className="text-muted-foreground">Change this on the Trading page.</span>}
         </p>
       ) : null}
 
@@ -646,7 +648,7 @@ export function AgentCryptoWalletsSection({ companyId, agentId }: { companyId: s
         onOpenChange={setAddOpen}
         companyId={companyId}
         agentId={agentId}
-        mainnetEnabled={settings?.mainnetEnabled ?? false}
+        mainnetEnabled={(settings?.mainnetEnabled ?? false) && !settings?.realMoneyLocked}
       />
     </div>
   );

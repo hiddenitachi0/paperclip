@@ -17,6 +17,7 @@ import { HelperOverlay } from "./helper/HelperOverlay";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
+import { CryptoRealMoneyLockBanner } from "./CryptoRealMoneyLockBanner";
 import { CompanyMovedBanner } from "./company-migration/CompanyMovedBanner";
 import { StandaloneBrowserControls } from "./StandaloneBrowserControls";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
@@ -533,6 +534,7 @@ export function Layout() {
       </a>
       <WorktreeBanner />
       <DevRestartBanner devServer={health?.devServer} />
+      <CryptoRealMoneyLockBanner locked={health?.features?.cryptoRealMoneyLocked} />
       <CompanyMovedBanner />
       <div className={cn("min-h-0 flex-1", isMobile ? "w-full" : "flex overflow-clip")}>
         {isMobile && sidebarOpen && (
