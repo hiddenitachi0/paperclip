@@ -39,7 +39,6 @@ import {
   fileContentPath,
   formatDollars,
   hostFetchJson,
-  listCompanyPictures,
   maskBox,
   moveBox,
   padBox,
@@ -51,6 +50,7 @@ import {
   type Box,
   type CropRole,
 } from "./anchor-helpers.js";
+import { FilesPictureList } from "./files-picture-list.js";
 
 // ─── Types (as the worker sends them; see src/identity.ts) ───────────────────
 
@@ -409,14 +409,9 @@ export function CropEditor(props: {
 
 function PicturePicker(props: { companyId: string; onPick: (fileId: string) => void; disabled?: boolean; label?: string }) {
   const [open, setOpen] = useState(false);
-  const [pictures, setPictures] = useState<Array<{ fileId: string; title: string }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (!open || pictures) return;
-    listCompanyPictures(props.companyId).then(setPictures).catch((e) => setError(errText(e)));
-  }, [open, pictures, props.companyId]);
   const onUpload = async (file: File | undefined) => {
     if (!file) return;
     setBusy(true);
@@ -442,16 +437,7 @@ function PicturePicker(props: { companyId: string; onPick: (fileId: string) => v
         <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: "none" }} onChange={(e) => void onUpload(e.target.files?.[0])} />
       </div>
       {error ? <div style={errorBox}>{error}</div> : null}
-      {open ? (
-        <div style={{ ...row, maxHeight: 240, overflowY: "auto" }}>
-          {pictures === null ? <span style={help}>Loading…</span> : pictures.length === 0 ? <span style={help}>No pictures in Files yet.</span> : null}
-          {(pictures ?? []).map((p) => (
-            <button key={p.fileId} type="button" title={p.title} style={{ padding: 0, border: "none", background: "none", cursor: "pointer" }} onClick={() => { props.onPick(p.fileId); setOpen(false); }}>
-              <img src={fileContentPath(p.fileId)} alt={p.title} style={{ ...thumb, width: 72, height: 72 }} />
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {open ? <FilesPictureList companyId={props.companyId} size={72} onPick={(fileId) => { props.onPick(fileId); setOpen(false); }} /> : null}
     </div>
   );
 }

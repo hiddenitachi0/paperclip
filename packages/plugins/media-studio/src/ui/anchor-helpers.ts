@@ -167,15 +167,27 @@ export async function pictureDataUrl(fileId: string): Promise<string> {
   });
 }
 
-/** The company's pictures for pickers: from the artifacts list (newest first). */
-export async function listCompanyPictures(companyId: string): Promise<Array<{ fileId: string; title: string }>> {
-  const res = await hostFetchJson<{ artifacts?: Array<{ title: string; contentPath: string | null }> }>(`/api/companies/${companyId}/artifacts?kind=image&limit=100`);
-  const found: Array<{ fileId: string; title: string }> = [];
+/** One page of the company's pictures for pickers (newest first); search words narrow it by file name. */
+export async function listCompanyPicturesPage(
+  companyId: string,
+  opts: { search?: string; cursor?: string | null } = {},
+): Promise<{ pictures: Array<{ fileId: string; title: string }>; nextCursor: string | null }> {
+  const query = new URLSearchParams({ kind: "image", limit: "100" });
+  const search = (opts.search ?? "").trim();
+  if (search) {
+    query.set("q", search);
+    query.set("qScope", "filename");
+  }
+  if (opts.cursor) query.set("cursor", opts.cursor);
+  const res = await hostFetchJson<{ artifacts?: Array<{ title: string; contentPath: string | null }>; nextCursor?: string | null }>(
+    `/api/companies/${companyId}/artifacts?${query.toString()}`,
+  );
+  const pictures: Array<{ fileId: string; title: string }> = [];
   for (const artifact of res.artifacts ?? []) {
     const match = artifact.contentPath ? /^\/api\/attachments\/([0-9a-f-]{36})\/content$/i.exec(artifact.contentPath) : null;
-    if (match && !found.some((p) => p.fileId === match[1])) found.push({ fileId: match[1]!, title: artifact.title });
+    if (match && !pictures.some((p) => p.fileId === match[1])) pictures.push({ fileId: match[1]!, title: artifact.title });
   }
-  return found;
+  return { pictures, nextCursor: res.nextCursor ?? null };
 }
 
 /** Saved models (Settings > Models) that can see pictures first, then the rest. */

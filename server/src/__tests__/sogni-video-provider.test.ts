@@ -157,6 +157,17 @@ describe("SogniVideoProvider", () => {
     expect(api.startBody().media_references).toBeUndefined();
     expect(pinned.sent).toHaveLength(0);
   });
+
+  it("records Sogni's real default model on the job, never a made-up name, when none was named", async () => {
+    for (const Provider of [SogniVideoProvider, PluginSogniVideoProvider]) {
+      const api = sogniApi();
+      const handle = await new Provider({ apiKey: "k", apiFetch: api.apiFetch, transferFetch: async () => new Response(null, { status: 204 }) }).start({ kind: "video", prompt: "A quiet harbour", durationSeconds: 5 });
+      // Nothing sent (Sogni picks its default), but the job says which model that is.
+      expect(api.startBody().input.steps[0].arguments.videoModel).toBeUndefined();
+      expect(handle.model).toBe("ltx25");
+      expect(handle.model).not.toBe("sogni-video");
+    }
+  });
 });
 
 describe("Sogni video model names", () => {
