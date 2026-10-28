@@ -1,5 +1,13 @@
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 import {
+  SAFE_FOR_WORK_AVOID,
+  classifyLoras,
+  lorasForModel,
+  madeForText,
+  type LoraFitCheck,
+  type SogniLoraInfo,
+} from "@paperclipai/plugin-sdk/media";
+import {
   FAL_FILL_MODEL,
   FAL_REFERENCE_MODEL,
   FalProvider,
@@ -36,13 +44,8 @@ import {
   SogniCatalog,
   checkSogniLoras,
   checkSogniOverrides,
-  classifyLoras,
-  lorasForModel,
-  madeForText,
   showNumber,
   sizeBoundsFor,
-  type LoraFitCheck,
-  type SogniLoraInfo,
   type SogniModelInfo,
 } from "./sogni-catalog.js";
 import {
@@ -993,7 +996,7 @@ async function prepareSogni(
         // model list) cannot be read, nobody can tell, so the owner/admin-saved
         // picks are sent as saved, as before (Sogni limits strengths itself).
         if (loras.known && info) {
-          const checks = classifyLoras(info, look.loras, loras.known, await sogniModelNames(catalog));
+          const checks = classifyLoras({ id: sogniCanonicalModelId(info.id), name: info.name }, look.loras, loras.known, await sogniModelNames(catalog));
           const skipped = checks.filter((check) => check.fit !== "fits");
           if (skipped.length > 0) {
             picks = picks.filter((pick) => !skipped.some((check) => check.id === pick.id));
@@ -1033,16 +1036,6 @@ async function prepareSogni(
   if (editing) input.maxReferences = max;
   return { info, editing, usesOwnModel };
 }
-
-/**
- * DUR-4133/DUR-4138: the fixed "things to avoid" text merged onto a picture
- * made with `safeForWork: true` — used for pictures nobody reviews before
- * they go out (the morning report's illustrations). DUR-4138: this text
- * (plus "fully clothed" in the prompt) is the *only* safety net `safeForWork`
- * adds now — it no longer touches the provider's own content-filter switch,
- * see the `safeForWork` block below.
- */
-export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermark, logo";
 
 /**
  * Validate the tool input and apply a saved look. Nothing here spends
@@ -1557,6 +1550,8 @@ async function validateLookInput(
   params: Record<string, unknown>,
   actorUserId: string | null,
   existing: Look | null,
+  /** Plain notes for the person saving (for example, pictures that were dropped). */
+  notes: string[] = [],
 ): Promise<Omit<Look, "id" | "updatedAt">> {
   const name = typeof params.name === "string" ? params.name.trim() : "";
   if (!name) throw new Error("Give the look a name.");
@@ -1569,17 +1564,26 @@ async function validateLookInput(
   const rawModel = typeof params.model === "string" ? params.model.trim() : "";
   const seed = parseSeed(params.seed);
   if (seed === "invalid") throw new Error(`The seed must be a whole number from 0 to ${MAX_SEED}, or empty.`);
-  const refs = readReferenceIds(params.referenceFileIds);
-  if (refs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
-  if (refs.length > SOGNI_MAX_REFERENCES) throw new Error(`Pick at most ${SOGNI_MAX_REFERENCES} reference pictures.`);
-  const referenceRoles = readReferenceRoles(params.referenceRoles, refs.length);
+  const pickedRefs = readReferenceIds(params.referenceFileIds);
+  if (pickedRefs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
+  if (pickedRefs.length > SOGNI_MAX_REFERENCES) throw new Error(`Pick at most ${SOGNI_MAX_REFERENCES} reference pictures.`);
+  const pickedRoles = readReferenceRoles(params.referenceRoles, pickedRefs.length);
   const sheet = readSheet(params.sheet);
-  for (const id of refs) {
+  // A picture that was deleted from Files is dropped (with its role) so the look can still be saved.
+  const refs: string[] = [];
+  const referenceRoles: ReferenceRole[] = [];
+  for (const [i, id] of pickedRefs.entries()) {
     const file = await ctx.files.get(id, companyId);
-    if (!file) throw new Error("One of the reference pictures is not in this company's Files. Pick it again.");
+    if (!file) continue;
     if (!file.contentType.toLowerCase().startsWith("image/")) {
       throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture, so it cannot be a reference.`);
     }
+    refs.push(id);
+    referenceRoles.push(pickedRoles[i]!);
+  }
+  const dropped = pickedRefs.length - refs.length;
+  if (dropped > 0) {
+    notes.push(`${dropped === 1 ? "1 picture was" : `${dropped} pictures were`} removed because ${dropped === 1 ? "it is" : "they are"} no longer in Files.`);
   }
 
   const picks = readLoraPicks(params.loras);
@@ -2009,7 +2013,8 @@ const plugin = definePlugin({
       const looks = await loadLooks(ctx, companyId);
       const id = typeof params.id === "string" && params.id ? params.id : null;
       const existing = id ? (looks.find((look) => look.id === id) ?? null) : null;
-      const fields = await validateLookInput(ctx, companyId, params, context.actor.userId ?? null, existing);
+      const notes: string[] = [];
+      const fields = await validateLookInput(ctx, companyId, params, context.actor.userId ?? null, existing, notes);
       const clash = looks.find((look) => look.id !== id && look.name.trim().toLowerCase() === fields.name.toLowerCase());
       if (clash) throw new Error(`There is already a look called "${clash.name}". Pick another name.`);
       const updatedAt = new Date().toISOString();
@@ -2022,7 +2027,7 @@ const plugin = definePlugin({
         next = [...looks, { id: crypto.randomUUID(), ...fields, updatedAt }];
       }
       await ctx.state.set(looksScope(companyId), next);
-      return { looks: next };
+      return { looks: next, note: notes.length > 0 ? notes.join(" ") : null };
     });
 
     // "Make a copy": every field of the look (style words, character sheet,
