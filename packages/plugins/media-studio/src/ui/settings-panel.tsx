@@ -3,6 +3,7 @@ import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 import { hostFetchJson } from "./anchor-helpers.js";
 import { IdentitySettingsPanel } from "./identities-panel.js";
 import { FootageSettingsPanel } from "./footage-settings.js";
+import { errText } from "./error-text.js";
 
 // Media Studio's Settings tab. Three parts:
 //   1. This company's own service keys (Sogni, Fal.ai, Higgsfield): the
@@ -42,10 +43,6 @@ const badge = (source: ServiceKeyView["source"]): React.CSSProperties => ({
   background: source === "company" ? "#e6fcf5" : source === "instance" ? "#e7f5ff" : "#fff4e6",
   color: source === "company" ? "#087f5b" : source === "instance" ? "#1971c2" : "#d9480f",
 });
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 /** "Which key is used for this company" for each picture service, and the company's own picks. */
 export function ServiceKeysPanel({ companyId }: { companyId: string }) {

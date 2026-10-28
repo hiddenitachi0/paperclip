@@ -36,6 +36,8 @@ import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
 
 const storedObjects = vi.hoisted(() => new Map<string, { body: Buffer; contentType: string }>());
 const deleted = vi.hoisted(() => [] as string[]);
+/** D18: object keys that were streamed in from a file on disk (never passed through memory as a Buffer). */
+const streamedFromDisk = vi.hoisted(() => [] as string[]);
 vi.mock("../storage/index.ts", () => ({
   getStorageService: () => ({
     provider: "local_disk",
@@ -43,6 +45,14 @@ vi.mock("../storage/index.ts", () => ({
       const objectKey = `${input.companyId}/${input.namespace}/${Math.random().toString(36).slice(2)}-${input.originalFilename ?? "file"}`;
       storedObjects.set(objectKey, { body: input.body, contentType: input.contentType });
       return { provider: "local_disk", objectKey, contentType: input.contentType, byteSize: input.body.byteLength, sha256: `sha-${objectKey}`, originalFilename: input.originalFilename };
+    },
+    // D18: big files (finished films, uploaded videos and their working copies) are streamed in from disk.
+    putFileFromPath: async (input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; filePath: string }) => {
+      const body = await (await import("node:fs/promises")).readFile(input.filePath);
+      const objectKey = `${input.companyId}/${input.namespace}/${Math.random().toString(36).slice(2)}-${input.originalFilename ?? "file"}`;
+      streamedFromDisk.push(objectKey);
+      storedObjects.set(objectKey, { body, contentType: input.contentType });
+      return { provider: "local_disk", objectKey, contentType: input.contentType, byteSize: body.byteLength, sha256: `sha-${objectKey}`, originalFilename: input.originalFilename };
     },
     getObject: async (_companyId: string, objectKey: string) => {
       const found = storedObjects.get(objectKey);
@@ -103,16 +113,23 @@ vi.mock("../services/video-ffmpeg.ts", async (importOriginal) => ({
   extractLastFrameDataUri: async () => "data:image/jpeg;base64,TEFTVA==",
   extractFirstFrameDataUri: async () => "data:image/jpeg;base64,RklSU1Q=",
   buildClipContactSheet: async () => Buffer.from("sheet"),
-  processUploadedVideo: async () => ({
-    working: Buffer.from("working-video"),
-    preview: Buffer.from("preview-video"),
-    poster: Buffer.from("poster"),
-    media: { width: 1920, height: 1080, durationSeconds: 20, nominalFps: 30, averageFps: 29.5, colorTransfer: "arib-std-b67", hasDolbyVision: false, hasAudio: true, rotation: 0 },
-    output: { width: 1920, height: 1080, durationSeconds: 20 },
-    wasHdr: true,
-    wasVariableFrameRate: true,
-    note: null,
-  }),
+  // D18: the upload is converted from a file on disk into files in the work folder.
+  processUploadedVideoFile: async (_input: string, _opts: unknown, outDir: string) => {
+    const { writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const files = { workingPath: join(outDir, "working.mp4"), previewPath: join(outDir, "preview.mp4"), posterPath: join(outDir, "poster.jpg") };
+    await writeFile(files.workingPath, "working-video");
+    await writeFile(files.previewPath, "preview-video");
+    await writeFile(files.posterPath, "poster");
+    return {
+      ...files,
+      media: { width: 1920, height: 1080, durationSeconds: 20, nominalFps: 30, averageFps: 29.5, colorTransfer: "arib-std-b67", hasDolbyVision: false, hasAudio: true, rotation: 0 },
+      output: { width: 1920, height: 1080, durationSeconds: 20 },
+      wasHdr: true,
+      wasVariableFrameRate: true,
+      note: null,
+    };
+  },
   prepareTrimmedClip: async (...args: unknown[]) => {
     ff.prepared.push({ kind: "trim", args: args.slice(1) });
     return Buffer.from("trimmed");
@@ -121,19 +138,34 @@ vi.mock("../services/video-ffmpeg.ts", async (importOriginal) => ({
     ff.prepared.push({ kind: "still", args: args.slice(1) });
     return Buffer.from("still-clip");
   },
-  normalizeClipsForStitch: async (buffers: Buffer[], options: unknown[], target: unknown) => {
-    ff.normalizeCalls.push({ count: buffers.length, options, target });
-    return { buffers, durationsSeconds: buffers.map(() => 2) };
+  // D18: the film is made file to file in the stitch's work folder.
+  normalizeClipFilesForStitch: async (paths: string[], options: unknown[], target: unknown, outDir: string) => {
+    ff.normalizeCalls.push({ count: paths.length, options, target });
+    const { copyFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const out: string[] = [];
+    for (const [index, path] of paths.entries()) {
+      const normalized = join(outDir, `norm-${index}.mp4`);
+      await copyFile(path, normalized);
+      out.push(normalized);
+    }
+    return { paths: out, durationsSeconds: paths.map(() => 2) };
   },
   renderTitleCard: async (text: string, params: unknown) => {
     ff.titles.push({ text, params });
     return Buffer.from("title");
   },
-  stitchClips: async () => ({ buffer: Buffer.from("film"), contentType: "video/mp4" }),
-  stitchClipsWithTransitions: async () => ({ buffer: Buffer.from("film"), contentType: "video/mp4" }),
-  addMusicBed: async (film: { buffer: Buffer; contentType: string }, music: Record<string, unknown>) => {
+  stitchClipFiles: async (_paths: string[], outputPath: string) => {
+    await (await import("node:fs/promises")).writeFile(outputPath, "film");
+  },
+  stitchClipFilesWithTransitions: async (_shots: unknown[], workDir: string) => {
+    const outputPath = (await import("node:path")).join(workDir, "film-transitions.mp4");
+    await (await import("node:fs/promises")).writeFile(outputPath, "film");
+    return outputPath;
+  },
+  addMusicBedToFile: async (videoPath: string, music: Record<string, unknown>, outputPath: string) => {
     ff.music.push(music);
-    return film;
+    await (await import("node:fs/promises")).copyFile(videoPath, outputPath);
   },
 }));
 vi.mock("../services/video-quality-check.ts", async (importOriginal) => ({
@@ -154,7 +186,7 @@ const { videoStorylineTransitionsService } = await import("../services/video-sto
 const { videoStorylineRenderService } = await import("../services/video-storyline-render.ts");
 const { videoStorylineStitchService } = await import("../services/video-storyline-stitch.ts");
 const { secretService } = await import("../services/secrets.ts");
-const { videoStorylineRoutes } = await import("../routes/video-storylines.ts");
+const { incomingFileFromMulter, videoStorylineRoutes } = await import("../routes/video-storylines.ts");
 const { errorHandler } = await import("../middleware/index.ts");
 
 const ACTOR = { actorType: "user" as const, actorId: "filip", agentId: null };
@@ -262,6 +294,10 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     await footage.setSettings(companyId, { maxVideoMb: 1 });
     await expect(clips.createUpload(companyId, storylineId, file("video", 2 * 1024 * 1024), NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 413 });
     await expect(clips.createUpload(companyId, storylineId, { ...file("video"), contentType: "text/html", originalName: "x.html" }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 415 });
+    // D18: a file on disk is refused by its kind and the photo limit before any byte is read (the path does not even exist).
+    const missing = `/nonexistent-${randomUUID()}/upload`;
+    await expect(clips.createUpload(companyId, storylineId, { path: missing, originalName: "film.mkv", contentType: "application/octet-stream", size: 1800 * 1024 * 1024 }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 415 });
+    await expect(clips.createUpload(companyId, storylineId, { path: missing, originalName: "huge.jpg", contentType: "image/jpeg", size: 1800 * 1024 * 1024 }, NO_PEOPLE, ACTOR)).rejects.toMatchObject({ status: 413 });
     await expect(clips.createUpload(companyId, storylineId, file("photo"), { showsPeople: true, consentLikeness: true, consentAdults: false }, ACTOR)).rejects.toMatchObject({ status: 422 });
 
     const photo = await clips.createUpload(companyId, storylineId, file("photo"), NO_PEOPLE, ACTOR);
@@ -667,6 +703,45 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     expect(tooBig.status).toBe(413);
     const noConsent = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).field("showsPeople", "true").attach("file", photoBytes, { filename: "c.png", contentType: "image/png" });
     expect(noConsent.status).toBe(422);
+
+    // D18: videos up to 2 GB by default, and a per-company limit for finished films and saved videos.
+    expect(read.body.settings).toMatchObject({ maxVideoMb: 2048, maxVideoFileMb: 2048 });
+    expect(read.body.hardLimits).toMatchObject({ maxVideoMb: 4096, maxVideoFileMb: 4096 });
+    expect(read.body.explanations.maxVideoFileMb).toContain("finished film");
+    const raised = await request(appFor(owner)).patch(`${base}/settings/footage`).send({ maxVideoFileMb: 3000 });
+    expect(raised.status).toBe(200);
+    expect(raised.body.settings.maxVideoFileMb).toBe(3000);
+    expect((await request(appFor(owner)).patch(`${base}/settings/footage`).send({ maxVideoFileMb: 5000 })).status).toBe(400);
+    expect((await request(appFor(member)).patch(`${base}/settings/footage`).send({ maxVideoFileMb: 100 })).status).toBe(403);
+    // An uploaded video is streamed from its temp file into storage (the stored copy is byte for byte the upload).
+    const video = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom", "latin1"), Buffer.alloc(300_000, 3)]);
+    const uploaded = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).field("showsPeople", "false").attach("file", video, { filename: "phone.mp4", contentType: "video/mp4" });
+    expect(uploaded.status).toBe(201);
+    expect(uploaded.body).toMatchObject({ kind: "video", status: "processing", byteSize: video.length });
+    const [rawRow] = await db.select().from(videoUploads).where(eq(videoUploads.id, uploaded.body.id));
+    expect(streamedFromDisk).toContain(rawRow!.rawObjectKey);
+    expect(Buffer.compare(storedObjects.get(rawRow!.rawObjectKey!)!.body, video)).toBe(0);
+    // D18: a mislabelled upload is refused by its kind/limit without being read into memory first.
+    const mkv = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).attach("file", Buffer.alloc(2 * 1024 * 1024, 7), { filename: "holiday.mkv", contentType: "application/octet-stream" });
+    expect(mkv.status).toBe(415);
+    const fakeJpeg = await request(appFor(member)).post(`${base}/${storylineId}/uploads`).attach("file", Buffer.alloc(2 * 1024 * 1024, 7), { filename: "big.jpg", contentType: "image/jpeg" });
+    expect(fakeJpeg.status).toBe(413);
+  });
+
+  it("hands a file multer wrote to disk over by its path whatever it claims to be, never as bytes in memory (D18)", () => {
+    const disk = (mimetype: string, originalname: string) =>
+      ({ fieldname: "file", originalname, encoding: "7bit", mimetype, size: 1800 * 1024 * 1024, path: "/tmp/media-work/abc", destination: "/tmp/media-work", filename: "abc" }) as Express.Multer.File;
+    for (const f of [disk("video/mp4", "a.mp4"), disk("image/jpeg", "a.jpg"), disk("application/octet-stream", "a.mkv"), disk("", "")]) {
+      const incoming = incomingFileFromMulter(f);
+      expect(incoming.path).toBe("/tmp/media-work/abc");
+      expect(incoming.buffer).toBeUndefined();
+      expect(incoming.size).toBe(1800 * 1024 * 1024);
+    }
+    expect(incomingFileFromMulter(disk("", "")).contentType).toBe("application/octet-stream");
+    expect(incomingFileFromMulter(disk("", "")).originalName).toBeNull();
+    const music = Buffer.from("RIFF");
+    const inMemory = incomingFileFromMulter({ fieldname: "file", originalname: "song.wav", encoding: "7bit", mimetype: "audio/wav", size: 4, buffer: music } as Express.Multer.File);
+    expect(inMemory).toEqual({ originalName: "song.wav", contentType: "audio/wav", size: 4, buffer: music });
   });
 
   it("cleans up unused uploads and unpicked AI bridge versions after the company's days, keeping what is used", async () => {

@@ -3,6 +3,7 @@ import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp
 import { agents } from "./agents.js";
 import { assets } from "./assets.js";
 import { companies } from "./companies.js";
+import { mediaModelSetups } from "./media_model_setups.js";
 import { projects } from "./projects.js";
 import { videoStorylineDirectors } from "./video_storyline_directors.js";
 
@@ -75,6 +76,13 @@ export const videoStorylines = pgTable(
     // The director (video_storyline_directors) whose AI story writer writes
     // this storyline in step 1; null = none picked yet.
     directorId: uuid("director_id").references(() => videoStorylineDirectors.id, { onDelete: "set null" }),
+    // Film studio Phase 1 (0259): the saved model setups (media_model_setups)
+    // this storyline makes its pictures and its clips with. When set, the
+    // server copies the setup's provider and model into provider_id/model
+    // and picture_settings (a derived cache for older code paths); a direct
+    // provider or model edit clears the id ("custom, not from a setup").
+    imageSetupId: uuid("image_setup_id").references(() => mediaModelSetups.id, { onDelete: "set null" }),
+    videoSetupId: uuid("video_setup_id").references(() => mediaModelSetups.id, { onDelete: "set null" }),
     // Direct-storage pointer for the final stitched film -- deliberately NOT
     // an attachments-table row: a multi-hour concatenated film routinely
     // exceeds the 25MB company-attachment cap (attachment-types.ts), and

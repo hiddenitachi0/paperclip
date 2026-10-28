@@ -271,6 +271,9 @@ const manifest: PaperclipPluginManifestV1 = {
     // "Analyse picture" on Identities: the server sends the picture to one of
     // the company's saved models (it can reach the company's own model server).
     "models.image_analysis.run",
+    // Film studio Phase 1: read the saved model setups, the LoRA library and
+    // the new-project defaults (ctx.mediaLibrary, read-only).
+    "media.library.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
