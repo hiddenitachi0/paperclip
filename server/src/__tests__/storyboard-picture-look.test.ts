@@ -44,13 +44,14 @@ function look(over: Partial<StoryboardLook> = {}): StoryboardLook {
     guidance: null,
     negativePrompt: null,
     safeContentFilter: true,
+    identityId: null,
     ...over,
   };
 }
 
 describe("what the next storyboard picture is made with", () => {
   it("defaults to Fal.ai, its default model, no look", () => {
-    expect(resolveStoryboardPictureTarget({}, null, [])).toEqual({ providerId: "fal", model: null, look: null, lookId: null });
+    expect(resolveStoryboardPictureTarget({}, null, [])).toEqual({ providerId: "fal", model: null, look: null, lookId: null, refusal: null });
   });
 
   it("uses the storyline's service and model", () => {
