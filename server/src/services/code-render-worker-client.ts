@@ -14,9 +14,17 @@
  *
  * The worker's job API (docker/render-worker/README.md "Job API"):
  *   POST /v1/jobs, GET /v1/jobs/:id, GET /v1/jobs/:id/output, DELETE /v1/jobs/:id
+ *
+ * A finished video can be 2 GB (D18), so the output is never read into
+ * memory: downloadOutput streams it straight to a file on the server's disk,
+ * counting bytes against the limit as they arrive, and the caller streams
+ * that file into storage.
  */
 
-import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { createWriteStream, promises as fs } from "node:fs";
+import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 export type CodeRenderWorkerStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
@@ -26,6 +34,9 @@ export interface CodeRenderWorkerJob {
   status: CodeRenderWorkerStatus;
   progress: { pct: number; stage: string | null } | null;
   error: string | null;
+  /** When the worker started and stopped running it (ISO); what failed and cancelled jobs are charged by. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
   result: {
     passed: boolean | null;
     report: Record<string, unknown> | null;
@@ -47,8 +58,9 @@ export interface CodeRenderWorkerSubmission {
 }
 
 export interface CodeRenderWorkerOutput {
-  body: Buffer;
   contentType: string;
+  /** Bytes written to the file. */
+  bytes: number;
 }
 
 export interface CodeRenderWorkerClient {
@@ -57,9 +69,18 @@ export interface CodeRenderWorkerClient {
   submit(job: CodeRenderWorkerSubmission): Promise<CodeRenderWorkerJob>;
   /** null when the worker does not know the job (it restarted, or the result expired). */
   get(workerJobId: string): Promise<CodeRenderWorkerJob | null>;
-  fetchOutput(workerJobId: string, maxBytes: number): Promise<CodeRenderWorkerOutput>;
-  /** Cancels a running job, or frees a finished job's files on the worker. Never throws on "unknown job". */
-  release(workerJobId: string): Promise<void>;
+  /**
+   * Streams a finished job's file to `filePath` (created new, never
+   * overwritten) without holding it in memory. Refuses more than `maxBytes`,
+   * and a download that ends short; nothing is left at `filePath` on failure.
+   */
+  downloadOutput(workerJobId: string, maxBytes: number, filePath: string): Promise<CodeRenderWorkerOutput>;
+  /**
+   * Cancels a running job, or frees a finished job's files on the worker.
+   * Answers the job as the worker last saw it, or null for an unknown job;
+   * never throws on "unknown job".
+   */
+  release(workerJobId: string): Promise<CodeRenderWorkerJob | null>;
 }
 
 /**
@@ -142,7 +163,12 @@ export class HttpCodeRenderWorkerClient implements CodeRenderWorkerClient {
     }
   }
 
-  private request(method: string, path: string, body: Buffer | null, maxBytes: number): Promise<RawResponse> {
+  /**
+   * Opens one request and hands back the response as it starts arriving.
+   * The timeout is for silence on the connection, not for the whole answer,
+   * so a long download keeps going while bytes flow.
+   */
+  private open(method: string, path: string, body: Buffer | null): Promise<IncomingMessage> {
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.config.token}` };
     if (body) {
@@ -155,27 +181,37 @@ export class HttpCodeRenderWorkerClient implements CodeRenderWorkerClient {
           const url = new URL(path, this.config.baseUrl);
           return { host: url.hostname, port: url.port ? Number(url.port) : 80, path: `${url.pathname}${url.search}` };
         })();
-    return new Promise<RawResponse>((resolve, reject) => {
-      const req = httpRequest({ ...target, method, headers, timeout: timeoutMs }, (res) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on("data", (chunk: Buffer) => {
-          size += chunk.length;
-          if (size > maxBytes) {
-            res.destroy();
-            reject(new CodeRenderWorkerError(`The render worker's answer is larger than ${maxBytes} bytes.`, 413, "too_large"));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
-        res.on("error", reject);
-      });
+    return new Promise<IncomingMessage>((resolve, reject) => {
+      const req = httpRequest({ ...target, method, headers, timeout: timeoutMs }, resolve);
       req.on("timeout", () => req.destroy(new Error(`The render worker did not answer within ${Math.round(timeoutMs / 1000)} seconds.`)));
-      req.on("error", (error) => reject(error instanceof CodeRenderWorkerError ? error : new CodeRenderWorkerError(`The render worker could not be reached: ${error.message}`, 502, "unreachable")));
+      req.on("error", (error) => reject(new CodeRenderWorkerError(`The render worker could not be reached: ${error.message}`, 502, "unreachable")));
       if (body) req.write(body);
       req.end();
     });
+  }
+
+  /** Reads a whole (small) answer into memory, refusing more than maxBytes. */
+  private readAll(res: IncomingMessage, maxBytes: number): Promise<RawResponse> {
+    return new Promise<RawResponse>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          res.destroy();
+          reject(new CodeRenderWorkerError(`The render worker's answer is larger than ${maxBytes} bytes.`, 413, "too_large"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on("error", (error) => reject(new CodeRenderWorkerError(`The render worker's answer broke off: ${error.message}`, 502, "unreachable")));
+      res.on("aborted", () => reject(new CodeRenderWorkerError("The render worker's answer broke off.", 502, "unreachable")));
+    });
+  }
+
+  private async request(method: string, path: string, body: Buffer | null, maxBytes: number): Promise<RawResponse> {
+    return this.readAll(await this.open(method, path, body), maxBytes);
   }
 
   async submit(job: CodeRenderWorkerSubmission): Promise<CodeRenderWorkerJob> {
@@ -191,16 +227,50 @@ export class HttpCodeRenderWorkerClient implements CodeRenderWorkerClient {
     return parseJson(response) as CodeRenderWorkerJob;
   }
 
-  async fetchOutput(workerJobId: string, maxBytes: number): Promise<CodeRenderWorkerOutput> {
-    const response = await this.request("GET", `/v1/jobs/${assertWorkerJobId(workerJobId)}/output`, null, maxBytes);
-    if (response.status !== 200) throw errorFrom(response, "the finished file");
-    const contentType = String(response.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
-    return { body: response.body, contentType };
+  async downloadOutput(workerJobId: string, maxBytes: number, filePath: string): Promise<CodeRenderWorkerOutput> {
+    const res = await this.open("GET", `/v1/jobs/${assertWorkerJobId(workerJobId)}/output`, null);
+    if (res.statusCode !== 200) throw errorFrom(await this.readAll(res, JSON_RESPONSE_MAX_BYTES), "the finished file");
+    const contentType = String(res.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+    const declared = Number(res.headers["content-length"] ?? Number.NaN);
+    const tooLarge = () => new CodeRenderWorkerError(`The finished file is larger than the ${maxBytes} bytes the server accepts.`, 413, "too_large");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      res.destroy();
+      throw tooLarge();
+    }
+    let bytes = 0;
+    const counter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length;
+        callback(bytes > maxBytes ? tooLarge() : null, chunk);
+      },
+    });
+    // The worker closing the connection early must fail the copy, not end it quietly.
+    res.on("aborted", () => res.destroy(new Error("the connection closed before the whole file arrived")));
+    // "wx": a file already at filePath is never overwritten, nor removed on failure.
+    const target = createWriteStream(filePath, { flags: "wx" });
+    let created = false;
+    target.once("open", () => {
+      created = true;
+    });
+    try {
+      await pipeline(res, counter, target);
+      if (Number.isFinite(declared) && bytes !== declared) {
+        throw new CodeRenderWorkerError(`The finished file arrived incomplete (${bytes} of ${declared} bytes).`, 502, "incomplete");
+      }
+    } catch (error) {
+      res.destroy();
+      if (created) await fs.rm(filePath, { force: true }).catch(() => undefined);
+      if (error instanceof CodeRenderWorkerError) throw error;
+      throw new CodeRenderWorkerError(`The finished file could not be copied from the render worker: ${error instanceof Error ? error.message : String(error)}`, 502, "incomplete");
+    }
+    return { contentType, bytes };
   }
 
-  async release(workerJobId: string): Promise<void> {
+  async release(workerJobId: string): Promise<CodeRenderWorkerJob | null> {
     const response = await this.request("DELETE", `/v1/jobs/${assertWorkerJobId(workerJobId)}`, null, JSON_RESPONSE_MAX_BYTES);
-    if (response.status !== 200 && response.status !== 404) throw errorFrom(response, "a cancel");
+    if (response.status === 404) return null;
+    if (response.status !== 200) throw errorFrom(response, "a cancel");
+    return parseJson(response) as CodeRenderWorkerJob | null;
   }
 }
 
@@ -213,11 +283,11 @@ export class UnconfiguredCodeRenderWorkerClient implements CodeRenderWorkerClien
   get(): Promise<CodeRenderWorkerJob | null> {
     return Promise.reject(new CodeRenderWorkerNotConfiguredError());
   }
-  fetchOutput(): Promise<CodeRenderWorkerOutput> {
+  downloadOutput(): Promise<CodeRenderWorkerOutput> {
     return Promise.reject(new CodeRenderWorkerNotConfiguredError());
   }
-  release(): Promise<void> {
-    return Promise.resolve();
+  release(): Promise<CodeRenderWorkerJob | null> {
+    return Promise.resolve(null);
   }
 }
 

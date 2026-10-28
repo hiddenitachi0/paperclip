@@ -2,7 +2,8 @@
  * The server's client for the render worker, against a fake worker over a
  * real Unix socket (production transport) and over TCP (local runs).
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,12 @@ import {
 
 const TOKEN = "t".repeat(48);
 const JOB_ID = "0f1e2d3c-4b5a-4968-8776-655443322110";
+/** Its output is sent in many chunks without a Content-Length (chunked encoding). */
+const CHUNKED_JOB_ID = "1f1e2d3c-4b5a-4968-8776-655443322111";
+/** Its output promises more bytes than it sends, then the connection drops. */
+const TRUNCATED_JOB_ID = "2f1e2d3c-4b5a-4968-8776-655443322112";
+const CHUNK = Buffer.alloc(64 * 1024, 1);
+const CHUNK_COUNT = 40;
 
 interface Seen {
   method: string;
@@ -49,7 +56,23 @@ function fakeWorker(seen: Seen[]) {
       res.end("MP4-BYTES");
       return;
     }
-    if (req.method === "DELETE") return json(200, { id: JOB_ID, status: "cancelled" });
+    if (req.method === "GET" && req.url === `/v1/jobs/${CHUNKED_JOB_ID}/output`) {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      for (let i = 0; i < CHUNK_COUNT; i += 1) {
+        if (!res.write(CHUNK)) await new Promise((resolve) => res.once("drain", resolve));
+      }
+      res.end();
+      return;
+    }
+    if (req.method === "GET" && req.url === `/v1/jobs/${TRUNCATED_JOB_ID}/output`) {
+      res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": "1000" });
+      res.write("only part of it");
+      setTimeout(() => res.socket?.destroy(), 20);
+      return;
+    }
+    if (req.method === "DELETE" && req.url === `/v1/jobs/${JOB_ID}`) {
+      return json(200, { id: JOB_ID, status: "cancelled", startedAt: "2026-10-28T10:00:00.000Z", finishedAt: "2026-10-28T10:02:00.000Z" });
+    }
     return json(404, { error: "unknown_job", message: "Unknown job." });
   });
 }
@@ -92,14 +115,32 @@ describe("HttpCodeRenderWorkerClient", () => {
     expect(JSON.parse(last.body)).toMatchObject({ kind: "render", options: { maxDurationSeconds: 20 } });
   });
 
-  it("reads status and progress, fetches the output and releases the job", async () => {
+  it("reads status and progress, downloads the output to a file and releases the job", async () => {
     const client = overSocket();
     expect(await client.get(JOB_ID)).toMatchObject({ status: "running", progress: { pct: 40 } });
-    const output = await client.fetchOutput(JOB_ID, 1024);
-    expect(output.contentType).toBe("video/mp4");
-    expect(output.body.toString("utf8")).toBe("MP4-BYTES");
-    await client.release(JOB_ID);
+    const file = join(dir, "output-basic.mp4");
+    const output = await client.downloadOutput(JOB_ID, 1024, file);
+    expect(output).toEqual({ contentType: "video/mp4", bytes: 9 });
+    expect(await readFile(file, "utf8")).toBe("MP4-BYTES");
+    // The worker's last view of the job: what a cancelled job is charged by.
+    expect(await client.release(JOB_ID)).toMatchObject({ status: "cancelled", startedAt: "2026-10-28T10:00:00.000Z", finishedAt: "2026-10-28T10:02:00.000Z" });
     expect(seen.at(-1)!.method).toBe("DELETE");
+    expect(await client.release("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")).toBeNull();
+  });
+
+  it("streams a large output to disk chunk by chunk (D18: never held in memory)", async () => {
+    const file = join(dir, "output-chunked.mp4");
+    const output = await overSocket().downloadOutput(CHUNKED_JOB_ID, CHUNK.length * CHUNK_COUNT, file);
+    expect(output).toEqual({ contentType: "video/mp4", bytes: CHUNK.length * CHUNK_COUNT });
+    const written = await readFile(file);
+    expect(written.length).toBe(CHUNK.length * CHUNK_COUNT);
+    expect(written.every((b) => b === 1)).toBe(true);
+  });
+
+  it("never overwrites an existing file", async () => {
+    const file = join(dir, "output-basic.mp4");
+    await expect(overSocket().downloadOutput(JOB_ID, 1024, file)).rejects.toMatchObject({ status: 502 });
+    expect(await readFile(file, "utf8")).toBe("MP4-BYTES");
   });
 
   it("answers null for a job the worker does not know", async () => {
@@ -115,8 +156,25 @@ describe("HttpCodeRenderWorkerClient", () => {
     await expect(wrong.get(JOB_ID)).rejects.toBeInstanceOf(CodeRenderWorkerError);
   });
 
-  it("refuses an output larger than asked for", async () => {
-    await expect(overSocket().fetchOutput(JOB_ID, 4)).rejects.toMatchObject({ status: 413 });
+  it("refuses an output larger than asked for, by its Content-Length or while it streams, and leaves no file", async () => {
+    const declared = join(dir, "output-declared-too-large.mp4");
+    await expect(overSocket().downloadOutput(JOB_ID, 4, declared)).rejects.toMatchObject({ status: 413, code: "too_large" });
+    expect(existsSync(declared)).toBe(false);
+    const streamed = join(dir, "output-streamed-too-large.mp4");
+    await expect(overSocket().downloadOutput(CHUNKED_JOB_ID, CHUNK.length * 3, streamed)).rejects.toMatchObject({ status: 413, code: "too_large" });
+    expect(existsSync(streamed)).toBe(false);
+  });
+
+  it("fails a download that breaks off, and leaves no partial file", async () => {
+    const file = join(dir, "output-truncated.mp4");
+    await expect(overSocket().downloadOutput(TRUNCATED_JOB_ID, 4096, file)).rejects.toMatchObject({ status: 502, code: "incomplete" });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("passes on the worker's refusal of the output", async () => {
+    const file = join(dir, "output-unknown.mp4");
+    await expect(overSocket().downloadOutput("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", 4096, file)).rejects.toMatchObject({ status: 404, code: "unknown_job" });
+    expect(existsSync(file)).toBe(false);
   });
 
   it("refuses a malformed worker job id before sending anything", async () => {

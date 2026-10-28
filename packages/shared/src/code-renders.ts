@@ -17,6 +17,15 @@ import { z } from "zod";
  * Rendering runs on the server's own CPU, so it costs no provider money; the
  * caps below are about box time. They stop and ask instead of running loose:
  * an agent that reaches one gets a plain "ask a person" answer.
+ *
+ * What a job counts against the daily caps (D7), so no job runs for free:
+ *   - a finished render: its video length -- the length it asked for, the
+ *     length its composition names, or the real length if that is longer;
+ *   - a check, a contact sheet, and any failed or cancelled job: the time the
+ *     renderer really spent on it;
+ *   - a render still waiting or running: the length it reserved; a check or
+ *     contact sheet: what it reserved, or the time it has run so far if that
+ *     is more.
  */
 
 export const CODE_RENDER_KINDS = ["check", "snapshot", "render"] as const;
@@ -33,9 +42,9 @@ export type CodeRenderQuality = (typeof CODE_RENDER_QUALITIES)[number];
 export interface CodeRenderLimits {
   /** Longest video one render may ask for. */
   maxVideoSeconds: number;
-  /** Finished video per agent per day (UTC), across all its renders. */
+  /** Seconds per agent per day (UTC), across all its jobs: finished video plus the renderer's time on everything else. */
   agentDailyVideoSeconds: number;
-  /** Finished video per company per day (UTC), counting agents' renders. */
+  /** Seconds per company per day (UTC), counted the same way; agents are held to it. */
   companyDailyVideoSeconds: number;
   /** Jobs of any kind waiting or running for one company at once. */
   maxActiveJobsPerCompany: number;
@@ -55,10 +64,67 @@ export const CODE_RENDER_DEFAULT_LIMITS: CodeRenderLimits = Object.freeze({
 /** Never above this, whatever the settings say: the long-form film cap (D7: 10-30 min). */
 export const CODE_RENDER_HARD_MAX_VIDEO_SECONDS = 1_800;
 
+/** Encoder rounding allowed when a length is compared with another (the worker uses the same). */
+export const CODE_RENDER_DURATION_SLACK_SECONDS = 0.5;
+
+/**
+ * What a check or contact sheet holds against the daily caps while it waits
+ * or runs. Once the renderer is done, the job counts the time it really took.
+ */
+export const CODE_RENDER_CHECK_RESERVE_SECONDS = 60;
+
+/**
+ * The longest a job can hold the renderer (the worker's default
+ * RENDER_WORKER_JOB_TIMEOUT_SECONDS). A run time Paperclip has to guess from
+ * its own clock (the worker forgot the job, or has not answered yet) is never
+ * charged above this.
+ */
+export const CODE_RENDER_MAX_JOB_SECONDS = 1_800;
+
 export const CODE_RENDER_EXPLANATION =
   "Code-drawn videos (charts, titles, explainers) are made on this server's own computer, so they cost no AI money. " +
-  "To keep the server free for everything else, each agent may make a limited number of minutes per day, the company a limited number in total, and only a few at once. " +
+  "To keep the server free for everything else, each agent may use a limited number of minutes per day, the company a limited number in total, and only a few jobs run at once. " +
+  "A finished video counts its length; checks, previews and failed or stopped jobs count the time the renderer spent on them. " +
   "When a limit is reached the agent stops and asks a person.";
+
+// HTML comments, and opening tags (quoted attribute values may hold ">").
+const HTML_COMMENT_PATTERN = /<!--[\s\S]*?-->/g;
+const OPENING_TAG_PATTERN = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*\s*\/?>/g;
+
+const TIMING_ATTRIBUTE_PATTERNS = {
+  "data-start": /\sdata-start\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
+  "data-duration": /\sdata-duration\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i,
+} as const;
+
+function timingAttribute(tag: string, name: keyof typeof TIMING_ATTRIBUTE_PATTERNS): number | null {
+  const match = TIMING_ATTRIBUTE_PATTERNS[name].exec(tag);
+  if (!match) return null;
+  const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim().replace(/s$/i, "");
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * How long a composition says it runs, in seconds, read from its entry HTML:
+ * the latest `data-start` + `data-duration` of any timed element, the root's
+ * `data-duration` included. null when the file names no length at all.
+ *
+ * An estimate made before anything renders (the worker makes the same one and
+ * checks the real video afterwards): a render whose composition is longer than
+ * its `durationSeconds` is refused up front instead of holding the renderer.
+ * Numbers only; a start that names another clip counts as 0.
+ */
+export function estimateCompositionSeconds(html: string): number | null {
+  let longest: number | null = null;
+  for (const tag of html.replace(HTML_COMMENT_PATTERN, "").match(OPENING_TAG_PATTERN) ?? []) {
+    const duration = timingAttribute(tag, "data-duration");
+    if (duration === null) continue;
+    const end = (timingAttribute(tag, "data-start") ?? 0) + duration;
+    if (longest === null || end > longest) longest = end;
+  }
+  return longest;
+}
 
 /** Same rules the worker applies: relative, plain ASCII names, no hidden files, no "..". */
 export const CODE_RENDER_PATH_PATTERN = /^(?:[A-Za-z0-9_][A-Za-z0-9._-]*\/){0,7}[A-Za-z0-9_][A-Za-z0-9._-]*\.[A-Za-z0-9]+$/;
@@ -139,6 +205,12 @@ export interface CodeRenderJob {
   durationSeconds: number | null;
   /** The finished video's real length, in seconds. */
   videoSeconds: number | null;
+  /**
+   * What this job counts against the daily caps, in seconds: held while it
+   * waits or runs, then its video length (a finished render) or the
+   * renderer's real time (everything else).
+   */
+  chargedSeconds: number;
   /** 0-100 while the worker renders. */
   progressPct: number | null;
   /** The saved file (Files page id): the MP4 for a render, the contact sheet for a snapshot. */
@@ -158,7 +230,7 @@ export interface CodeRenderJob {
 
 export interface CodeRenderUsage {
   limits: CodeRenderLimits;
-  /** Finished or running video seconds today (UTC). */
+  /** Seconds counted against the company's daily cap today (UTC), every job's chargedSeconds. */
   companySecondsToday: number;
   activeJobs: number;
   configured: boolean;

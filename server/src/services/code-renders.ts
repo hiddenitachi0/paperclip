@@ -1,10 +1,17 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, codeRenderJobs, issueAttachments, issues as issuesTable, withCompanyScope } from "@paperclipai/db";
 import {
   CODE_RENDER_ACTIVE_STATUSES,
+  CODE_RENDER_CHECK_RESERVE_SECONDS,
   CODE_RENDER_DEFAULT_LIMITS,
+  CODE_RENDER_DURATION_SLACK_SECONDS,
   CODE_RENDER_HARD_MAX_VIDEO_SECONDS,
+  CODE_RENDER_MAX_JOB_SECONDS,
+  estimateCompositionSeconds,
   type CodeRenderJob,
   type CodeRenderKind,
   type CodeRenderLimits,
@@ -39,12 +46,22 @@ import {
  * this company's own files, and the result is saved into the job's company.
  *
  * Caps (CodeRenderLimits; env PAPERCLIP_CODE_RENDER_*): rendering costs no
- * provider money but takes the box's CPU, so they count video seconds, not
- * cents. An agent's render is refused with a plain "ask a person" sentence
- * when it would pass its own or the company's daily minutes; a person's
- * render only meets the per-render length and the at-once limit. A paused or
- * hard-stopped budget (company, or the asking agent's own) refuses any job,
- * the same rule every other spend path follows.
+ * provider money but takes the box's CPU, so they count seconds, not cents.
+ * Every job is charged (requested_seconds; D7, see packages/shared
+ * code-renders.ts): a render reserves the longer of the length it asks for
+ * and the length its composition names, and a finished one keeps the longer
+ * of that and its real length; a check, a contact sheet and any failed or
+ * cancelled job keep the time the renderer really spent on it (the worker's
+ * own clock); a job still in flight counts its reservation, or the time it
+ * has run so far if that is more. An agent's job of any kind is refused with
+ * a plain "ask a person" sentence when it would pass its own or the
+ * company's daily minutes; a person's job only meets the per-render length
+ * and the at-once limit. A paused or hard-stopped budget (company, or the
+ * asking agent's own) refuses any job, the same rule every other spend path
+ * follows.
+ *
+ * Finished files (a video can be 2 GB, D18) are streamed from the worker to
+ * a temp file and from there into storage; never held in memory.
  *
  * Progress is collected two ways: lazily when someone reads a job, and by
  * the `codeRenders` scheduler chain for jobs nobody is watching. A finished
@@ -53,6 +70,17 @@ import {
  */
 
 type Row = typeof codeRenderJobs.$inferSelect;
+
+/** The worker handed back a video longer than the job was allowed (it should have refused it). */
+class CodeRenderLengthError extends Error {
+  constructor(
+    readonly videoSeconds: number,
+    allowedSeconds: number,
+  ) {
+    super(`The video is ${videoSeconds.toFixed(1)} seconds long, more than the ${allowedSeconds} seconds this job was allowed. It was not saved.`);
+    this.name = "CodeRenderLengthError";
+  }
+}
 /** The transaction withCompanyScope hands its callback. */
 type ScopedTx = Parameters<Parameters<typeof withCompanyScope>[2]>[0];
 
@@ -66,15 +94,27 @@ export interface CodeRenderSavedFile {
   id: string;
 }
 
+export interface CodeRenderSaveInput {
+  companyId: string;
+  job: Row;
+  filename: string;
+  contentType: string;
+  /** The finished file on the server's disk; removed by the service after the save. */
+  filePath: string;
+  byteSize: number;
+}
+
 export interface CodeRenderServiceDeps {
   worker?: CodeRenderWorkerClient;
   limits?: Partial<CodeRenderLimits>;
   /** Largest finished file the server accepts from the worker (default 2 GB, D18). */
   maxOutputBytes?: number;
+  /** Where finished files wait between the worker and storage. Default: the OS temp folder. */
+  workDir?: string;
   /** Reads one of the company's files. Default: the Files tables + company storage. */
   readCompanyFile?: (companyId: string, fileId: string, maxBytes: number) => Promise<{ bytes: Buffer; contentType: string }>;
-  /** Saves the result. Default: company storage + a Files row (or a task attachment). */
-  saveFile?: (input: { companyId: string; job: Row; filename: string; contentType: string; body: Buffer }) => Promise<CodeRenderSavedFile>;
+  /** Saves the result by streaming the file into storage. Default: company storage + a Files row (or a task attachment). */
+  saveFile?: (input: CodeRenderSaveInput) => Promise<CodeRenderSavedFile>;
   now?: () => Date;
 }
 
@@ -114,6 +154,49 @@ function minutes(seconds: number): string {
   return Number.isInteger(m) ? `${m} min` : `${m.toFixed(1)} min`;
 }
 
+/** Whole seconds from one time to another, rounded up; null when either is missing or unreadable. */
+function secondsBetween(from: Date | string | null | undefined, to: Date | string | null | undefined): number | null {
+  if (!from || !to) return null;
+  const start = new Date(from).getTime();
+  const end = new Date(to).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, Math.ceil((end - start) / 1000));
+}
+
+function numberOption(options: Record<string, unknown> | null | undefined, key: string): number | null {
+  const value = options?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** The composition's entry file as text (content or base64), for the length estimate. */
+function entryHtml(input: SubmitCodeRenderInput, entry: string): string | null {
+  const file = input.files.find((f) => f.path === entry) ?? input.files.find((f) => f.path.toLowerCase() === entry.toLowerCase());
+  if (!file) return null;
+  return file.content ?? Buffer.from(file.contentBase64 ?? "", "base64").toString("utf8");
+}
+
+function isActive(status: string): boolean {
+  return (CODE_RENDER_ACTIVE_STATUSES as readonly string[]).includes(status);
+}
+
+/** Run time read from Paperclip's own clock: never more than one job can hold the renderer. */
+function guessedRunSeconds(startedAt: Date | string | null | undefined, at: Date): number | null {
+  const seconds = secondsBetween(startedAt, at);
+  return seconds === null ? null : Math.min(seconds, CODE_RENDER_MAX_JOB_SECONDS);
+}
+
+/**
+ * What a row counts against the daily caps right now. Finished: its charge.
+ * A render in flight: its reservation (it is charged its video length, which
+ * the worker holds to that). A check or contact sheet in flight: its
+ * reservation, or its run time so far if that is more (it is charged its run
+ * time). secondsTodayIn sums the same rule in SQL.
+ */
+function chargedSecondsOf(row: Row, at: Date): number {
+  if (!isActive(row.status) || row.kind === "render") return row.requestedSeconds;
+  return Math.max(row.requestedSeconds, guessedRunSeconds(row.startedAt, at) ?? 0);
+}
+
 /** The worker's paths are meaningless to a reader ("/work/jobs/<id>/project/index.html" -> "index.html"). */
 function tidyReport(report: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!report) return null;
@@ -135,7 +218,7 @@ function tidyReport(report: Record<string, unknown> | null): Record<string, unkn
   return summary;
 }
 
-function toJob(row: Row): CodeRenderJob {
+function toJob(row: Row, at: Date): CodeRenderJob {
   return {
     id: row.id,
     companyId: row.companyId,
@@ -143,8 +226,9 @@ function toJob(row: Row): CodeRenderJob {
     status: row.status as CodeRenderStatus,
     title: row.title,
     issueId: row.issueId,
-    durationSeconds: row.kind === "render" ? row.requestedSeconds : null,
+    durationSeconds: row.kind === "render" ? (numberOption(row.options, "durationSeconds") ?? row.requestedSeconds) : null,
     videoSeconds: row.videoMs === null ? null : row.videoMs / 1000,
+    chargedSeconds: chargedSecondsOf(row, at),
     progressPct: row.progressPct,
     resultFileId: row.resultFileId,
     resultContentType: row.resultContentType,
@@ -177,7 +261,9 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
   const worker = deps.worker ?? createCodeRenderWorkerClientFromEnv();
   const limits: CodeRenderLimits = { ...codeRenderLimitsFromEnv(), ...deps.limits };
   const maxOutputBytes = deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  const workDir = deps.workDir ?? tmpdir();
   const now = deps.now ?? (() => new Date());
+  const view = (row: Row) => toJob(row, now());
   const budgets = budgetService(db);
   const issues = issueService(db);
 
@@ -204,14 +290,15 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     return { bytes: Buffer.concat(chunks), contentType: row.contentType };
   }
 
-  /** One object, one asset row: a task attachment when the job names a task, else a company file. */
-  async function defaultSaveFile(input: { companyId: string; job: Row; filename: string; contentType: string; body: Buffer }) {
-    const stored = await getStorageService().putFile({
+  /** One object, one asset row: a task attachment when the job names a task, else a company file. Streamed, never buffered. */
+  async function defaultSaveFile(input: CodeRenderSaveInput) {
+    const stored = await getStorageService().putFileFromPath({
       companyId: input.companyId,
       namespace: "code-renders",
       originalFilename: input.filename,
       contentType: input.contentType,
-      body: input.body,
+      filePath: input.filePath,
+      maxBytes: maxOutputBytes,
     });
     const common = {
       provider: stored.provider,
@@ -268,17 +355,21 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     }).catch((err) => logger.warn({ err, jobId: row.id }, "code render: activity log failed"));
   }
 
-  /** Video seconds asked for today (UTC) by renders that are still on or finished. */
+  /**
+   * Seconds counted against the daily caps today (UTC): every job of every
+   * kind and status, failed and cancelled ones included, each at
+   * chargedSecondsOf (a check or contact sheet in flight at its reservation
+   * or its run time so far, whichever is more).
+   */
   async function secondsTodayIn(tx: ScopedTx, companyId: string, agentId: string | null): Promise<number> {
-    const conditions = [
-      eq(codeRenderJobs.companyId, companyId),
-      eq(codeRenderJobs.kind, "render"),
-      inArray(codeRenderJobs.status, [...CODE_RENDER_ACTIVE_STATUSES, "done"]),
-      gte(codeRenderJobs.createdAt, startOfUtcDay(now())),
-    ];
+    const at = now();
+    const conditions = [eq(codeRenderJobs.companyId, companyId), gte(codeRenderJobs.createdAt, startOfUtcDay(at))];
     if (agentId) conditions.push(eq(codeRenderJobs.createdByAgentId, agentId));
+    const runSoFar = sql`least(greatest(coalesce(ceil(extract(epoch from (${at.toISOString()}::timestamptz - ${codeRenderJobs.startedAt})))::int, 0), 0), ${CODE_RENDER_MAX_JOB_SECONDS})`;
+    const inFlightCheck = and(inArray(codeRenderJobs.status, [...CODE_RENDER_ACTIVE_STATUSES]), sql`${codeRenderJobs.kind} <> 'render'`);
+    const charged = sql`case when ${inFlightCheck} then greatest(${codeRenderJobs.requestedSeconds}, ${runSoFar}) else ${codeRenderJobs.requestedSeconds} end`;
     const [row] = await tx
-      .select({ total: sql<number>`coalesce(sum(${codeRenderJobs.requestedSeconds}), 0)::int` })
+      .select({ total: sql<number>`coalesce(sum(${charged}), 0)::int` })
       .from(codeRenderJobs)
       .where(and(...conditions));
     return Number(row?.total ?? 0);
@@ -306,17 +397,35 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     }
   }
 
-  function assertLength(input: SubmitCodeRenderInput, requestedSeconds: number) {
-    if (input.kind === "render" && requestedSeconds > limits.maxVideoSeconds) {
-      throw unprocessable(
-        `A code-drawn video may be at most ${minutes(limits.maxVideoSeconds)} long; this one asks for ${minutes(requestedSeconds)}. Split it into parts, or ask a person to raise the limit.`,
+  /**
+   * The per-render length, against both the length asked for and the length
+   * the composition names, and the two against each other: a render whose
+   * composition runs longer than its durationSeconds is refused before it
+   * reaches the renderer (it would only fail there after rendering).
+   */
+  function assertLength(input: SubmitCodeRenderInput, compositionSeconds: number | null) {
+    const tooLong = (what: string) =>
+      unprocessable(
+        `A code-drawn video may be at most ${minutes(limits.maxVideoSeconds)} long; ${what}. Split it into parts, or ask a person to raise the limit.`,
         { reason: "too_long", maxVideoSeconds: limits.maxVideoSeconds },
+      );
+    if (input.kind === "render" && Math.ceil(input.durationSeconds ?? 0) > limits.maxVideoSeconds) {
+      throw tooLong(`this one asks for ${minutes(Math.ceil(input.durationSeconds ?? 0))}`);
+    }
+    if (compositionSeconds !== null && compositionSeconds > limits.maxVideoSeconds + CODE_RENDER_DURATION_SLACK_SECONDS) {
+      throw tooLong(`this composition runs ${minutes(Math.ceil(compositionSeconds))} (its data-start/data-duration)`);
+    }
+    if (input.kind === "render" && compositionSeconds !== null && compositionSeconds > (input.durationSeconds ?? 0) + CODE_RENDER_DURATION_SLACK_SECONDS) {
+      throw unprocessable(
+        `The composition runs ${compositionSeconds} seconds (its data-start/data-duration), but durationSeconds says ${input.durationSeconds}. ` +
+          "Set durationSeconds to the composition's real length and send it again.",
+        { reason: "duration_mismatch", compositionSeconds, durationSeconds: input.durationSeconds ?? null },
       );
     }
   }
 
   /** Jobs at once and daily minutes. Run under the company's cap lock when it decides an insert. */
-  async function assertWithinCapsIn(tx: ScopedTx, companyId: string, actor: CodeRenderActor, input: SubmitCodeRenderInput, requestedSeconds: number) {
+  async function assertWithinCapsIn(tx: ScopedTx, companyId: string, actor: CodeRenderActor, reservedSeconds: number) {
     const active = await activeJobsIn(tx, companyId);
     if (active >= limits.maxActiveJobsPerCompany) {
       throw tooManyRequests(
@@ -324,22 +433,41 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
         { reason: "too_many_at_once", maxActiveJobs: limits.maxActiveJobsPerCompany },
       );
     }
-    // Daily minutes are an agent limit: a person asking is the one who would be asked.
-    if (input.kind !== "render" || !actor.agentId) return;
+    // Daily minutes are an agent limit: a person asking is the one who would
+    // be asked. Every kind counts: a check or contact sheet holds the
+    // renderer too.
+    if (!actor.agentId) return;
     const companyUsed = await secondsTodayIn(tx, companyId, null);
-    if (companyUsed + requestedSeconds > limits.companyDailyVideoSeconds) {
+    if (companyUsed + reservedSeconds > limits.companyDailyVideoSeconds) {
       throw tooManyRequests(
-        `This company has used ${minutes(companyUsed)} of its ${minutes(limits.companyDailyVideoSeconds)} of code-drawn video today. Stop here and ask a person whether to go on tomorrow or raise the limit.`,
-        { reason: "company_daily_cap", usedSeconds: companyUsed, capSeconds: limits.companyDailyVideoSeconds },
+        `This company has used ${minutes(companyUsed)} of its ${minutes(limits.companyDailyVideoSeconds)} of code-drawn video time today. Stop here and ask a person whether to go on tomorrow or raise the limit.`,
+        { reason: "company_daily_cap", usedSeconds: companyUsed, capSeconds: limits.companyDailyVideoSeconds, neededSeconds: reservedSeconds },
       );
     }
     const agentUsed = await secondsTodayIn(tx, companyId, actor.agentId);
-    if (agentUsed + requestedSeconds > limits.agentDailyVideoSeconds) {
+    if (agentUsed + reservedSeconds > limits.agentDailyVideoSeconds) {
       throw tooManyRequests(
-        `You have made ${minutes(agentUsed)} of your ${minutes(limits.agentDailyVideoSeconds)} of code-drawn video today. Stop here and ask a person whether to go on.`,
-        { reason: "agent_daily_cap", usedSeconds: agentUsed, capSeconds: limits.agentDailyVideoSeconds },
+        `You have used ${minutes(agentUsed)} of your ${minutes(limits.agentDailyVideoSeconds)} of code-drawn video time today. Stop here and ask a person whether to go on.`,
+        { reason: "agent_daily_cap", usedSeconds: agentUsed, capSeconds: limits.agentDailyVideoSeconds, neededSeconds: reservedSeconds },
       );
     }
+  }
+
+  /**
+   * The time the renderer spent on a job: the worker's own clock when it
+   * answered; else (the worker forgot the job, or could not be reached) from
+   * when Paperclip saw it start, at most CODE_RENDER_MAX_JOB_SECONDS. A job
+   * the worker never started costs nothing.
+   */
+  function busySeconds(row: Row, state: CodeRenderWorkerJob | null): number {
+    if (state) return state.startedAt ? (secondsBetween(state.startedAt, state.finishedAt ?? now()) ?? 0) : 0;
+    return guessedRunSeconds(row.startedAt, now()) ?? 0;
+  }
+
+  /** A finished render keeps the longer of its reservation and its real length; any other finished job keeps its run time. */
+  function finishedCharge(row: Row, state: CodeRenderWorkerJob): number {
+    if (row.kind !== "render") return busySeconds(row, state);
+    return Math.max(row.requestedSeconds, Math.ceil(state.result?.durationSeconds ?? 0));
   }
 
   async function assertIssueInCompany(companyId: string, issueId: string) {
@@ -374,19 +502,34 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     return files;
   }
 
-  async function fail(row: Row, message: string): Promise<Row> {
-    const updated = await update(row, { status: "failed", error: message, progressPct: null, finishedAt: now() }, [...CODE_RENDER_ACTIVE_STATUSES]);
-    if (updated) await logJob(updated, "code_render.failed", { error: message });
+  /** Marks a job failed and charges it `chargedSeconds` (the renderer's real time on it). */
+  async function fail(row: Row, message: string, chargedSeconds: number): Promise<Row> {
+    const updated = await update(
+      row,
+      { status: "failed", error: message, progressPct: null, finishedAt: now(), requestedSeconds: chargedSeconds },
+      [...CODE_RENDER_ACTIVE_STATUSES],
+    );
+    if (updated) await logJob(updated, "code_render.failed", { error: message, chargedSeconds });
     return updated ?? (await loadRow(row.companyId, row.id));
   }
 
-  async function release(workerJobId: string) {
-    await worker.release(workerJobId).catch((err) => logger.warn({ err, workerJobId }, "code render: releasing the worker job failed"));
+  /** Frees the job on the worker; answers the worker's last view of it (null when unknown or unreachable). */
+  async function release(workerJobId: string): Promise<CodeRenderWorkerJob | null> {
+    return worker.release(workerJobId).catch((err) => {
+      logger.warn({ err, workerJobId }, "code render: releasing the worker job failed");
+      return null;
+    });
   }
 
-  /** Copies a finished job's result into the company and marks it done. Caller holds the `saving` claim. */
+  /**
+   * Copies a finished job's result into the company and marks it done,
+   * charged by finishedCharge. Caller holds the `saving` claim. The file goes
+   * worker -> temp file -> storage as streams; the temp folder is always
+   * removed.
+   */
   async function collect(row: Row, done: CodeRenderWorkerJob): Promise<Row> {
     const workerJobId = row.workerJobId!;
+    const chargedSeconds = finishedCharge(row, done);
     if (row.kind === "check") {
       const updated = await update(row, {
         status: "done",
@@ -394,32 +537,44 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
         report: tidyReport(done.result?.report ?? null),
         progressPct: null,
         finishedAt: now(),
+        requestedSeconds: chargedSeconds,
       });
       await release(workerJobId);
-      if (updated) await logJob(updated, "code_render.finished", { passed: updated.passed });
+      if (updated) await logJob(updated, "code_render.finished", { passed: updated.passed, chargedSeconds });
       return updated ?? row;
     }
-    const output = await worker.fetchOutput(workerJobId, maxOutputBytes);
-    const expected = row.kind === "render" ? ["video/mp4"] : ["image/jpeg", "image/png"];
-    if (!expected.includes(output.contentType)) throw new Error(`The renderer returned ${output.contentType || "an unknown type"} instead of ${expected.join(" or ")}.`);
-    const extension = output.contentType === "video/mp4" ? "mp4" : output.contentType === "image/png" ? "png" : "jpg";
-    const base = row.title.replace(/[^A-Za-z0-9 _-]+/g, "").trim().replace(/\s+/g, "-").slice(0, 80) || "code-render";
-    const filename = row.kind === "snapshot" ? `${base}-contact-sheet.${extension}` : `${base}.${extension}`;
-    const file = await saveFile({ companyId: row.companyId, job: row, filename, contentType: output.contentType, body: output.body });
     const videoSeconds = done.result?.durationSeconds ?? null;
-    const updated = await update(row, {
-      status: "done",
-      resultFileId: file.id,
-      resultContentType: output.contentType,
-      resultBytes: output.body.length,
-      videoMs: videoSeconds === null ? null : Math.round(videoSeconds * 1000),
-      progressPct: null,
-      error: null,
-      finishedAt: now(),
-    });
-    await release(workerJobId);
-    if (updated) await logJob(updated, "code_render.finished", { fileId: file.id, bytes: output.body.length, videoSeconds });
-    return updated ?? row;
+    // The worker refuses a video longer than it was allowed; never take one on trust.
+    if (row.kind === "render" && videoSeconds !== null && videoSeconds > row.requestedSeconds + CODE_RENDER_DURATION_SLACK_SECONDS) {
+      throw new CodeRenderLengthError(videoSeconds, row.requestedSeconds);
+    }
+    const dir = await mkdtemp(join(workDir, "paperclip-code-render-"));
+    try {
+      const filePath = join(dir, "output");
+      const output = await worker.downloadOutput(workerJobId, maxOutputBytes, filePath);
+      const expected = row.kind === "render" ? ["video/mp4"] : ["image/jpeg", "image/png"];
+      if (!expected.includes(output.contentType)) throw new Error(`The renderer returned ${output.contentType || "an unknown type"} instead of ${expected.join(" or ")}.`);
+      const extension = output.contentType === "video/mp4" ? "mp4" : output.contentType === "image/png" ? "png" : "jpg";
+      const base = row.title.replace(/[^A-Za-z0-9 _-]+/g, "").trim().replace(/\s+/g, "-").slice(0, 80) || "code-render";
+      const filename = row.kind === "snapshot" ? `${base}-contact-sheet.${extension}` : `${base}.${extension}`;
+      const file = await saveFile({ companyId: row.companyId, job: row, filename, contentType: output.contentType, filePath, byteSize: output.bytes });
+      const updated = await update(row, {
+        status: "done",
+        resultFileId: file.id,
+        resultContentType: output.contentType,
+        resultBytes: output.bytes,
+        videoMs: videoSeconds === null ? null : Math.round(videoSeconds * 1000),
+        progressPct: null,
+        error: null,
+        finishedAt: now(),
+        requestedSeconds: chargedSeconds,
+      });
+      await release(workerJobId);
+      if (updated) await logJob(updated, "code_render.finished", { fileId: file.id, bytes: output.bytes, videoSeconds, chargedSeconds });
+      return updated ?? row;
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch((err) => logger.warn({ err, jobId: row.id }, "code render: removing the temp file failed"));
+    }
   }
 
   /** Moves one active job forward from the worker's state. Never throws for a worker hiccup. */
@@ -428,7 +583,7 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     const age = now().getTime() - row.updatedAt.getTime();
     if (row.status === "saving" && age < SAVING_STALE_MS) return row;
     if (!row.workerJobId) {
-      return now().getTime() - row.createdAt.getTime() > UNSUBMITTED_STALE_MS ? fail(row, "The job never reached the renderer. Send it again.") : row;
+      return now().getTime() - row.createdAt.getTime() > UNSUBMITTED_STALE_MS ? fail(row, "The job never reached the renderer. Send it again.", 0) : row;
     }
 
     let state: CodeRenderWorkerJob | null;
@@ -438,26 +593,36 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
       logger.warn({ err, jobId: row.id }, "code render: status check failed; will retry");
       return row;
     }
-    if (!state) return fail(row, "The renderer restarted, or the finished file expired, before it was collected. Send the job again.");
+    if (!state) {
+      return fail(row, "The renderer restarted, or the finished file expired, before it was collected. Send the job again.", busySeconds(row, null));
+    }
 
     if (state.status === "queued" || state.status === "running") {
       if (row.status === "saving") return row;
       const patch: Partial<typeof codeRenderJobs.$inferInsert> = { status: state.status, progressPct: state.progress?.pct ?? null };
-      if (state.status === "running" && !row.startedAt) patch.startedAt = now();
+      // The worker's own start time: what a job in flight is charged from.
+      if (state.status === "running" && !row.startedAt) patch.startedAt = state.startedAt ? new Date(state.startedAt) : now();
       return (await update(row, patch, ["queued", "running"])) ?? row;
     }
     if (state.status === "failed" || state.status === "cancelled") {
       await release(row.workerJobId);
+      const chargedSeconds = busySeconds(row, state);
       if (state.status === "cancelled") {
-        const updated = await update(row, { status: "cancelled", error: state.error, progressPct: null, finishedAt: now() }, [...CODE_RENDER_ACTIVE_STATUSES]);
+        const updated = await update(
+          row,
+          { status: "cancelled", error: state.error, progressPct: null, finishedAt: now(), requestedSeconds: chargedSeconds },
+          [...CODE_RENDER_ACTIVE_STATUSES],
+        );
         return updated ?? row;
       }
-      return fail(row, state.error ?? "The render failed.");
+      return fail(row, state.error ?? "The render failed.", chargedSeconds);
     }
 
     // Done: claim it, so only one poller copies the file.
     const claimStatuses = row.status === "saving" ? ["saving"] : ["queued", "running"];
-    const claimed = await update(row, { status: "saving", progressPct: 100 }, claimStatuses);
+    const claimPatch: Partial<typeof codeRenderJobs.$inferInsert> = { status: "saving", progressPct: 100 };
+    if (!row.startedAt && state.startedAt) claimPatch.startedAt = new Date(state.startedAt);
+    const claimed = await update(row, claimPatch, claimStatuses);
     if (!claimed) return loadRow(row.companyId, row.id);
     try {
       return await collect(claimed, state);
@@ -465,8 +630,11 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
       logger.warn({ err, jobId: row.id }, "code render: collecting the result failed");
       const message = err instanceof Error ? err.message : String(err);
       await release(row.workerJobId);
-      const updated = await update(claimed, { status: "failed", error: `The video was made but could not be saved: ${message}`, progressPct: null, finishedAt: now() });
-      if (updated) await logJob(updated, "code_render.failed", { error: updated.error });
+      // The renderer did the work either way: a finished job keeps its charge.
+      const chargedSeconds = err instanceof CodeRenderLengthError ? Math.max(row.requestedSeconds, Math.ceil(err.videoSeconds)) : finishedCharge(claimed, state);
+      const error = err instanceof CodeRenderLengthError ? err.message : `The video was made but could not be saved: ${message}`;
+      const updated = await update(claimed, { status: "failed", error, progressPct: null, finishedAt: now(), requestedSeconds: chargedSeconds });
+      if (updated) await logJob(updated, "code_render.failed", { error: updated.error, chargedSeconds });
       return updated ?? claimed;
     }
   }
@@ -492,26 +660,34 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
     async submit(companyId: string, actor: CodeRenderActor, input: SubmitCodeRenderInput): Promise<CodeRenderJob> {
       if (!worker.configured) throw httpErrorFromWorker(new CodeRenderWorkerNotConfiguredError());
       if (input.issueId) await assertIssueInCompany(companyId, input.issueId);
-      const requestedSeconds = input.kind === "render" ? Math.ceil(input.durationSeconds ?? 0) : 0;
-      assertLength(input, requestedSeconds);
+      const entry = input.entry ?? "index.html";
+      const html = entryHtml(input, entry);
+      const compositionSeconds = html === null ? null : estimateCompositionSeconds(html);
+      assertLength(input, compositionSeconds);
+      // What the job holds against the daily caps until it is done (the
+      // worker is told the same length for a render, and holds it to it).
+      const reservedSeconds =
+        input.kind === "render" ? Math.ceil(Math.max(input.durationSeconds ?? 0, compositionSeconds ?? 0)) : CODE_RENDER_CHECK_RESERVE_SECONDS;
       await assertBudgetOpen(companyId, actor.agentId);
       // Cheap early answer before any file is read; decided for real under the lock below.
-      await withCompanyScope(db, companyId, (tx) => assertWithinCapsIn(tx, companyId, actor, input, requestedSeconds));
+      await withCompanyScope(db, companyId, (tx) => assertWithinCapsIn(tx, companyId, actor, reservedSeconds));
       const files = await buildFiles(companyId, input);
 
       const options = {
-        entry: input.entry ?? "index.html",
+        entry,
         fps: input.fps ?? 30,
         quality: input.quality ?? "standard",
         frames: input.frames ?? 9,
         fileCount: input.files.length,
         assetCount: input.assets?.length ?? 0,
+        durationSeconds: input.kind === "render" ? Math.ceil(input.durationSeconds ?? 0) : null,
+        compositionSeconds,
       };
       // The row holds the slot (and the minutes) before the worker is asked.
       // One lock per company, so two submits at once cannot both pass the caps.
       const row = await withCompanyScope(db, companyId, async (tx) => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`code_render_caps:${companyId}`}))`);
-        await assertWithinCapsIn(tx, companyId, actor, input, requestedSeconds);
+        await assertWithinCapsIn(tx, companyId, actor, reservedSeconds);
         const [inserted] = await tx
           .insert(codeRenderJobs)
           .values({
@@ -520,7 +696,7 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
             status: "queued",
             title: input.title,
             issueId: input.issueId ?? null,
-            requestedSeconds,
+            requestedSeconds: reservedSeconds,
             options,
             createdByAgentId: actor.agentId,
             createdByUserId: actor.userId,
@@ -539,29 +715,32 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
             fps: options.fps,
             quality: options.quality,
             frames: options.frames,
-            maxDurationSeconds: input.kind === "render" ? requestedSeconds : limits.maxVideoSeconds,
+            maxDurationSeconds: input.kind === "render" ? reservedSeconds : limits.maxVideoSeconds,
           },
         });
       } catch (err) {
         const httpError = httpErrorFromWorker(err);
-        await update(row!, { status: "failed", error: httpError.message, finishedAt: now() });
+        // Refused before it ran: nothing to charge.
+        await update(row!, { status: "failed", error: httpError.message, finishedAt: now(), requestedSeconds: 0 });
         await logJob(row!, "code_render.refused", { error: httpError.message });
         throw httpError;
       }
       const updated = (await update(row!, { workerJobId: accepted.id, status: accepted.status === "running" ? "running" : "queued" })) ?? row!;
       await logJob(updated, "code_render.submitted", {
-        requestedSeconds,
+        requestedSeconds: options.durationSeconds,
+        reservedSeconds,
+        compositionSeconds,
         fileCount: options.fileCount,
         assetCount: options.assetCount,
         issueId: updated.issueId,
       });
-      return toJob(updated);
+      return view(updated);
     },
 
     /** A job, moved forward first when it is still in flight. */
     async get(companyId: string, jobId: string): Promise<CodeRenderJob> {
       const row = await loadRow(companyId, jobId);
-      return toJob(await advance(row));
+      return view(await advance(row));
     },
 
     async list(companyId: string, opts: { limit?: number } = {}): Promise<CodeRenderJob[]> {
@@ -569,14 +748,20 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
       const rows = await withCompanyScope(db, companyId, (tx) =>
         tx.select().from(codeRenderJobs).where(eq(codeRenderJobs.companyId, companyId)).orderBy(desc(codeRenderJobs.createdAt)).limit(limit),
       );
-      return rows.map(toJob);
+      return rows.map(view);
     },
 
     async cancel(companyId: string, jobId: string, actor: CodeRenderActor): Promise<CodeRenderJob> {
       const row = await loadRow(companyId, jobId);
-      if (!(CODE_RENDER_ACTIVE_STATUSES as readonly string[]).includes(row.status) || row.status === "saving") return toJob(row);
-      if (row.workerJobId) await release(row.workerJobId);
-      const updated = await update(row, { status: "cancelled", error: "Cancelled.", progressPct: null, finishedAt: now() }, ["queued", "running"]);
+      if (!isActive(row.status) || row.status === "saving") return view(row);
+      // Charged by the time the renderer had already spent on it.
+      const state = row.workerJobId ? await release(row.workerJobId) : null;
+      const chargedSeconds = row.workerJobId ? busySeconds(row, state) : 0;
+      const updated = await update(
+        row,
+        { status: "cancelled", error: "Cancelled.", progressPct: null, finishedAt: now(), requestedSeconds: chargedSeconds },
+        ["queued", "running"],
+      );
       if (updated) {
         await logActivity(db, {
           companyId,
@@ -587,10 +772,10 @@ export function codeRenderService(db: Db, deps: CodeRenderServiceDeps = {}) {
           action: "code_render.cancelled",
           entityType: "code_render_job",
           entityId: row.id,
-          details: { kind: row.kind, title: row.title },
+          details: { kind: row.kind, title: row.title, chargedSeconds },
         }).catch((err) => logger.warn({ err, jobId: row.id }, "code render: activity log failed"));
       }
-      return toJob(updated ?? (await loadRow(companyId, jobId)));
+      return view(updated ?? (await loadRow(companyId, jobId)));
     },
 
     /**
