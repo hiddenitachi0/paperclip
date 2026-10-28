@@ -33,6 +33,8 @@ import { RenderShotModels } from "./render-shot-models.js";
 import { AspectPicker } from "./strip-panel.js";
 import { ExportSection, TimelineEditor } from "./timeline-editor.js";
 import { VideoModelPicker, type SogniVideoModelRow } from "./video-model-picker.js";
+import { ModelSetupsTab } from "./model-setups-tab.js";
+import { StorylineSetupPicker } from "./setup-picker.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -2627,13 +2629,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "edit" | "looks" | "identities" | "rooms" | "storylines" | "settings";
+type MediaStudioTabKey = "create" | "edit" | "looks" | "identities" | "rooms" | "storylines" | "setups" | "settings";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" || tab === "edit" || tab === "identities" || tab === "rooms" || tab === "storylines" || tab === "settings" ? tab : "create";
+  return tab === "looks" || tab === "edit" || tab === "identities" || tab === "rooms" || tab === "storylines" || tab === "setups" || tab === "settings" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2714,6 +2716,9 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         <button type="button" role="tab" aria-selected={activeTab === "storylines"} style={activeTab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
           Storylines
         </button>
+        <button type="button" role="tab" aria-selected={activeTab === "setups"} style={activeTab === "setups" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("setups")}>
+          Model setups
+        </button>
         {showSettings ? (
           <button type="button" role="tab" aria-selected={activeTab === "settings"} style={activeTab === "settings" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("settings")}>
             Settings
@@ -2734,6 +2739,8 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         <RoomsPanel context={context} />
       ) : activeTab === "storylines" ? (
         <MediaStudioStorylinesPage context={context} />
+      ) : activeTab === "setups" ? (
+        <ModelSetupsTab companyId={context.companyId ?? null} />
       ) : (
         <MediaStudioLooksPage context={context} />
       )}
@@ -3417,6 +3424,9 @@ interface VideoStorylineSummary {
   contentRating?: "sfw" | "mature";
   providerId: string;
   model: string | null;
+  /** The saved model setups the film uses (newer servers); null = chosen by hand. */
+  videoSetupId?: string | null;
+  imageSetupId?: string | null;
   budgetCapCents: number | null;
   spentCents: number;
   estimatedTotalCents: number | null;
@@ -3508,6 +3518,8 @@ function StoryboardPictureSettings(props: {
   disabled: boolean;
   onNeedSogniModels: () => void;
   onSave: (next: StoryboardPictureSettingsValue) => void;
+  /** The saved-setup picker (shown above the service and model), when the page has one. */
+  setupPicker?: React.ReactNode;
 }) {
   const { value, effective, services, looks } = props;
   const provider = effective?.providerId ?? value.providerId ?? "fal";
@@ -3529,6 +3541,7 @@ function StoryboardPictureSettings(props: {
         {effective ? ` (about $${(effective.costPerPictureCents / 100).toFixed(2)} a picture)` : ""}
       </summary>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+        {props.setupPicker}
         <p style={{ margin: 0, color: "#868e96" }}>
           These decide how the cheap preview pictures are made. They do not change the video: that is set in step 3. A new setting only affects pictures you make
           from now on; press Remake picture to update one you already have.
@@ -4786,6 +4799,19 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       sogniNote={sogniPictureNote}
                       disabled={anyBusy || !editable}
                       onNeedSogniModels={loadSogniPictureModels}
+                      setupPicker={
+                        companyId ? (
+                          <StorylineSetupPicker
+                            key={`picture-setup-${selected.id}-${selected.imageSetupId ?? "none"}`}
+                            companyId={companyId}
+                            storylineId={selected.id}
+                            kind="image"
+                            value={selected.imageSetupId ?? null}
+                            disabled={anyBusy || !editable}
+                            onChanged={refreshPage}
+                          />
+                        ) : null
+                      }
                       onSave={(next) =>
                         void (async () => {
                           await updateStorylineFields({ pictureSettings: next }, "saving the picture settings");
@@ -4979,7 +5005,20 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                         {counts.dropped > 0 && <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>{counts.dropped} shot{counts.dropped === 1 ? " is" : "s are"} left out and will not be rendered or charged.</p>}
 
                     <details style={{ fontSize: 12 }}>
-                      <summary style={{ cursor: "pointer", fontWeight: 600 }}>Video settings (service and model)</summary>
+                      <summary style={{ cursor: "pointer", fontWeight: 600 }}>Video settings (model setup, service and model)</summary>
+                      {companyId ? (
+                        <div style={{ marginTop: 8 }}>
+                          <StorylineSetupPicker
+                            key={`video-setup-${selected.id}-${selected.videoSetupId ?? "none"}`}
+                            companyId={companyId}
+                            storylineId={selected.id}
+                            kind="video"
+                            value={selected.videoSetupId ?? null}
+                            disabled={busy || !editable}
+                            onChanged={refreshPage}
+                          />
+                        </div>
+                      ) : null}
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}>
                         <div style={field}>
                           <label style={{ fontSize: 12, color: "#868e96" }}>Video service</label>

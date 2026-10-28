@@ -117,7 +117,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines", "Settings"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines", "Model setups", "Settings"]);
   });
 
   it("hides the Settings tab from everyone else", async () => {
@@ -125,7 +125,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines", "Model setups"]);
   });
 
   it("falls back to Create when a non-admin opens ?tab=settings", async () => {
@@ -202,5 +202,14 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     await flush();
     const selected = [...container.querySelectorAll('[role="tab"][aria-selected="true"]')].map((el) => el.textContent);
     expect(selected).toEqual(["Edit"]);
+  });
+
+  it("deep-links to the Model setups tab from ?tab=setups, for everyone", async () => {
+    window.history.replaceState(null, "", "/media-studio?tab=setups");
+    root = createRoot(container);
+    root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+    const selected = [...container.querySelectorAll('[role="tab"][aria-selected="true"]')].map((el) => el.textContent);
+    expect(selected).toEqual(["Model setups"]);
   });
 });
