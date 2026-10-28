@@ -48,6 +48,15 @@ and `Subsystem sftp internal-sftp` in `sshd_config`. The key can then do nothing
 
 The account needs to be able to create, rename and remove files and folders under the remote directory: the runner uses upload, `mkdir`, `rename`, `rm` and `rmdir`.
 
+### SFTP-only, chrooted account
+
+The runner works against an account with no shell: `Match User deploy` / `ForceCommand internal-sftp` / `ChrootDirectory <root-owned folder>` / `AllowTcpForwarding no`. It runs no remote command (no server-side hashing, `mv` or `ls`), only SFTP operations, and the health check is an ordinary HTTP request.
+
+- `sftpRemotePath` is the path **as the account sees it inside the chroot**, for example `/www`. sshd requires the chroot folder itself to be root-owned and not writable by the account, so the docroot must be a writable subfolder of it; do not set `sftpRemotePath` to `/`.
+- The staging folder is created under `sftpRemotePath`, so it sits inside the chroot and on the same filesystem as the live files (which the rename-into-place swap needs).
+- **The runner needs delete permission**, but only inside `sftpRemotePath`: it removes its own staging files and folders and the `<name>.deploy-bak` copy after each swap, and, when a rollback is configured, deletes files a failed release added. It never deletes a path in `sftpExclude`, and it never deletes a file the policy does not resolve to. If deletes are withheld, deploys fail at the first swap.
+- Anything outside the docroot (data folders, a store file) is out of the account's reach by construction; list such paths in `sftpExclude` as well, so the runner also never plans to touch them.
+
 ## The staging folder: deny it on the web server
 
 An upload is never written straight to the live path. The runner first uploads every file to
