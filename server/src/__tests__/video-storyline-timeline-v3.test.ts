@@ -283,7 +283,7 @@ d("storyline timeline v3", () => {
       it("is cleared by cancel on a paused film", async () => {
         const film = await seed({ shots: 2 });
         await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, film.storylineId));
-        await db.update(videoShots).set({ status: "queued" }).where(eq(videoShots.id, film.shotIds[0]!));
+        await db.update(videoShots).set({ status: "queued", updatedAt: long() }).where(eq(videoShots.id, film.shotIds[0]!));
 
         const render = videoStorylineRenderService(db, { buildProvider: () => stubProvider(async () => ({ externalId: "x", model: "m", provider: "sogni" })).provider, resolveApiKey: async () => "key" });
         await render.cancelRender(film.companyId, film.storylineId, ACTOR);
@@ -292,6 +292,20 @@ d("storyline timeline v3", () => {
         expect(shot.status).toBe("failed");
         expect(shot.errorMessage).toContain("never started");
         expect((await storylineRow(film.storylineId)).status).toBe("cancelled");
+      });
+
+      it("cancel leaves a fresh queued shot alone, so an in-flight start cannot be restarted and paid twice", async () => {
+        const film = await seed({ shots: 2 });
+        await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, film.storylineId));
+        await db.update(videoShots).set({ status: "queued" }).where(eq(videoShots.id, film.shotIds[0]!));
+
+        const stub = stubProvider(async () => ({ externalId: "x", model: "m", provider: "sogni" }));
+        const render = videoStorylineRenderService(db, { buildProvider: () => stub.provider, resolveApiKey: async () => "key" });
+        await render.cancelRender(film.companyId, film.storylineId, ACTOR);
+
+        expect((await shotRow(film.shotIds[0]!)).status).toBe("queued");
+        await expect(render.reRenderShot(film.companyId, film.storylineId, film.shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 409 });
+        expect(stub.starts).toBe(0);
       });
     });
   });

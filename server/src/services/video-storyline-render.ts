@@ -1019,7 +1019,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .where(inArray(videoShots.id, runningShotIds));
     }
     // A shot left queued/rendering with no job (the process died before its job started) is not covered by
-    // the jobs above and would keep "already rendering" on it after the cancel.
+    // the jobs above and would keep "already rendering" on it after the cancel. Same grace period as the
+    // stalled-render sweep: a younger shot may be a start that is still in flight (a re-render queues the
+    // shot before its job row exists), and failing it here would make it restartable and paid for twice.
+    const strandedCutoff = new Date(nowOf().getTime() - STALLED_RENDER_GRACE_MS);
     await db
       .update(videoShots)
       .set({ status: "failed", errorMessage: SHOT_NEVER_STARTED_MESSAGE, updatedAt: nowOf() })
@@ -1028,6 +1031,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           eq(videoShots.storylineId, storylineId),
           eq(videoShots.clipKind, "generated"),
           inArray(videoShots.status, ["queued", "rendering"]),
+          lt(videoShots.updatedAt, strandedCutoff),
           sql`not exists (select 1 from ${videoShotRenderJobs} where ${videoShotRenderJobs.shotId} = ${videoShots.id} and ${videoShotRenderJobs.status} = 'running')`,
         ),
       );
