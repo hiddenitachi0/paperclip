@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, companies, type Db } from "@paperclipai/db";
-import { usdToNok, type CreateTradingStrategyInput, type TradingRiskConfig, type TradingRuleConfig } from "@paperclipai/shared";
+import {
+  TRADING_ENGINE_VERSION,
+  TRADING_MAX_CATCH_UP_BARS,
+  tradingTimeframeMs,
+  usdToNok,
+  type CreateTradingStrategyInput,
+  type TradingCandle,
+  type TradingRiskConfig,
+  type TradingRuleConfig,
+  type TradingTimeframe,
+} from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { approvalService } from "../services/approvals.ts";
 import { tradingService } from "../services/trading.ts";
@@ -45,9 +55,27 @@ function riskConfig(overrides: Partial<TradingRiskConfig> = {}): TradingRiskConf
   };
 }
 
+/**
+ * Oldest-first bars for the given closes whose LAST bar opened at `lastOpen`
+ * (so it closes at lastOpen + timeframe). Open/high/low = close, volume 1:
+ * only the close matters to the SMA rule.
+ */
+function barsEndingAt(closes: number[], lastOpen: Date, timeframe: TradingTimeframe = "15m"): TradingCandle[] {
+  const step = tradingTimeframeMs(timeframe);
+  return closes.map((close, i) => ({
+    openTime: new Date(lastOpen.getTime() - (closes.length - 1 - i) * step),
+    open: close,
+    high: close,
+    low: close,
+    close,
+    volume: 1,
+  }));
+}
+
 const STRATEGY_INPUT: CreateTradingStrategyInput = {
   name: "Test strategy",
   asset: "BTC",
+  timeframe: "15m",
   checkEveryMinutes: 15,
   startingCashNok: 2_000,
   ruleConfig: RULE,
@@ -55,10 +83,10 @@ const STRATEGY_INPUT: CreateTradingStrategyInput = {
 };
 
 /** closes=[20,20,20,21]: prevFast=prevSlow=20, curFast=20.5 > curSlow=20.333 -> buy. Quote pinned to the same 21 USD last close (zero price-band drift). */
-const BUY_CANDLES = { closes: [20, 20, 20, 21], lastCandleAt: new Date("2026-01-01T00:00:00Z") };
+const BUY_CANDLES = { candles: barsEndingAt([20, 20, 20, 21], new Date("2025-12-31T23:45:00Z")) }; // last bar closes at 00:00
 const BUY_QUOTE_USD = 21;
 /** closes=[20,20,20,19]: prevFast=prevSlow=20, curFast=19.5 < curSlow=19.667 -> sell. Only a small dip from the buy's 21, so the drawdown breaker (20% cap) doesn't also fire. */
-const SELL_CANDLES = { closes: [20, 20, 20, 19], lastCandleAt: new Date("2026-01-01T00:15:00Z") };
+const SELL_CANDLES = { candles: barsEndingAt([20, 20, 20, 19], new Date("2026-01-01T00:00:00Z")) }; // last bar closes at 00:15
 const SELL_QUOTE_USD = 19;
 
 d("tradingService", () => {
@@ -113,6 +141,7 @@ d("tradingService", () => {
     const orders = await trading.listOrders(companyId, strategy.id);
     expect(orders).toHaveLength(1);
     expect(orders[0]).toMatchObject({ side: "buy", status: "filled" });
+    expect(orders[0]!.ruleVersion).toBe(`sma_crossover@1 · engine ${TRADING_ENGINE_VERSION}`);
 
     const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
     expect(ledgerEntries.map((e) => e.eventType)).toEqual(["order_filled", "kill_switch"]); // newest first: the fill, then the earlier resume-to-running.
@@ -204,7 +233,7 @@ d("tradingService", () => {
     const now = new Date("2026-01-01T00:00:00Z");
     // Last two closes jump 20 -> 30, a 50% single-tick move -- well past the 15% ceiling.
     // Still a "buy" signal by the SMA rule, which is the point: the breaker must fire before the rule/risk gate ever gets a say.
-    const jumpCandles = { closes: [20, 20, 20, 30], lastCandleAt: now };
+    const jumpCandles = { candles: barsEndingAt([20, 20, 20, 30], new Date("2025-12-31T23:45:00Z")) };
     const trading = tradingService(db, {
       now: () => now,
       marketData: fakeTradingMarketData({ candles: { BTC: jumpCandles }, quotes: { BTC: { bidUsd: 30, askUsd: 30, at: now } } }),
@@ -437,5 +466,177 @@ d("tradingService", () => {
 
     const summary = await trading.dashboard(companyId, strategy.id);
     expect(summary.buyAndHoldValueNok).toBeNull();
+  });
+
+  // ─── DUR-4999: closed candles, catch-up, per-strategy timeframe ──────────
+
+  function stubbed(now: Date, candles: TradingCandle[], quoteUsd: number, extra: { missingMarkets?: Array<"BNB"> } = {}) {
+    return tradingService(db, {
+      now: () => now,
+      marketData: fakeTradingMarketData({ candles: { BTC: { candles } }, quotes: { BTC: { bidUsd: quoteUsd, askUsd: quoteUsd, at: now } }, ...extra }),
+    });
+  }
+
+  it("drops the still-forming candle: a crossover that exists only on the forming bar does not trade", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:05:00Z");
+    // Closed bars (last one opened 23:45, closed 00:00) are flat; a forming bar opened 00:00 (closes 00:15 > now) would cross -> buy.
+    const closed = barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z"));
+    const forming: TradingCandle = { openTime: new Date("2026-01-01T00:00:00Z"), open: 20, high: 21, low: 20, close: 21, volume: 1 };
+    const trading = stubbed(now, [...closed, forming], 21);
+    const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await trading.setStatus(companyId, strategy.id, "running");
+
+    const result = await trading.tick(now);
+    expect(result).toMatchObject({ checked: 1, filled: 0, blocked: 0, halted: 0 });
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.cashNok).toBe(2_000);
+    expect(row.lastEvaluatedBarAt?.toISOString()).toBe("2025-12-31T23:45:00.000Z"); // the forming bar was not "evaluated"
+    expect(await trading.listOrders(companyId, strategy.id)).toHaveLength(0);
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("a 4h strategy with a normal-age closed bar is not stale (price age is measured from the close time)", async () => {
+    const companyId = await seedCompany();
+    // Newest closed 4h bar opened 12:00 and closed 16:00; it is 17:30 now. Measured from its OPEN time (5.5h) this used to be "stale".
+    const now = new Date("2026-01-01T17:30:00Z");
+    const trading = stubbed(now, barsEndingAt([20, 20, 20, 21], new Date("2026-01-01T12:00:00Z"), "4h"), 21);
+    const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe: "4h" }, { actorType: "user", actorId: "u1" });
+    expect(strategy.timeframe).toBe("4h");
+    await trading.setStatus(companyId, strategy.id, "running");
+
+    const result = await trading.tick(now);
+    expect(result).toMatchObject({ checked: 1, filled: 1, halted: 0 });
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.consecutiveErrors).toBe(0);
+    expect(row.lastTickError).toBeNull();
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("a truly old closed bar counts as a failed check, not a trade", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-02T12:00:00Z");
+    // 4h bar that closed at 16:00 the day before: 20h old, far past one timeframe + 10 minutes.
+    const trading = stubbed(now, barsEndingAt([20, 20, 20, 21], new Date("2026-01-01T12:00:00Z"), "4h"), 21);
+    const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe: "4h" }, { actorType: "user", actorId: "u1" });
+    await trading.setStatus(companyId, strategy.id, "running");
+
+    const result = await trading.tick(now);
+    expect(result).toMatchObject({ checked: 1, filled: 0, halted: 1 });
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.consecutiveErrors).toBe(1);
+    expect(row.lastTickError).toMatch(/too old to trade on/);
+    expect(row.lastEvaluatedBarAt).toBeNull();
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("catches a crossover that happened between two checks 60 minutes apart, and acts because it still holds", async () => {
+    const companyId = await seedCompany();
+    const t0 = new Date("2026-01-01T00:00:00Z");
+    const t1 = new Date("2026-01-01T01:00:00Z");
+    // At t0: flat. By t1 four more 15m bars closed; the cross (20 -> 21 on the 01:00-minus-45 bar) was not seen live, and 21 -> 22 -> 23 keeps fast above slow.
+    const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
+    const strategy = await first.createStrategy(companyId, { ...STRATEGY_INPUT, checkEveryMinutes: 60 }, { actorType: "user", actorId: "u1" });
+    await first.setStatus(companyId, strategy.id, "running");
+    expect(await first.tick(t0)).toMatchObject({ checked: 1, filled: 0 });
+
+    const second = stubbed(t1, barsEndingAt([20, 20, 20, 20, 21, 22, 22.5, 23], new Date("2026-01-01T00:45:00Z")), 23);
+    const result = await second.tick(t1);
+    expect(result).toMatchObject({ checked: 1, filled: 1 });
+
+    const orders = await second.listOrders(companyId, strategy.id);
+    expect(orders).toHaveLength(1);
+    expect(orders[0]).toMatchObject({ side: "buy", status: "filled" });
+    const ledgerEntries = await second.listLedgerEntries(companyId, strategy.id);
+    expect(ledgerEntries.some((e) => (e.detail as { kind?: string } | null)?.kind === "caught_up_entry")).toBe(true);
+    const row = await second.requireStrategy(companyId, strategy.id);
+    expect(row.lastEvaluatedBarAt?.toISOString()).toBe("2026-01-01T00:45:00.000Z");
+
+    await second.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("logs 'missed while not checking' and does not trade an older entry that no longer holds", async () => {
+    const companyId = await seedCompany();
+    const t0 = new Date("2026-01-01T00:00:00Z");
+    const t1 = new Date("2026-01-01T01:00:00Z");
+    const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
+    const strategy = await first.createStrategy(companyId, { ...STRATEGY_INPUT, checkEveryMinutes: 60 }, { actorType: "user", actorId: "u1" });
+    await first.setStatus(companyId, strategy.id, "running");
+    await first.tick(t0);
+
+    // Up-cross on the 21 bar, then the price falls back below where the averages cross again: the buy is old news by the latest bar.
+    const second = stubbed(t1, barsEndingAt([20, 20, 20, 20, 21, 20, 19, 18.5], new Date("2026-01-01T00:45:00Z")), 18.5);
+    const result = await second.tick(t1);
+    expect(result).toMatchObject({ checked: 1, filled: 0 });
+
+    const ledgerEntries = await second.listLedgerEntries(companyId, strategy.id);
+    const missed = ledgerEntries.filter((e) => (e.detail as { kind?: string } | null)?.kind === "missed_while_not_checking");
+    expect(missed.length).toBeGreaterThanOrEqual(1);
+    expect(missed.some((e) => (e.detail as { side?: string; reason?: string }).side === "buy" && (e.detail as { reason?: string }).reason === "no_longer_holds")).toBe(true);
+    expect((await second.requireStrategy(companyId, strategy.id)).cashNok).toBe(2_000);
+
+    await second.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("records a gap event and skips when more than the catch-up cap of bars were missed", async () => {
+    const companyId = await seedCompany();
+    const t0 = new Date("2026-01-01T00:00:00Z");
+    const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
+    const strategy = await first.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await first.setStatus(companyId, strategy.id, "running");
+    await first.tick(t0);
+
+    // 60 more 15m bars closed (15h); a cross sits in the middle but must not trade.
+    const closes = [20, 20, 20, 20, ...Array.from({ length: TRADING_MAX_CATCH_UP_BARS + 10 }, (_, i) => (i < 5 ? 20 : 20.5))];
+    const lastOpen = new Date(t0.getTime() + (closes.length - 4) * 15 * 60_000 - 15 * 60_000);
+    const t1 = new Date(lastOpen.getTime() + 15 * 60_000);
+    const second = stubbed(t1, barsEndingAt(closes, lastOpen), 20.5);
+    const result = await second.tick(t1);
+    expect(result).toMatchObject({ checked: 1, filled: 0, halted: 0 });
+
+    const ledgerEntries = await second.listLedgerEntries(companyId, strategy.id);
+    const gap = ledgerEntries.find((e) => (e.detail as { reason?: string } | null)?.reason === "catch_up_gap");
+    expect(gap).toBeTruthy();
+    expect(gap!.eventType).toBe("reconciliation");
+    expect((gap!.detail as { missedBars: number }).missedBars).toBeGreaterThan(TRADING_MAX_CATCH_UP_BARS);
+    const row = await second.requireStrategy(companyId, strategy.id);
+    expect(row.cashNok).toBe(2_000);
+    expect(row.lastEvaluatedBarAt?.toISOString()).toBe(lastOpen.toISOString());
+
+    await second.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("refuses to create a strategy for a market the exchange does not list, and writes no row", async () => {
+    const companyId = await seedCompany();
+    const trading = tradingService(db, { now: () => new Date("2026-01-01T00:00:00Z"), marketData: fakeTradingMarketData({ missingMarkets: ["BNB"] }) });
+    await expect(trading.createStrategy(companyId, { ...STRATEGY_INPUT, asset: "BNB" }, { actorType: "user", actorId: "u1" })).rejects.toMatchObject({ status: 422 });
+    expect(await trading.listStrategies(companyId)).toHaveLength(0);
+    // A listed market is unaffected.
+    await expect(trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" })).resolves.toMatchObject({ asset: "BTC" });
+  });
+
+  it("noteEngineVersion writes one engine note per strategy, and none again until the engine changes", async () => {
+    const companyId = await seedCompany();
+    const trading = tradingService(db, { now: () => new Date("2026-01-01T00:00:00Z"), marketData: fakeTradingMarketData({}) });
+    const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+
+    await trading.noteEngineVersion();
+    await trading.noteEngineVersion();
+    const notes = (await trading.listLedgerEntries(companyId, strategy.id)).filter((e) => (e.detail as { reason?: string } | null)?.reason === "engine_version");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.detail).toMatchObject({ engineVersion: TRADING_ENGINE_VERSION, previousEngineVersion: null });
+  });
+
+  it("new strategies default to 4h candles and the 0.40% paper fee", async () => {
+    const companyId = await seedCompany();
+    const { createTradingStrategySchema } = await import("@paperclipai/shared");
+    const input = createTradingStrategySchema.parse({ name: "Defaults", asset: "BTC" });
+    const trading = tradingService(db, { now: () => new Date("2026-01-01T00:00:00Z"), marketData: fakeTradingMarketData({}) });
+    const strategy = await trading.createStrategy(companyId, input, { actorType: "user", actorId: "u1" });
+    expect(strategy.timeframe).toBe("4h");
+    expect((strategy.riskConfig as TradingRiskConfig).feeRatePct).toBe(0.4);
   });
 });

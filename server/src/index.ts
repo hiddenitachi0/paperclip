@@ -117,6 +117,7 @@ import {
   recordUserUpdatedViaApp,
   resolveAdminAuthSigningSecret,
 } from "./services/admin-auth-audit.js";
+import { twoFactorGate } from "./auth/two-factor-gate.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
@@ -768,8 +769,13 @@ export async function startServer(): Promise<StartedServer> {
       },
     });
     betterAuthHandler = createBetterAuthHandler(auth);
-    resolveSession = (req) => resolveBetterAuthSession(auth, req);
-    resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+    // DUR-4304: with two-factor login on, a session that has not passed its
+    // second factor resolves to "no session" everywhere (HTTP and sockets).
+    const gate = twoFactorGate(db as any, { enabled: config.twoFactorEnabled });
+    resolveSession = gate.wrapRequestResolver((req) => resolveBetterAuthSession(auth, req));
+    resolveSessionFromHeaders = gate.wrapHeadersResolver((headers) =>
+      resolveBetterAuthSessionFromHeaders(auth, headers),
+    );
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
     authReady = true;
   }
@@ -890,6 +896,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
+    twoFactorEnabled: config.deploymentMode === "authenticated" && config.twoFactorEnabled,
     pluginWorkerManager,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
@@ -1207,6 +1214,15 @@ export async function startServer(): Promise<StartedServer> {
       if (tradingReconciled.pausedCount > 0) {
         logger.warn({ ...tradingReconciled }, "startup trading-agent reconciliation paused running strategies");
       }
+      // DUR-4999: one ledger note per strategy when the engine version changed,
+      // and the symbol map checked against the exchange's market list. Neither
+      // may stop boot.
+      await tradingAgent.noteEngineVersion().catch((err) => {
+        logger.error({ err }, "startup trading-agent engine-version note failed");
+      });
+      await tradingAgent.verifyMarketsOnBoot().catch((err) => {
+        logger.error({ err }, "startup trading-agent market check failed");
+      });
 
       // DUR-100: verify every active routine's declared schedule chains actually
       // have a live, usable trigger row before logging anything as healthy —
