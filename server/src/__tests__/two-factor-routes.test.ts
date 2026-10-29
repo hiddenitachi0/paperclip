@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import express from "express";
 import request from "supertest";
 import * as speakeasy from "speakeasy";
@@ -313,6 +315,71 @@ d("board two-factor routes (embedded Postgres)", () => {
     // Once the second factor passes, the same session reaches them.
     expect((await post(app, "/api/auth/2fa/login/verify", pending, { totpCode: codeAt(secret, -1) })).status).toBe(200);
     expect((await post(app, "/api/auth/list-sessions", pending, {})).status).toBe(200);
+  });
+
+  it("login: a dot-segment path cannot walk a pending session out of the sign-in allowlist", async () => {
+    const app = buildApp(true);
+    const userId = await newUser("pending-dotseg");
+    const { sessionId: verified } = await enrol(app, userId);
+    const pending = await newSession(userId);
+
+    // supertest normalises the path, so send it exactly as written over a raw socket.
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const raw = (method: string, path: string, sessionId: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port, method, path, headers: { "x-test-session": sessionId, origin: ORIGIN, "content-length": 0 } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    try {
+      const paths = [
+        "/api/auth/sign-in/%2e%2e/list-sessions",
+        "/api/auth/sign-in/%2E%2E/change-password",
+        "/api/auth/sign-in/../list-sessions",
+        "/api/auth/sign-up/%2E%2E/revoke-sessions",
+        "/api/auth/sign-up/../update-user",
+        "/api/auth/sign-in/email/../../change-password",
+        "/api/auth/sign-in%2f..%2flist-sessions",
+        "/api/auth/sign-in\\..\\list-sessions",
+        "/api/auth/sign-in/email/extra",
+        "/api/auth/sign-in/anything-else",
+      ];
+      for (const path of paths) {
+        expect(await raw("POST", path, pending), `pending ${path}`).toBe(403);
+      }
+      // The same walk-out is not blocked for a session that passed its second factor, and the real paths still work.
+      expect(await raw("POST", "/api/auth/sign-in/email", pending)).toBe(200);
+      expect(await raw("POST", "/api/auth/sign-out?x=1", pending)).toBe(200);
+      expect(await raw("POST", "/api/auth/sign-in/%2e%2e/list-sessions", verified)).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("login: a session the gate cannot classify is refused at better-auth's endpoints too", async () => {
+    // A db that throws on every query stands in for "the database hiccuped at the wrong moment".
+    const brokenGate = twoFactorGate({} as never, { enabled: true });
+    const resolveSession = brokenGate.wrapRequestResolver(async () => ({
+      session: { id: "s1", userId: "u1" },
+      user: { id: "u1", email: "u@example.test", name: "U" },
+    }) as never);
+    const app = express();
+    app.all("/api/auth/{*authPath}", pendingSessionAuthGuard({ enabled: true, resolveSession }), (_req, res) => {
+      res.json({ reached: true });
+    });
+    expect((await request(app).post("/api/auth/list-sessions")).status).toBe(403);
+    expect((await request(app).post("/api/auth/change-password")).status).toBe(403);
+    // The allowlisted paths stay reachable so the person can still sign in and out.
+    expect((await request(app).post("/api/auth/sign-in/email")).status).toBe(200);
+    expect((await request(app).post("/api/auth/sign-out")).status).toBe(200);
   });
 
   it("login: no session at all gets 401, and the response for a wrong code never says what was wrong", async () => {
