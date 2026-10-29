@@ -364,6 +364,53 @@ d("board two-factor routes (embedded Postgres)", () => {
     }
   });
 
+  it("login: client-supplied Host / X-Forwarded-Proto cannot make better-auth route on a different path", async () => {
+    const app = buildApp(true);
+    const userId = await newUser("pending-hdr");
+    const { sessionId: verified } = await enrol(app, userId);
+    const pending = await newSession(userId);
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const raw = (method: string, path: string, sessionId: string, headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port, method, path, headers: { "x-test-session": sessionId, origin: ORIGIN, "content-length": 0, ...headers } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    try {
+      for (const target of ["list-sessions", "change-password", "revoke-sessions", "update-user"]) {
+        const viaProto = { "x-forwarded-proto": `http://localhost:3100/api/auth/${target}?` };
+        const viaHost = { host: `localhost:3100/api/auth/${target}?` };
+        expect(await raw("GET", "/api/auth/sign-in/email", pending, viaProto), `proto ${target}`).toBe(403);
+        expect(await raw("POST", "/api/auth/sign-in/email", pending, viaProto), `proto POST ${target}`).toBe(403);
+        expect(await raw("GET", "/api/auth/get-session", pending, viaHost), `host ${target}`).toBe(403);
+        expect(await raw("POST", "/api/auth/get-session", pending, viaHost), `host POST ${target}`).toBe(403);
+      }
+      for (const host of ["localhost:3100/x?", "a b", "user@host", "host#frag", "host:99999999"]) {
+        expect(await raw("GET", "/api/auth/get-session", pending, { host }), `host ${JSON.stringify(host)}`).toBe(403);
+      }
+      for (const proto of ["https://x/?", "ftp", "https, http", "javascript:"]) {
+        expect(await raw("GET", "/api/auth/get-session", pending, { "x-forwarded-proto": proto }), `proto ${proto}`).toBe(403);
+      }
+      // Ordinary traffic is untouched: a bare scheme from a proxy, a host:port, an IPv4 and a bracketed IPv6 Host.
+      expect(await raw("GET", "/api/auth/get-session", pending, { "x-forwarded-proto": "https", host: "app.example.test" })).toBe(200);
+      expect(await raw("GET", "/api/auth/get-session", pending, { host: "localhost:3100" })).toBe(200);
+      expect(await raw("GET", "/api/auth/get-session", pending, { host: "10.0.0.5:3100" })).toBe(200);
+      expect(await raw("GET", "/api/auth/get-session", pending, { host: "[::1]:3100" })).toBe(200);
+      expect(await raw("POST", "/api/auth/list-sessions", verified, { host: "localhost:3100" })).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("login: a session the gate cannot classify is refused at better-auth's endpoints too", async () => {
     // A db that throws on every query stands in for "the database hiccuped at the wrong moment".
     const brokenGate = twoFactorGate({} as never, { enabled: true });
