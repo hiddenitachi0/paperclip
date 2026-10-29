@@ -98,6 +98,9 @@ export interface Config {
   heartbeatTimerJitterMaxMs: number;
   // DUR-62: the weekly check-up. Off unless PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true.
   weeklyCheckupEnabled: boolean;
+  // DUR-4304: board two-factor login. Off unless PAPERCLIP_TWO_FACTOR_ENABLED=true;
+  // while off every /api/auth/2fa route is a 404 and sign-in is unchanged.
+  twoFactorEnabled: boolean;
   // Compute and log findings, but never write the report.
   weeklyCheckupDryRun: boolean;
   weeklyCheckupIntervalDays: number;
@@ -495,6 +498,7 @@ export function loadConfig(): Config {
     // on per deployment (and optionally per company) once he has read a dry
     // run; see services/organization-checkup.ts for what it reports.
     weeklyCheckupEnabled: process.env.PAPERCLIP_WEEKLY_CHECKUP_ENABLED === "true",
+    twoFactorEnabled: process.env.PAPERCLIP_TWO_FACTOR_ENABLED === "true",
     weeklyCheckupDryRun: process.env.PAPERCLIP_WEEKLY_CHECKUP_DRY_RUN === "true",
     weeklyCheckupIntervalDays: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_INTERVAL_DAYS) || 7),
     weeklyCheckupTickMinutes: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_TICK_MINUTES) || 60),

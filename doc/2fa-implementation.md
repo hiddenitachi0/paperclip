@@ -259,6 +259,27 @@ Before merging, Security Reviewer should verify:
 - [ ] Migration properly handles existing data
 - [ ] Service handles null/missing secrets gracefully
 
+## HTTP routes and login gate (DUR-4304)
+
+Shipped **off by default**: set `PAPERCLIP_TWO_FACTOR_ENABLED=true` (authenticated mode only). With the flag off every route below is a 404 and sign-in is unchanged.
+
+Routes, all under `/api/auth/2fa` (responses are `Cache-Control: no-store`; POSTs need a trusted browser origin):
+
+| Route | Who | What |
+| --- | --- | --- |
+| `GET /status` | any signed-in session | `{enabled, verificationRequired, enabledAt, recoveryCodesRemaining}`. Never a secret or code. |
+| `POST /enroll/start` | full session, 2FA off | Returns `secret`, `otpauthUri`, `recoveryCodes` **once**, plus a sealed `enrollmentToken` (the server keeps no half-finished state; the token is AES-GCM sealed, bound to the user and session, expires in 10 minutes). |
+| `POST /enroll/verify` `{enrollmentToken, totpCode}` | full session | Turns 2FA on if the code matches the secret in the token. The enrolling session counts as verified. |
+| `POST /login/verify` `{totpCode, isRecoveryCode?}` | session that passed the password but not the second factor | Trades a code for full access. Allowed for 10 minutes after sign-in. |
+| `POST /disable` `{totpCode, isRecoveryCode?}` | full session | Needs the current factor. "Reset" is disable, then enrol again. |
+| `POST /recovery-codes/regenerate` `{totpCode, isRecoveryCode?}` | full session | Needs the current factor; old codes stop working; new codes returned once. |
+
+Login gate (`server/src/auth/two-factor-gate.ts`): when the flag is on and the user has a second factor, a session that has not passed it resolves to **no session** in both the HTTP actor middleware and the live-events socket, so it reaches no board route. A passed factor lasts 12 hours per session. Board API keys and delegate tokens are not part of the browser login and are not gated here.
+
+Limits: the service locks a factor for 15 minutes after 5 failures (HTTP 429 with `Retry-After`); a per-user in-memory limiter adds 10 code attempts per minute in front of that. A wrong code gives the same 401 whatever part was wrong.
+
+Audit: `two_factor.enrolled`, `.verify_failed`, `.login_verified`, `.disabled`, `.recovery_codes_regenerated` are written to the activity feed of each company the user belongs to. No secret, URI, recovery code or submitted code is logged or stored there; the request fields `totpCode` and `enrollmentToken` are on the HTTP-log redaction list.
+
 ## Future Enhancements
 
 1. **WebAuthn/FIDO2**: Hardware security key support

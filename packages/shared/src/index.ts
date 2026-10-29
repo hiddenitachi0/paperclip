@@ -3077,6 +3077,14 @@ export {
   type AckPaymentNoticeOutboxInput,
 } from "./payment-notices.js";
 
+export {
+  twoFactorProofSchema,
+  twoFactorEnrollVerifySchema,
+  type TwoFactorProofInput,
+  type TwoFactorEnrollVerifyInput,
+  type TwoFactorStatus,
+} from "./two-factor.js";
+
 export { siteLoginSecretValueSchema, type SiteLoginSecretValue } from "./site-login.js";
 
 export {

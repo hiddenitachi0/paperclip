@@ -33,7 +33,7 @@ function trustedOriginsForRequest(req: Request) {
   return origins;
 }
 
-function isTrustedBoardMutationRequest(req: Request) {
+export function isTrustedBoardMutationRequest(req: Request) {
   const allowedOrigins = trustedOriginsForRequest(req);
   const origin = parseOrigin(req.header("origin"));
   if (origin && allowedOrigins.has(origin)) return true;

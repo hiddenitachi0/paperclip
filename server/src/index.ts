@@ -117,6 +117,7 @@ import {
   recordUserUpdatedViaApp,
   resolveAdminAuthSigningSecret,
 } from "./services/admin-auth-audit.js";
+import { twoFactorGate } from "./auth/two-factor-gate.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
@@ -768,8 +769,13 @@ export async function startServer(): Promise<StartedServer> {
       },
     });
     betterAuthHandler = createBetterAuthHandler(auth);
-    resolveSession = (req) => resolveBetterAuthSession(auth, req);
-    resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+    // DUR-4304: with two-factor login on, a session that has not passed its
+    // second factor resolves to "no session" everywhere (HTTP and sockets).
+    const gate = twoFactorGate(db as any, { enabled: config.twoFactorEnabled });
+    resolveSession = gate.wrapRequestResolver((req) => resolveBetterAuthSession(auth, req));
+    resolveSessionFromHeaders = gate.wrapHeadersResolver((headers) =>
+      resolveBetterAuthSessionFromHeaders(auth, headers),
+    );
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
     authReady = true;
   }
@@ -890,6 +896,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
+    twoFactorEnabled: config.deploymentMode === "authenticated" && config.twoFactorEnabled,
     pluginWorkerManager,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);

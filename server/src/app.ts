@@ -108,6 +108,7 @@ import {
 } from "./routes/instance-database-backups.js";
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
+import { twoFactorRoutes } from "./routes/two-factor.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
@@ -233,6 +234,8 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    // DUR-4304: board two-factor login; off unless the operator turns it on.
+    twoFactorEnabled?: boolean;
     /** Most previews this instance runs at once (default 2). */
     previewMaxConcurrent?: number;
     /** Minutes a preview may sit untouched before it is thrown away (default 60). */
@@ -311,6 +314,7 @@ export async function createApp(
   // approved change through only as exactly what was approved (see
   // middleware/board-chat-guard.ts). A no-op for everyone else.
   app.use(boardChatGuard(db));
+  app.use("/api/auth/2fa", twoFactorRoutes(db, { enabled: opts.twoFactorEnabled === true }));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);

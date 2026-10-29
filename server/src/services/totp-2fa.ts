@@ -56,7 +56,7 @@ const TOTP_WINDOW = 2;
 
 export class TotpVerificationError extends Error {
   constructor(
-    public readonly code: "invalid_code" | "locked" | "already_enabled",
+    public readonly code: "invalid_code" | "locked" | "already_enabled" | "not_enabled",
     message: string,
     public readonly retryAfterSeconds?: number,
   ) {
@@ -350,6 +350,41 @@ export function totpService(db: Db) {
     return { disabled: true };
   }
 
+  // DUR-4304: replace every recovery code with a fresh set. Needs a valid
+  // current TOTP or recovery code (shares the attempt limiter), so a signed-in
+  // session alone cannot mint new codes. The old codes are deleted outright, so
+  // none of them works afterwards. The new codes are returned once, in the clear.
+  async function regenerateRecoveryCodes(
+    userId: string,
+    proof: { token: string; isRecoveryCode?: boolean },
+  ): Promise<string[]> {
+    if (!(await isTotpEnabled(userId))) {
+      throw new TotpVerificationError("not_enabled", "Two-factor authentication is not enabled");
+    }
+    const result = await validateAndConsumeTotpToken(userId, proof?.token ?? "", proof?.isRecoveryCode ?? false);
+    if (result.locked) {
+      throw new TotpVerificationError("locked", "Too many failed attempts", result.retryAfterSeconds);
+    }
+    if (!result.valid) {
+      throw new TotpVerificationError("invalid_code", "Invalid verification code");
+    }
+    const now = new Date();
+    const fresh = generateRecoveryCodes();
+    await db.transaction(async (tx) => {
+      await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
+      await tx.insert(userRecoveryCodes).values(
+        fresh.map((code) => ({
+          id: `recovery_${randomBytes(16).toString("hex")}`,
+          userId,
+          codeHash: hashCode(code),
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+    });
+    return fresh;
+  }
+
   async function recordTotpSessionVerification(userId: string, sessionId: string, ttlMs: number = 30 * 60 * 1000) {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlMs);
@@ -403,6 +438,7 @@ export function totpService(db: Db) {
     getTotpStatus,
     validateAndConsumeTotpToken,
     disableTotpForUser,
+    regenerateRecoveryCodes,
     recordTotpSessionVerification,
     verifySessionTotpStatus,
     isTotpEnabled,
