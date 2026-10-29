@@ -190,6 +190,11 @@ Use in property rows, comment headers, assignee displays, and anywhere a user/ag
 
 ---
 
+### QrCode, BackupCodesPanel, TwoFactorCodeField
+
+**Files:** `ui/src/components/QrCode.tsx`, `BackupCodesPanel.tsx`, `TwoFactorCodeField.tsx`
+**Usage:** Two-step sign-in screens. `QrCode` draws a scannable picture (always dark on white); `BackupCodesPanel` shows one-time codes with a copy button; `TwoFactorCodeField` is the code box with a switch to a backup code. Shown on `/design-guide`.
+
 ## Layout Components
 
 ### Layout
