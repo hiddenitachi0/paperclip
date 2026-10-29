@@ -1,7 +1,7 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { tradingDailyStats, tradingFifoLots, tradingLedgerEntries } from "@paperclipai/db";
-import type { TradingLedgerEventType } from "@paperclipai/shared";
+import { TRADING_ESTIMATED_USD_NOK_RATE, type TradingLedgerEventType } from "@paperclipai/shared";
 
 /**
  * The FIFO tax ledger and the append-only decision ledger (design report
@@ -16,7 +16,16 @@ import type { TradingLedgerEventType } from "@paperclipai/shared";
 export interface TradingFifoConsumeResult {
   /** True cost basis of the quantity actually consumed (may be less than requested if the strategy's own cached position_quantity had drifted -- callers should treat a short-fall as a reconciliation signal). */
   costNokConsumed: number;
+  /** The same cost basis in USD: each lot's NOK cost divided by the rate that lot was converted at (11.5 for a lot with no rate stamped). */
+  costUsdConsumed: number;
   quantityConsumed: number;
+}
+
+/** The rate a fill's NOK figures were converted at, stamped on the order and the lot. */
+export interface TradingFxStamp {
+  fxRate: number;
+  fxDate: string | null;
+  fxSource: string;
 }
 
 export function tradingLedgerService(db: Db) {
@@ -27,6 +36,7 @@ export function tradingLedgerService(db: Db) {
     quantity: number;
     costNokPerUnit: number;
     acquiredAt: Date;
+    fx: TradingFxStamp;
   }): Promise<void> {
     await db.insert(tradingFifoLots).values({
       companyId: params.companyId,
@@ -35,6 +45,9 @@ export function tradingLedgerService(db: Db) {
       quantityRemaining: params.quantity,
       costNokPerUnit: params.costNokPerUnit,
       acquiredAt: params.acquiredAt,
+      fxRate: params.fx.fxRate,
+      fxDate: params.fx.fxDate,
+      fxSource: params.fx.fxSource,
     });
   }
 
@@ -42,6 +55,7 @@ export function tradingLedgerService(db: Db) {
   async function consumeFifoLots(params: { strategyId: string; quantity: number }): Promise<TradingFifoConsumeResult> {
     let remainingToConsume = params.quantity;
     let costNokConsumed = 0;
+    let costUsdConsumed = 0;
     let quantityConsumed = 0;
 
     const lots = await db
@@ -58,11 +72,12 @@ export function tradingLedgerService(db: Db) {
         .set({ quantityRemaining: sql`${tradingFifoLots.quantityRemaining} - ${takeFromLot}` })
         .where(eq(tradingFifoLots.id, lot.id));
       costNokConsumed += takeFromLot * lot.costNokPerUnit;
+      costUsdConsumed += (takeFromLot * lot.costNokPerUnit) / (lot.fxRate ?? TRADING_ESTIMATED_USD_NOK_RATE);
       quantityConsumed += takeFromLot;
       remainingToConsume -= takeFromLot;
     }
 
-    return { costNokConsumed, quantityConsumed };
+    return { costNokConsumed, costUsdConsumed, quantityConsumed };
   }
 
   async function writeLedgerEntry(params: {
@@ -117,6 +132,34 @@ export function tradingLedgerService(db: Db) {
     return typeof version === "number" ? version : null;
   }
 
+  /** USD cost basis of everything still open in this strategy's FIFO lots (each lot at the rate it was converted at). */
+  async function openPositionCostUsd(strategyId: string): Promise<number> {
+    const [row] = await db
+      .select({
+        cost: sql<number>`COALESCE(SUM(${tradingFifoLots.quantityRemaining} * ${tradingFifoLots.costNokPerUnit} / COALESCE(${tradingFifoLots.fxRate}, ${TRADING_ESTIMATED_USD_NOK_RATE})), 0)::float8`,
+      })
+      .from(tradingFifoLots)
+      .where(and(eq(tradingFifoLots.strategyId, strategyId), gt(tradingFifoLots.quantityRemaining, 0)));
+    return Number(row?.cost ?? 0);
+  }
+
+  /** True once the one-time "valuation switched to the daily Norges Bank rate" note (DUR-5001) exists for this strategy. */
+  async function hasValuationSwitchNote(params: { companyId: string; strategyId: string }): Promise<boolean> {
+    const [row] = await db
+      .select({ id: tradingLedgerEntries.id })
+      .from(tradingLedgerEntries)
+      .where(
+        and(
+          eq(tradingLedgerEntries.companyId, params.companyId),
+          eq(tradingLedgerEntries.strategyId, params.strategyId),
+          eq(tradingLedgerEntries.eventType, "reconciliation"),
+          sql`${tradingLedgerEntries.detail}->>'reason' = 'valuation_switch'`,
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  }
+
   /** UTC calendar date key, "YYYY-MM-DD" -- matches watchers.ts's utcDay() convention. */
   function statDateOf(date: Date): string {
     return date.toISOString().slice(0, 10);
@@ -164,5 +207,5 @@ export function tradingLedgerService(db: Db) {
       .limit(params.limit);
   }
 
-  return { addFifoLot, consumeFifoLots, writeLedgerEntry, listLedgerEntries, latestEngineVersionNote, recordDailyStat, listDailyStats, statDateOf };
+  return { addFifoLot, consumeFifoLots, writeLedgerEntry, listLedgerEntries, latestEngineVersionNote, hasValuationSwitchNote, openPositionCostUsd, recordDailyStat, listDailyStats, statDateOf };
 }

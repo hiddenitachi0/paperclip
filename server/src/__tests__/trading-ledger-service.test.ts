@@ -5,6 +5,8 @@ import { DEFAULT_TRADING_RISK_CONFIG, DEFAULT_TRADING_RULE_CONFIG } from "@paper
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { tradingLedgerService } from "../services/trading-ledger.ts";
 
+const FX = { fxRate: 11.5, fxDate: null, fxSource: "fixed_estimate_11.5" };
+
 /**
  * DUR-4171: trading-ledger.ts is the only writer of trading_fifo_lots and
  * trading_ledger_entries (see its own module doc comment) -- these tests
@@ -74,9 +76,9 @@ d("tradingLedgerService", () => {
     const { companyId, strategyId, orderId } = await seedStrategyWithOrder();
     const ledger = tradingLedgerService(db);
 
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 100, acquiredAt: new Date("2026-01-01T00:00:00Z") });
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 200, acquiredAt: new Date("2026-01-02T00:00:00Z") });
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 300, acquiredAt: new Date("2026-01-03T00:00:00Z") });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 100, acquiredAt: new Date("2026-01-01T00:00:00Z"), fx: FX });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 200, acquiredAt: new Date("2026-01-02T00:00:00Z"), fx: FX });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 10, costNokPerUnit: 300, acquiredAt: new Date("2026-01-03T00:00:00Z"), fx: FX });
 
     // Consume 15: all of the oldest lot (10 @ 100) plus half of the second (5 @ 200) -- the third, newest lot must stay untouched.
     const result = await ledger.consumeFifoLots({ strategyId, quantity: 15 });
@@ -92,8 +94,8 @@ d("tradingLedgerService", () => {
     const { companyId, strategyId, orderId } = await seedStrategyWithOrder();
     const ledger = tradingLedgerService(db);
 
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 5, costNokPerUnit: 50, acquiredAt: new Date("2026-01-01T00:00:00Z") });
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 5, costNokPerUnit: 999, acquiredAt: new Date("2026-01-02T00:00:00Z") });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 5, costNokPerUnit: 50, acquiredAt: new Date("2026-01-01T00:00:00Z"), fx: FX });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 5, costNokPerUnit: 999, acquiredAt: new Date("2026-01-02T00:00:00Z"), fx: FX });
 
     const result = await ledger.consumeFifoLots({ strategyId, quantity: 5 });
 
@@ -109,7 +111,7 @@ d("tradingLedgerService", () => {
   it("returns a short-fall (not an error) when asked to consume more than is open", async () => {
     const { companyId, strategyId, orderId } = await seedStrategyWithOrder();
     const ledger = tradingLedgerService(db);
-    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 3, costNokPerUnit: 100, acquiredAt: new Date("2026-01-01T00:00:00Z") });
+    await ledger.addFifoLot({ companyId, strategyId, sourceOrderId: orderId, quantity: 3, costNokPerUnit: 100, acquiredAt: new Date("2026-01-01T00:00:00Z"), fx: FX });
 
     const result = await ledger.consumeFifoLots({ strategyId, quantity: 100 });
 

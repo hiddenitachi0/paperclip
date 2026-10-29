@@ -1832,8 +1832,15 @@
     {
       "idx": 262,
       "version": "7",
-      "when": 1793260000000,
-      "tag": "0262_trading_routine_wallets",
+      "when": 1793291681623,
+      "tag": "0262_trading_fx_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 263,
+      "version": "7",
+      "when": 1793299848328,
+      "tag": "0263_trading_routine_wallets",
       "breakpoints": true
     }
   ]

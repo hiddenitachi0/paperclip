@@ -24,6 +24,7 @@ import type {
   RemoteSecretImportCandidate,
   RemoteSecretImportConflict,
   RemoteSecretImportRowResult,
+  DeploymentMode,
   SecretProviderConfigDiscoveryPreviewResult,
   SecretBindingTargetType,
   SecretKind,
@@ -1870,7 +1871,7 @@ export function secretService(db: Db, rawDb: Db = db) {
   return {
     listProviders: () => listSecretProviders(),
 
-    checkProviders: () => checkSecretProviders(),
+    checkProviders: (input: { deploymentMode?: DeploymentMode } = {}) => checkSecretProviders(input),
 
     previewProviderConfigDiscovery: async (
       companyId: string,

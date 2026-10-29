@@ -9,7 +9,8 @@ import type {
   SecretProviderValidationResult,
   StoredSecretVersionMaterial,
 } from "./types.js";
-import { badRequest } from "../errors.js";
+import type { DeploymentMode } from "@paperclipai/shared";
+import { badRequest, unprocessable } from "../errors.js";
 import { readServerSecret } from "../server-secrets.js";
 
 interface LocalEncryptedMaterial extends StoredSecretVersionMaterial {
@@ -17,6 +18,25 @@ interface LocalEncryptedMaterial extends StoredSecretVersionMaterial {
   iv: string;
   tag: string;
   ciphertext: string;
+}
+
+/**
+ * DUR-5064: when set (`true` / `1`), the key may only come from the server's
+ * private key hand-over. The provider then never reads, chmods or creates a
+ * key file, so a missing hand-over fails loudly instead of silently
+ * generating a new agent-readable key.
+ */
+export const REQUIRE_ENV_KEY_FLAG = "PAPERCLIP_SECRETS_REQUIRE_ENV_KEY";
+
+const MISSING_ENV_KEY_MESSAGE =
+  "PAPERCLIP_SECRETS_MASTER_KEY was not provided to the server, and " +
+  `${REQUIRE_ENV_KEY_FLAG} is set, so no key file is read or created. ` +
+  "Check that the secrets overlay and the server key file are in place " +
+  "(see docs/deploy/secrets-master-key-move.md).";
+
+function requireEnvKey(): boolean {
+  const raw = process.env[REQUIRE_ENV_KEY_FLAG]?.trim().toLowerCase();
+  return raw === "true" || raw === "1";
 }
 
 function resolveMasterKeyFilePath() {
@@ -56,6 +76,10 @@ function loadOrCreateMasterKey(): Buffer {
       );
     }
     return fromEnv;
+  }
+
+  if (requireEnvKey()) {
+    throw unprocessable(MISSING_ENV_KEY_MESSAGE);
   }
 
   const keyPath = resolveMasterKeyFilePath();
@@ -107,7 +131,9 @@ function prepareManagedVersion(value: string): PreparedSecretVersion {
   };
 }
 
-async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck> {
+async function inspectLocalEncryptedHealth(
+  deploymentMode?: DeploymentMode,
+): Promise<SecretProviderHealthCheck> {
   const envKeyRaw = readServerSecret("PAPERCLIP_SECRETS_MASTER_KEY");
   if (envKeyRaw && envKeyRaw.trim().length > 0) {
     if (!decodeMasterKey(envKeyRaw)) {
@@ -127,6 +153,18 @@ async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck>
         "A restore needs both the database metadata and the same master key.",
       ],
       details: { keySource: "env" },
+    };
+  }
+
+  if (requireEnvKey()) {
+    return {
+      provider: "local_encrypted",
+      status: "error",
+      message: MISSING_ENV_KEY_MESSAGE,
+      backupGuidance: [
+        "The server key file is the only copy of the master key; back it up separately from the database.",
+      ],
+      details: { keySource: "missing" },
     };
   }
 
@@ -180,6 +218,12 @@ async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck>
     mode !== null && (mode & 0o077) !== 0
       ? [`Secrets key file permissions are ${mode.toString(8)}; run chmod 600 ${keyPath}`]
       : [];
+  if (deploymentMode === "authenticated") {
+    warnings.push(
+      "The secrets key file is readable by agent runs. Move the key into the server key file and set " +
+        `${REQUIRE_ENV_KEY_FLAG}=true; see docs/deploy/secrets-master-key-move.md`,
+    );
+  }
   return {
     provider: "local_encrypted",
     status: warnings.length > 0 ? "warn" : "ok",
@@ -256,7 +300,7 @@ export const localEncryptedProvider: SecretProviderModule = {
     if (input?.deploymentMode === "authenticated" && input.strictMode !== true) {
       warnings.push("Strict secret mode should be enabled for authenticated deployments");
     }
-    const health = await inspectLocalEncryptedHealth();
+    const health = await inspectLocalEncryptedHealth(input?.deploymentMode);
     if (health.status === "error") {
       throw badRequest(health.message);
     }
@@ -279,7 +323,7 @@ export const localEncryptedProvider: SecretProviderModule = {
   async deleteOrArchive() {
     // Secret metadata deletion is handled in Paperclip DB; the local key is shared and must remain.
   },
-  async healthCheck() {
-    return inspectLocalEncryptedHealth();
+  async healthCheck(input) {
+    return inspectLocalEncryptedHealth(input?.deploymentMode);
   },
 };

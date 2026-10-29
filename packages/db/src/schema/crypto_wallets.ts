@@ -41,7 +41,7 @@ export const companyCryptoSettings = pgTable("company_crypto_settings", {
   allWalletsFrozen: boolean("all_wallets_frozen").notNull().default(false),
   frozenReason: text("frozen_reason"),
   rpcEndpoints: jsonb("rpc_endpoints").notNull().default({}),
-  // The one AI Trader agent (migration 0262, DUR-5026). It may ask for a
+  // The one AI Trader agent (migration 0263, DUR-5026). It may ask for a
   // top-up of a code-held trading wallet and nothing else; it can never own
   // a wallet, and an agent that owns one cannot be named here.
   traderAgentId: uuid("trader_agent_id").references(() => agents.id, { onDelete: "set null" }),
@@ -77,7 +77,7 @@ export const cryptoWallets = pgTable(
     maxLeverage: integer("max_leverage").notNull().default(1),
     lastBalance: numeric("last_balance", { precision: 78, scale: 0 }),
     lastBalanceAt: timestamp("last_balance_at", { withTimezone: true }),
-    // Migration 0262 (DUR-5026): who holds the wallet. 'agent' = an agent's
+    // Migration 0263 (DUR-5026): who holds the wallet. 'agent' = an agent's
     // tools use it (agent_id set). 'trading_routine' = held by Paperclip's
     // own trading code: agent_id is always null, no agent can ever use it,
     // and it exists on test networks only (CHECK below).
@@ -195,7 +195,7 @@ export const cryptoWalletTransactions = pgTable(
     feeUpperBound: numeric("fee_upper_bound", { precision: 78, scale: 0 }),
     orderDetail: jsonb("order_detail"),
     purpose: text("purpose").notNull(),
-    // Migration 0262 (DUR-5026): what the trading routine was doing when it
+    // Migration 0263 (DUR-5026): what the trading routine was doing when it
     // initiated this (initiated_by 'routine'): a profit sweep or a trade.
     routineAction: text("routine_action"),
     status: text("status").notNull(),
@@ -234,7 +234,7 @@ export const cryptoWalletTransactions = pgTable(
 );
 
 /**
- * Trading alerts (migration 0262, DUR-5026): the outbox the Telegram bridge
+ * Trading alerts (migration 0263, DUR-5026): the outbox the Telegram bridge
  * polls for the trading routine's safety stops and top-up / sweep notices.
  * Same lifecycle as watcher_alerts and payment_notices: written `ready` by the
  * server, delivered and acknowledged by the bridge, expired after a day.
