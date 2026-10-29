@@ -104,11 +104,32 @@ import {
   redactDetectedSuccessfulRunProgressSummaryForBoard,
 } from "../services/heartbeat.ts";
 import { secretService } from "../services/secrets.ts";
+import { redactKnownLeakedSecretPatterns } from "../redaction.ts";
 import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
 } from "../services/recovery/index.ts";
+
+// heartbeat_runs.error and every string inside resultJson pass through the
+// write-time scrub (redactHeartbeatRunPatchSecrets -> redactKnownLeakedSecretPatterns).
+// Its DUR-4040 card-number rule deliberately redacts any Luhn-valid 13-19
+// digit run by value, even inside a UUID (see the DUR-4536 note in
+// redaction.ts), so about 1 random UUID in 460 comes back as e.g.
+// "ec[REDACTED:card_number]-afd3-6ed22548a576". An id or name a test asserts
+// verbatim after that scrub must be one the scrub leaves alone, or the test
+// fails at random (CI, PR #690, 28 Oct 2026).
+function survivesRunRedaction(value: string) {
+  return redactKnownLeakedSecretPatterns(value) === value;
+}
+
+function randomRunRedactionSafeUUID() {
+  for (;;) {
+    const id = randomUUID();
+    if (survivesRunRedaction(id)) return id;
+  }
+}
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -1059,7 +1080,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   async function seedQueuedIssueRunFixture() {
     const companyId = randomUUID();
-    const agentId = randomUUID();
+    // Echoed back verbatim as a run's resultJson consumerId (see survivesRunRedaction).
+    const agentId = randomRunRedactionSafeUUID();
     const runId = randomUUID();
     const wakeupRequestId = randomUUID();
     const issueId = randomUUID();
@@ -2147,12 +2169,23 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it("blocks before dispatch when a declared secret ref has no binding instead of emitting an opaque setup failure", async () => {
     const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
     const svc = secretService(db);
-    const secretName = `unbound-runtime-${randomUUID()}`;
-    const secret = await svc.create(companyId, {
-      name: secretName,
-      provider: "local_encrypted",
-      value: "never-resolved",
-    });
+    // The secret's name and id are both asserted verbatim from the scrubbed
+    // run row. The id comes from the DB default, so on the rare card-shaped
+    // one create another secret (see survivesRunRedaction).
+    const createUnboundSecret = async () => {
+      const name = `unbound-runtime-${randomRunRedactionSafeUUID()}`;
+      const created = await svc.create(companyId, {
+        name,
+        provider: "local_encrypted",
+        value: "never-resolved",
+      });
+      return { name, created };
+    };
+    let unbound = await createUnboundSecret();
+    while (!survivesRunRedaction(unbound.created.id)) {
+      unbound = await createUnboundSecret();
+    }
+    const { name: secretName, created: secret } = unbound;
     // Declare the secret ref on the agent env WITHOUT creating a binding so the
     // pre-dispatch gate short-circuits to a configuration-incomplete blocker.
     await db
