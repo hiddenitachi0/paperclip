@@ -331,6 +331,7 @@ d("trading wallets held by code", () => {
       post: (url: string, body: unknown = {}) => record(request(app).post(url).send(body as object)),
       patch: (url: string, body: unknown) => record(request(app).patch(url).send(body as object)),
       put: (url: string, body: unknown) => record(request(app).put(url).send(body as object)),
+      delete: (url: string) => record(request(app).delete(url)),
     };
   }
 
@@ -561,6 +562,39 @@ d("trading wallets held by code", () => {
     solState.balances.set(wallet.address, sol(3));
     await svc().tick(now);
     expect((await txsOf(wallet.id)).filter((t) => t.routineAction === "sweep")).toHaveLength(0);
+  });
+
+  it("leaves a code-held wallet's money paths to the owner: an admin cannot add or remove an allowed address, send funds or change leverage (DUR-5087 N1)", async () => {
+    const { companyId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    const admin = boardApp(companyId, "admin");
+    const wallet = await makeSolWallet(companyId);
+    solState.balances.set(wallet.address, sol(0.5));
+    const mine = randomSolAddress();
+
+    // An admin cannot put their own address on the list, and so cannot send the balance out.
+    const add = await admin.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations`, { address: mine, label: "Mine" });
+    expect(add.status).toBe(403);
+    expect(add.body.error).toMatch(/Only the company's owner.*trading wallet/);
+    const send = await admin.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/send`, { to: mine, amount: "0.4", purpose: "Take it" });
+    expect(send.status).toBe(403);
+    expect(solState.sent).toHaveLength(0);
+    expect((await owner.get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations`)).body).toHaveLength(0);
+
+    // The owner can still do all of it, and only the owner can take an address off again.
+    const added = await owner.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations`, { address: mine, label: "Mine" });
+    expect(added.status).toBe(201);
+    expect((await admin.delete(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations/${added.body.id}`)).status).toBe(403);
+    expect((await owner.get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations`)).body).toHaveLength(1);
+    expect((await owner.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/send`, { to: mine, amount: "0.1", purpose: "Back to me" })).body.status).toBe("submitted");
+    expect((await owner.delete(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/destinations/${added.body.id}`)).status).toBe(204);
+
+    // Leverage on a Hyperliquid trading wallet is the owner's too; a plain wallet is unchanged for an admin.
+    const hlWallet = await makeHlWallet(companyId);
+    const lev = await admin.patch(`/api/companies/${companyId}/crypto/wallets/${hlWallet.id}`, { maxLeverage: 5 });
+    expect(lev.status).toBe(403);
+    expect((await owner.patch(`/api/companies/${companyId}/crypto/wallets/${hlWallet.id}`, { maxLeverage: 2 })).status).toBe(200);
+    expect((await admin.patch(`/api/companies/${companyId}/crypto/wallets/${hlWallet.id}`, { label: "Renamed" })).status).toBe(200);
   });
 
   // ─── Hard limits ───────────────────────────────────────────────────────
@@ -866,6 +900,88 @@ d("trading wallets held by code", () => {
     const [traderCard] = await db.select().from(approvals).where(eq(approvals.id, viaTrader.body.approvalId));
     expect(traderCard).toMatchObject({ requestedByAgentId: traderId });
     expect((traderCard!.payload as { summary: string }).summary).toMatch(/The Trader says \(its own words, not checked\): "Two stops-outs this week/);
+  });
+
+  describe("the Trader's top-up request cannot switch off the hard stops (DUR-5087 N2)", () => {
+    const hlLimits = { perTrade: "25", daily: "100", total: "5000", maxBalance: "200", dailyLossStop: "10", sweepThreshold: "150", topUpFloor: "20", topUpTarget: "100" };
+    const t0 = new Date("2026-10-29T10:00:00Z");
+    const minutes = (n: number) => new Date(t0.getTime() + n * 60_000);
+
+    async function setUp() {
+      const { companyId, traderId } = await seed();
+      const wallet = await makeHlWallet(companyId, hlLimits);
+      await boardApp(companyId, "owner").patch(`/api/companies/${companyId}/crypto/settings`, { traderAgentId: traderId });
+      const slow = cryptoWalletService(db, db, { ...deps(), tradingWatchIntervalMs: 5 * 60_000 });
+      return { companyId, traderId, wallet, slow };
+    }
+
+    it("checks the floor on the stored reading before asking the network, and does not stamp lastBalanceAt, so the scheduler still looks", async () => {
+      const { companyId, traderId, wallet, slow } = await setUp();
+      hl.state.accountValueUsd = 100;
+      await slow.tick(now);
+      const stamped = (await walletRow(wallet.id)).lastBalanceAt;
+      // The balance collapses; a Trader (prompt-injected, say) asks for a top-up four minutes later, then again.
+      hl.state.accountValueUsd = 50;
+      let reads = 0;
+      const original = hl.getBalance.bind(hl);
+      hl.getBalance = async (...args) => {
+        reads++;
+        return original(...args);
+      };
+      now = minutes(4);
+      await expect(slow.traderRequestTopUp(companyId, traderId, wallet.id, "low")).rejects.toMatchObject({ status: 422 });
+      expect(reads).toBe(0);
+      expect((await walletRow(wallet.id)).lastBalanceAt).toEqual(stamped);
+      // The scheduler is not kept away: its next look (5 minutes after the first) sees the loss and pauses the wallet.
+      now = minutes(5);
+      expect((await slow.tick(now)).tradingWalletsChecked).toBe(1);
+      expect((await walletRow(wallet.id)).status).toBe("frozen");
+      expect((await alertsOf(companyId)).map((a) => a.kind)).toEqual(["wallet_paused"]);
+    });
+
+    it("applies the hard stops when a request does read the network, and queues the pause alert", async () => {
+      const { companyId, traderId, wallet, slow } = await setUp();
+      hl.state.accountValueUsd = 15; // first look: below the floor, no loss yet
+      await slow.tick(now);
+      expect((await walletRow(wallet.id)).status).toBe("active");
+      hl.state.accountValueUsd = 3; // down 12 from the day's high: over the stop of 10
+      now = minutes(6);
+      await slow.traderRequestTopUp(companyId, traderId, wallet.id, "I am nearly out");
+      const row = await walletRow(wallet.id);
+      expect(row.status).toBe("frozen");
+      expect(row.frozenReason).toMatch(/Daily loss stop reached/);
+      expect((await alertsOf(companyId)).filter((a) => a.kind === "wallet_paused")).toHaveLength(1);
+    });
+
+    it("answers a repeat request from the same wallet within the watch interval with 429, without another read", async () => {
+      const { companyId, traderId, wallet, slow } = await setUp();
+      hl.state.accountValueUsd = 15;
+      await slow.tick(now);
+      now = minutes(6);
+      const first = await slow.traderRequestTopUp(companyId, traderId, wallet.id, "low");
+      expect(first.created).toBe(false); // the scheduler's first look already filed the card
+      now = minutes(8);
+      await expect(slow.traderRequestTopUp(companyId, traderId, wallet.id, "low again")).rejects.toMatchObject({ status: 429 });
+      now = minutes(12);
+      await expect(slow.traderRequestTopUp(companyId, traderId, wallet.id, "low again")).resolves.toMatchObject({ approvalId: first.approvalId, created: false });
+    });
+
+    it("queues the pause alert when ANY balance read finds coins gone, not only the scheduler's", async () => {
+      const { companyId } = await seed();
+      const wallet = await makeSolWallet(companyId);
+      solState.balances.set(wallet.address, sol(2));
+      expect((await boardApp(companyId, "owner").get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/balance`)).status).toBe(200);
+      solState.balances.set(wallet.address, sol(1.2));
+      const read = await boardApp(companyId, "owner").get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/balance`);
+      expect(read.body.reconciliation.ok).toBe(false);
+      expect((await walletRow(wallet.id)).status).toBe("frozen");
+      const alerts = await alertsOf(companyId);
+      expect(alerts.map((a) => a.kind)).toEqual(["wallet_paused"]);
+      expect(alerts[0]!.text).toMatch(/left this wallet that Paperclip did not send/);
+      // The next scheduler pass finds it already paused and does not alert again.
+      await svc().tick(now);
+      expect(await alertsOf(companyId)).toHaveLength(1);
+    });
   });
 
   // ─── Alerts outbox (Telegram bridge) ───────────────────────────────────

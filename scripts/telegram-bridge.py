@@ -2282,6 +2282,64 @@ def notify_mail_urgency_alerts(state, bots):
             ack_mail_urgency_alert(company_id, alert_id)
 
 
+def ack_trading_alert(company_id, alert_id, outcome="delivered"):
+    return cli("trading-alerts", "outbox:ack", alert_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_trading_alerts(state, bots):
+    """Send every trading wallet alert (safety stop, profit sweep, top-up
+    request) waiting in each company's outbox, once, from the company notice
+    bot. The text is built server-side from facts the server holds and never
+    contains agent-written text (DUR-5087 N4)."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_trading_alerts", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("trading-alerts", "outbox", "-C", company_id)
+        items = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        bot = company_notice_bot(cbots, roles)
+        if bot is None:
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            alert_id = it.get("id")
+            if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if alert_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_trading_alert(company_id, alert_id)
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            delivered = False
+            for chat in chats:
+                if send_text_checked(bot["token"], chat, text):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            # Record as sent BEFORE acknowledging, so a crash between the two
+            # never double-sends on the next pass.
+            sent_before.add(alert_id)
+            remembered.append(alert_id)
+            with LOCK:
+                state["sent_trading_alerts"] = remembered[-WATCHER_ALERTS_REMEMBERED:]
+                save_state(state)
+            ack_trading_alert(company_id, alert_id)
+
+
 # ─── Disk warnings (DUR-4499) ─────────────────────────────────────────────────
 #
 # The instance disk report comes from `disk-health` (read-only). One message
@@ -3069,6 +3127,10 @@ def main():
             notify_mail_urgency_alerts(state, bots)
         except Exception as e:
             print(f"mail-urgency-alert-notify error: {e}", flush=True)
+        try:
+            notify_trading_alerts(state, bots)
+        except Exception as e:
+            print(f"trading-alert-notify error: {e}", flush=True)
         try:
             notify_morning_reports(state, bots)
         except Exception as e:
