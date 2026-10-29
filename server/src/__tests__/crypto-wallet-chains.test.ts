@@ -460,12 +460,12 @@ describe("test-network hardening: the provider must be on the wallet's own netwo
   const ETH_TO = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
   const KEY = "00".repeat(31) + "01";
 
-  function btcCtx(network: "testnet" | "mainnet", genesis: string): ChainContext {
+  function btcCtx(network: "testnet" | "mainnet", genesis: string, networkVariant?: "testnet4" | "signet"): ChainContext {
     const fetch = vi.fn(async (url: string) => {
       if (url.endsWith("/block-height/0")) return new Response(`${genesis}\n`, { status: 200 });
       throw new Error(`signing must stop before ${url}`);
     }) as unknown as OutboundFetch;
-    return { network, rpcUrl: "https://btc.example.org/api", fetch };
+    return { network, networkVariant, rpcUrl: "https://btc.example.org/api", fetch };
   }
 
   it("Bitcoin: a provider on the wrong network never signs, whichever way round", async () => {
@@ -484,11 +484,20 @@ describe("test-network hardening: the provider must be on the wallet's own netwo
     }
   });
 
-  it("Bitcoin: testnet4 and signet pass the network check (the next call is the fee lookup)", async () => {
+  it("Bitcoin: a testnet4 wallet and a signet wallet each refuse the other's network (DUR-5024)", async () => {
     const btc = bitcoinAdapter(stubLibs);
     const args = { privateKey: KEY, from: "tb1qxyz", to: "tb1qabc", amount: 1000n, maxFee: 10_000n };
-    for (const genesis of [BTC_GENESIS.testnet4, BTC_GENESIS.signet]) {
-      const ctx = btcCtx("testnet", genesis);
+    await expect(btc.signTransfer(btcCtx("testnet", BTC_GENESIS.signet, "testnet4"), args)).rejects.toMatchObject({ code: "wrong_network" });
+    await expect(btc.signTransfer(btcCtx("testnet", BTC_GENESIS.testnet4, "signet"), args)).rejects.toMatchObject({ code: "wrong_network" });
+    // A wallet from before signet existed carries no variant in a bare context: it is testnet4, never signet.
+    await expect(btc.signTransfer(btcCtx("testnet", BTC_GENESIS.signet), args)).rejects.toMatchObject({ code: "wrong_network" });
+  });
+
+  it("Bitcoin: testnet4 and signet pass the network check for their own network (the next call is the fee lookup)", async () => {
+    const btc = bitcoinAdapter(stubLibs);
+    const args = { privateKey: KEY, from: "tb1qxyz", to: "tb1qabc", amount: 1000n, maxFee: 10_000n };
+    for (const [genesis, variant] of [[BTC_GENESIS.testnet4, "testnet4"], [BTC_GENESIS.signet, "signet"]] as const) {
+      const ctx = btcCtx("testnet", genesis, variant);
       // Past the genesis check the fake refuses anything else, which proves the check let it through.
       await expect(btc.signTransfer(ctx, args)).rejects.toThrow(/signing must stop before|insufficient|network service/);
       expect((ctx.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
@@ -518,8 +527,14 @@ describe("test-network hardening: the provider must be on the wallet's own netwo
     const args = { privateKey: KEY, from: ETH_FROM, to: ETH_TO, amount: 1n, maxFee: 10n ** 18n };
     // Sepolia provider, wallet stored on Hoodi: both allow-listed, but they differ.
     await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(11155111), chainId: 560048 }, args)).rejects.toMatchObject({ code: "wrong_network" });
-    // Hoodi provider, nothing stored: held to Sepolia.
-    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(560048) }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    // Nothing stored: refused outright, never defaulted to Sepolia (DUR-5024).
+    const none = reply(11155111);
+    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: none }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    expect((none as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+    // A stored chain ID that is not on the code allow-list is refused even if the provider agrees.
+    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(8453), chainId: 8453 }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    // Hoodi stored and Hoodi provider: past the chain check (the fake refuses the next call).
+    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(560048), chainId: 560048 }, args)).rejects.toThrow(/signing must stop here/);
     // A test provider behind a mainnet wallet.
     vi.stubEnv("PAPERCLIP_CRYPTO_REAL_MONEY", "allowed");
     try {

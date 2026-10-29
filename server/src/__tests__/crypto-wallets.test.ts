@@ -5,7 +5,7 @@ import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   activityLog,
   agents,
@@ -18,6 +18,8 @@ import {
   cryptoWalletTransactions,
   tradingLedgerEntries,
 } from "@paperclipai/db";
+import { readFileSync } from "node:fs";
+import { EVM_CHAIN_IDS } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { base58Decode, base58Encode } from "../services/crypto-wallet-encoding.ts";
 import {
@@ -222,6 +224,8 @@ d("crypto wallets for agents", () => {
 
   let solState: FakeSolanaState;
   let hl: FakeHyperliquid;
+  /** Every network address the service asked for a connection to. */
+  let rpcUrlsSeen: string[] = [];
   let adapters: CryptoChainAdapters;
   const priceSource: CryptoPriceSource = { usdPrice: async (chain) => (chain === "hyperliquid" ? 1 : 100) };
   let now = new Date("2026-10-17T10:00:00Z");
@@ -270,6 +274,7 @@ d("crypto wallets for agents", () => {
         .set({ status: "confirmed" })
         .where(inArray(cryptoWalletTransactions.status, ["pending_approval", "approved", "submitted"]));
     }
+    rpcUrlsSeen = [];
     solState = { balances: new Map(), sent: [], statuses: new Map(), calls: [], genesis: DEVNET_GENESIS, blockHeight: 1_000, sendMode: "ok" };
     hl = fakeHyperliquid();
     adapters = { bitcoin: inertAdapter("bitcoin"), ethereum: inertAdapter("ethereum"), solana: solanaAdapter(), hyperliquid: hl };
@@ -277,7 +282,15 @@ d("crypto wallets for agents", () => {
   });
 
   function deps() {
-    return { adapters, priceSource, now: () => now, fetchFor: () => fakeSolanaRpc(solState) };
+    return {
+      adapters,
+      priceSource,
+      now: () => now,
+      fetchFor: (url: string) => {
+        rpcUrlsSeen.push(url);
+        return fakeSolanaRpc(solState);
+      },
+    };
   }
 
   function boardApp(companyId: string, role: MembershipRole, userId = randomUUID()) {
@@ -1197,4 +1210,217 @@ d("crypto wallets for agents", () => {
     expect(JSON.stringify(second.body)).not.toContain(key);
     expect(await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).toHaveLength(1);
   });
+
+  // ─── Test network per wallet: signet option and stored chain ID (DUR-5024) ──
+
+  /** A bitcoin adapter whose network calls are recorded; keys and addresses are real, the signer is not needed. */
+  function recordingBitcoin() {
+    const real = bitcoinAdapter(async () => { throw new CryptoChainError("libs_missing", "not installed"); });
+    const calls: Array<{ op: string; variant: string | undefined; rpcUrl: string }> = [];
+    const adapter: CryptoChainAdapter = {
+      ...real,
+      async getBalance(ctx) {
+        calls.push({ op: "balance", variant: ctx.networkVariant, rpcUrl: ctx.rpcUrl });
+        return { balance: 50_000_000n };
+      },
+      async estimateFee(ctx) {
+        calls.push({ op: "fee", variant: ctx.networkVariant, rpcUrl: ctx.rpcUrl });
+        return 1_000n;
+      },
+      async signTransfer(ctx, input) {
+        calls.push({ op: "sign", variant: ctx.networkVariant, rpcUrl: ctx.rpcUrl });
+        return { raw: "00ff", txHash: `btc-${randomUUID()}`, feeUpperBound: input.maxFee };
+      },
+      async broadcast(ctx) {
+        calls.push({ op: "broadcast", variant: ctx.networkVariant, rpcUrl: ctx.rpcUrl });
+        return { status: "pending" };
+      },
+    };
+    return { adapter, calls };
+  }
+
+  function recordingEthereum() {
+    const calls: Array<{ op: string; chainId: number | undefined }> = [];
+    const adapter: CryptoChainAdapter = {
+      ...inertAdapter("ethereum"),
+      generateKey: async () => ({ privateKey: randomBytes(32).toString("hex"), address: `0x${randomBytes(20).toString("hex")}` }),
+      deriveAddress: async () => `0x${randomBytes(20).toString("hex")}`,
+      getBalance: async (ctx) => {
+        calls.push({ op: "balance", chainId: ctx.chainId });
+        return { balance: 1n };
+      },
+    };
+    return { adapter, calls };
+  }
+
+  it("makes signet the default for new bitcoin test wallets, keeps testnet4 as an option, and stores the choice (DUR-5024)", async () => {
+    const { companyId, agentId } = await seed();
+    adapters = { ...adapters, bitcoin: recordingBitcoin().adapter };
+    const owner = boardApp(companyId, "owner");
+    const create = (extra: Record<string, unknown>) =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "bitcoin", label: "BTC", mode: "generate", ...extra });
+    const byDefault = await create({});
+    expect(byDefault.status).toBe(201);
+    expect(byDefault.body).toMatchObject({ network: "testnet", networkVariant: "signet", evmChainId: null });
+    const legacy = await create({ networkVariant: "testnet4" });
+    expect(legacy.body).toMatchObject({ networkVariant: "testnet4" });
+    const [stored] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, byDefault.body.id));
+    expect(stored).toMatchObject({ networkVariant: "signet", evmChainId: null });
+    // Not a choice anywhere else.
+    const wrongChain = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "S", mode: "generate", networkVariant: "signet" });
+    expect(wrongChain.status).toBe(400);
+    const onMainnet = await create({ network: "mainnet", networkVariant: "signet" });
+    expect(onMainnet.status).toBe(400);
+    const solana = await makeSolanaWallet(companyId, agentId);
+    const [solanaRow] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, solana.id));
+    expect(solanaRow).toMatchObject({ networkVariant: null, evmChainId: null });
+  });
+
+  it("lets a signet wallet show its balance and send to an allowed address, always on the signet network address (DUR-5024)", async () => {
+    const { companyId, agentId } = await seed();
+    const btc = recordingBitcoin();
+    adapters = { ...adapters, bitcoin: btc.adapter };
+    const owner = boardApp(companyId, "owner");
+    const limits = { perTransaction: "0.01", daily: "0.02", total: "0.1", approvalAbove: "0.01" };
+    const make = async (networkVariant: "signet" | "testnet4") => {
+      const res = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "bitcoin", label: networkVariant, mode: "generate", networkVariant, limits });
+      expect(res.status).toBe(201);
+      return res.body as { id: string; address: string };
+    };
+    const signet = await make("signet");
+    const testnet4 = await make("testnet4");
+    // The company points ONLY testnet4 at its own service; signet must not pick that up.
+    const patch = await owner.patch(`/api/companies/${companyId}/crypto/settings`, { rpcEndpoints: { bitcoin: { testnet: "https://my-testnet4.example.org/api" } } });
+    expect(patch.status).toBe(200);
+
+    expect((await owner.get(`/api/companies/${companyId}/crypto/wallets/${signet.id}/balance`)).status).toBe(200);
+    expect((await owner.get(`/api/companies/${companyId}/crypto/wallets/${testnet4.id}/balance`)).status).toBe(200);
+    expect(btc.calls).toEqual([
+      { op: "balance", variant: "signet", rpcUrl: "https://mempool.space/signet/api" },
+      { op: "balance", variant: "testnet4", rpcUrl: "https://my-testnet4.example.org/api" },
+    ]);
+
+    // Its own slot, set by the owner, is used by the signet wallet only.
+    await owner.patch(`/api/companies/${companyId}/crypto/settings`, { rpcEndpoints: { bitcoin: { signet: "https://my-signet.example.org/api" } } });
+    btc.calls.length = 0;
+    await owner.get(`/api/companies/${companyId}/crypto/wallets/${signet.id}/balance`);
+    await owner.get(`/api/companies/${companyId}/crypto/wallets/${testnet4.id}/balance`);
+    expect(btc.calls.map((c) => c.rpcUrl)).toEqual(["https://my-signet.example.org/api", "https://my-testnet4.example.org/api"]);
+    // Clearing a slot goes back to that slot's own built-in address.
+    await owner.patch(`/api/companies/${companyId}/crypto/settings`, { rpcEndpoints: { bitcoin: { signet: null } } });
+    btc.calls.length = 0;
+    await owner.get(`/api/companies/${companyId}/crypto/wallets/${signet.id}/balance`);
+    expect(btc.calls[0]?.rpcUrl).toBe("https://mempool.space/signet/api");
+    // Only bitcoin has a signet slot.
+    const solanaSlot = await owner.patch(`/api/companies/${companyId}/crypto/settings`, { rpcEndpoints: { solana: { signet: "https://x.example.org" } } });
+    expect(solanaSlot.status).toBe(422);
+
+    // Send to an allowed address (a signet address, here made from a fresh key).
+    const to = (await btc.adapter.generateKey("testnet")).address;
+    const allowed = await owner.post(`/api/companies/${companyId}/crypto/wallets/${signet.id}/destinations`, { address: to, label: "Friend" });
+    expect(allowed.status).toBe(201);
+    btc.calls.length = 0;
+    const sent = await owner.post(`/api/companies/${companyId}/crypto/wallets/${signet.id}/send`, { to, amount: "0.001", purpose: "Signet test" });
+    expect(sent.status).toBeLessThan(300);
+    expect(btc.calls.filter((c) => c.op === "sign" || c.op === "broadcast")).toEqual([
+      { op: "sign", variant: "signet", rpcUrl: "https://mempool.space/signet/api" },
+      { op: "broadcast", variant: "signet", rpcUrl: "https://mempool.space/signet/api" },
+    ]);
+    // Anywhere else is still refused.
+    const stranger = (await btc.adapter.generateKey("testnet")).address;
+    const refused = await owner.post(`/api/companies/${companyId}/crypto/wallets/${signet.id}/send`, { to: stranger, amount: "0.001", purpose: "Nope" });
+    expect(refused.body.status).toBe("blocked");
+    expect(btc.calls.filter((c) => c.op === "sign")).toHaveLength(1);
+  });
+
+  it("stores an Ethereum test wallet's chain ID at creation, and a later change of the default never moves it (DUR-5024)", async () => {
+    const { companyId, agentId } = await seed();
+    const eth = recordingEthereum();
+    adapters = { ...adapters, ethereum: eth.adapter };
+    const owner = boardApp(companyId, "owner");
+    const create = (extra: Record<string, unknown>) =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "ethereum", label: "ETH", mode: "generate", ...extra });
+    const sepolia = await create({});
+    expect(sepolia.status).toBe(201);
+    expect(sepolia.body).toMatchObject({ evmChainId: EVM_CHAIN_IDS.testnet, networkVariant: null });
+    const hoodi = await create({ evmChainId: 560048 });
+    expect(hoodi.body.evmChainId).toBe(560048);
+    // Only a chain on the code allow-list; never a real one, never on other chains.
+    for (const evmChainId of [1, 8453, 42161]) expect((await create({ evmChainId })).status).toBe(400);
+    expect((await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "S", mode: "generate", evmChainId: 560048 })).status).toBe(400);
+
+    // The code default moves to Hoodi (a future release); the wallets stay where they were created.
+    const original = EVM_CHAIN_IDS.testnet;
+    EVM_CHAIN_IDS.testnet = 560048;
+    try {
+      await owner.get(`/api/companies/${companyId}/crypto/wallets/${sepolia.body.id}/balance`);
+      await owner.get(`/api/companies/${companyId}/crypto/wallets/${hoodi.body.id}/balance`);
+      const another = await create({});
+      expect(another.body.evmChainId).toBe(560048); // only NEW wallets follow the new default
+    } finally {
+      EVM_CHAIN_IDS.testnet = original;
+    }
+    expect(eth.calls).toEqual([
+      { op: "balance", chainId: 11155111 },
+      { op: "balance", chainId: 560048 },
+    ]);
+  });
+
+  it("refuses, in the database, any change to a wallet's network variant or chain ID, and any inconsistent row (DUR-5024)", async () => {
+    const { companyId, agentId } = await seed();
+    adapters = { ...adapters, bitcoin: recordingBitcoin().adapter, ethereum: recordingEthereum().adapter };
+    const owner = boardApp(companyId, "owner");
+    const btc = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "bitcoin", label: "B", mode: "generate" });
+    const eth = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "ethereum", label: "E", mode: "generate" });
+    await expect(db.update(cryptoWallets).set({ networkVariant: "testnet4" }).where(eq(cryptoWallets.id, btc.body.id))).rejects.toThrow();
+    await expect(db.update(cryptoWallets).set({ evmChainId: 560048 }).where(eq(cryptoWallets.id, eth.body.id))).rejects.toThrow();
+    // Not even NULL -> value, and the check constraints reject rows that do not fit their chain.
+    await expect(db.execute(sql`UPDATE crypto_wallets SET network_variant = NULL WHERE id = ${btc.body.id}`)).rejects.toThrow();
+    await expect(db.execute(sql`UPDATE crypto_wallets SET network_variant = 'testnet3' WHERE id = ${btc.body.id}`)).rejects.toThrow();
+    await expect(db.execute(sql`UPDATE crypto_wallets SET label = 'renamed' WHERE id = ${btc.body.id}`)).resolves.toBeDefined();
+    const [after] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, btc.body.id));
+    expect(after).toMatchObject({ networkVariant: "signet", label: "renamed" });
+  });
+
+  it("rehearses the migration: legacy bitcoin test wallets become testnet4, Ethereum test wallets Sepolia, the rest untouched, and a re-run changes nothing (DUR-5024)", async () => {
+    const { companyId, agentId } = await seed();
+    adapters = { ...adapters, bitcoin: recordingBitcoin().adapter, ethereum: recordingEthereum().adapter };
+    const owner = boardApp(companyId, "owner");
+    const make = async (body: Record<string, unknown>) => (await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, label: "W", mode: "generate", ...body })).body.id as string;
+    const btcTest = await make({ chain: "bitcoin" });
+    const ethTest = await make({ chain: "ethereum", evmChainId: 560048 });
+    const sol = await make({ chain: "solana" });
+    await enableMainnet(companyId);
+    const ethMain = await make({ chain: "ethereum", network: "mainnet" });
+    const btcMain = await make({ chain: "bitcoin", network: "mainnet" });
+    const before = await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
+
+    const migration = readFileSync(path.join(import.meta.dirname, "../../../packages/db/src/migrations/0264_crypto_wallet_network_variant.sql"), "utf8");
+    const statements = migration.split("--> statement-breakpoint").map((part) => part.trim()).filter((part) => part.replace(/^--.*$/gm, "").trim() !== "");
+    const run = async () => { for (const statement of statements) await db.execute(sql.raw(statement)); };
+    // Roll back to the shape before the migration (the documented rollback), then apply it.
+    await db.execute(sql.raw(`DROP TRIGGER IF EXISTS crypto_wallets_network_fixed ON "crypto_wallets"`));
+    await db.execute(sql.raw(`DROP FUNCTION IF EXISTS enforce_crypto_wallet_network_fixed()`));
+    await db.execute(sql.raw(`ALTER TABLE "crypto_wallets" DROP CONSTRAINT IF EXISTS "crypto_wallets_network_variant_check", DROP CONSTRAINT IF EXISTS "crypto_wallets_evm_chain_id_check", DROP COLUMN IF EXISTS "network_variant", DROP COLUMN IF EXISTS "evm_chain_id"`));
+    await run();
+    const snapshot = async () => (await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).sort((a, b) => a.id.localeCompare(b.id));
+    const migrated = await snapshot();
+    const byId = new Map(migrated.map((row) => [row.id, row]));
+    expect(migrated).toHaveLength(before.length);
+    expect(byId.get(btcTest)).toMatchObject({ networkVariant: "testnet4", evmChainId: null }); // created as signet above, but before signet existed every one was testnet4
+    expect(byId.get(ethTest)).toMatchObject({ networkVariant: null, evmChainId: 11155111 });
+    for (const id of [sol, ethMain, btcMain]) expect(byId.get(id)).toMatchObject({ networkVariant: null, evmChainId: null });
+    // Every other column is exactly as it was.
+    for (const row of before) {
+      const { networkVariant, evmChainId, ...rest } = byId.get(row.id)!;
+      const { networkVariant: _v, evmChainId: _c, ...was } = row;
+      expect(rest).toEqual(was);
+      void networkVariant; void evmChainId;
+    }
+    // A second run is a no-op, and the guard is back in place.
+    await run();
+    expect(await snapshot()).toEqual(migrated);
+    await expect(db.update(cryptoWallets).set({ evmChainId: 1 }).where(eq(cryptoWallets.id, ethTest))).rejects.toThrow();
+  });
+
 });

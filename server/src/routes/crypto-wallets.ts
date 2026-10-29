@@ -193,7 +193,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   });
 
   router.delete("/companies/:companyId/crypto/wallets/:walletId/destinations/:destinationId", ownerAdminScope(), async (req, res) => {
-    await svc.removeDestination(companyIdOf(req), walletIdOf(req), req.params.destinationId as string, { userId: userIdOf(req) });
+    await svc.removeDestination(companyIdOf(req), walletIdOf(req), req.params.destinationId as string, { userId: userIdOf(req), isOwner: isOwner(req, companyIdOf(req)) });
     res.status(204).end();
   });
 

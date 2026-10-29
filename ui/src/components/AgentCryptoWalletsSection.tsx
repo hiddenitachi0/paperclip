@@ -200,7 +200,7 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
   });
 
   const archived = wallet.status === "archived";
-  const paymentLink = cryptoPaymentLink(wallet.chain, wallet.network, wallet.address);
+  const paymentLink = cryptoPaymentLink(wallet.chain, wallet.network, wallet.address, wallet.evmChainId);
   const destinations = destinationsQuery.data ?? [];
 
   return (
@@ -219,7 +219,7 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
             </p>
           ) : null}
           <p className={`text-xs ${wallet.status === "active" ? "text-muted-foreground" : "text-destructive"}`}>
-            {statusText(wallet)} · {cryptoNetworkLabel(wallet.chain, wallet.network)} · key {wallet.keyOrigin === "imported" ? "imported" : "made by Paperclip"}
+            {statusText(wallet)} · {cryptoNetworkLabel(wallet.chain, wallet.network, wallet)} · key {wallet.keyOrigin === "imported" ? "imported" : "made by Paperclip"}
           </p>
         </div>
         {!archived ? (

@@ -137,19 +137,30 @@ export function utcDayKey(date: Date): string {
 export interface DailyLossState {
   /** The balance plus what the wallet itself sent out today (sweeps, owner sends): those never count as a loss. */
   adjusted: bigint;
-  /** The day's highest adjusted balance so far. */
+  /**
+   * The day's loss reference: the highest adjusted balance so far, plus any
+   * loss already taken that a later jump upwards must not erase. The loss is
+   * always `peak - adjusted`.
+   */
   peak: bigint;
   /** peak - adjusted, never negative. */
   loss: bigint;
 }
 
 /**
- * The daily loss is measured from the day's highest balance, so a deposit
- * raises the bar instead of hiding a loss, and a profit that is given back
- * counts as a loss. The first look of a new day also starts from the last
- * balance seen the day before, so an overnight drop is not forgotten. After
- * the owner restarts a paused wallet (previousPeak null), the count starts
- * again from the balance as it is.
+ * The daily loss is measured from the day's highest balance, so a profit
+ * that is given back counts as a loss. A reading that jumps ABOVE the
+ * reference is treated as a deposit (the balance alone cannot tell it from a
+ * windfall): the reference rises with it, but the loss already taken stays,
+ * so topping up cannot wipe out the count (DUR-5087 N3). Rises that stay
+ * under the reference do shrink the loss. The first look of a new day also
+ * starts from the last balance seen the day before, so an overnight drop is
+ * not forgotten. After the owner restarts a paused wallet (lossDayPeak null),
+ * the count starts again from the balance as it is.
+ *
+ * previousBalance is the reading before this one; the loss at that reading
+ * is estimated as `reference - (previousBalance + outflowsToday)`, which can
+ * only understate it (never overstate) when a sweep confirmed in between.
  */
 export function evaluateDailyLoss(input: {
   balance: bigint;
@@ -162,7 +173,13 @@ export function evaluateDailyLoss(input: {
   const adjusted = input.balance + input.outflowsToday;
   let peak: bigint;
   if (input.lossDay === input.today && input.lossDayPeak !== null) {
-    peak = input.lossDayPeak > adjusted ? input.lossDayPeak : adjusted;
+    if (adjusted > input.lossDayPeak) {
+      const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
+      const carried = input.lossDayPeak > previousAdjusted ? input.lossDayPeak - previousAdjusted : 0n;
+      peak = adjusted + carried;
+    } else {
+      peak = input.lossDayPeak;
+    }
   } else if (input.lossDay !== null && input.previousBalance !== null) {
     peak = input.previousBalance > adjusted ? input.previousBalance : adjusted;
   } else {

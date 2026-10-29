@@ -1,6 +1,6 @@
 {
-  "id": "a964d0c1-2dee-4833-99cd-e1b6418156a5",
-  "prevId": "1c130155-e234-4546-9cbb-f17e5c44338a",
+  "id": "744b1f22-b91e-4b4c-b937-c4e160951647",
+  "prevId": "4b12ad22-1aaa-4ae0-b604-400b2067f792",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -13375,6 +13375,18 @@
           "notNull": true,
           "default": "'testnet'"
         },
+        "network_variant": {
+          "name": "network_variant",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "evm_chain_id": {
+          "name": "evm_chain_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "address": {
           "name": "address",
           "type": "text",
@@ -13669,6 +13681,14 @@
         "crypto_wallets_network_check": {
           "name": "crypto_wallets_network_check",
           "value": "\"crypto_wallets\".\"network\" IN ('testnet', 'mainnet')"
+        },
+        "crypto_wallets_network_variant_check": {
+          "name": "crypto_wallets_network_variant_check",
+          "value": "(\"crypto_wallets\".\"chain\" = 'bitcoin' AND \"crypto_wallets\".\"network\" = 'testnet') = (\"crypto_wallets\".\"network_variant\" IS NOT NULL) AND (\"crypto_wallets\".\"network_variant\" IS NULL OR \"crypto_wallets\".\"network_variant\" IN ('testnet4', 'signet'))"
+        },
+        "crypto_wallets_evm_chain_id_check": {
+          "name": "crypto_wallets_evm_chain_id_check",
+          "value": "(\"crypto_wallets\".\"chain\" = 'ethereum' AND \"crypto_wallets\".\"network\" = 'testnet') = (\"crypto_wallets\".\"evm_chain_id\" IS NOT NULL) AND (\"crypto_wallets\".\"evm_chain_id\" IS NULL OR \"crypto_wallets\".\"evm_chain_id\" > 0)"
         },
         "crypto_wallets_status_check": {
           "name": "crypto_wallets_status_check",
