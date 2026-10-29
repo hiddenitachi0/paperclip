@@ -35,10 +35,32 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { deleteAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
+import { redactHeartbeatRunPatchSecrets, redactKnownLeakedSecretPatternsDeep } from "../redaction.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const execFileAsync = promisify(execFile);
+
+// The ids these tests read back out of workspace_operations.metadata and
+// heartbeat_runs.resultJson are random UUIDs (issue ids from randomUUID(),
+// execution workspace ids from the DB default). Both places pass through the
+// write-time card-number scrub: workspace_operations.metadata always does
+// (redactKnownLeakedSecretPatternsDeep has no id allowlist, DUR-372/DUR-4540),
+// and resultJson does for every path outside its short id allowlist
+// (workspaceValidation.sourceIssueId/executionWorkspaceId are not on it).
+// About 0.2% of random UUIDs contain a Luhn-valid 13-19 digit run, e.g.
+// "b61582c6-6026-4773-9257-134fc06ff908" is stored as
+// "b61582c[REDACTED:card_number]fc06ff908", so comparing those fields to the raw
+// id failed roughly 1 run in 100. Compare them to the id in the exact form the
+// production redaction stores it (identical to the raw id in the common case).
+function storedOperationMetadataId(id: string | null) {
+  return redactKnownLeakedSecretPatternsDeep(id);
+}
+
+function storedWorkspaceValidationId(field: string, id: string | null) {
+  const patch = redactHeartbeatRunPatchSecrets({ resultJson: { workspaceValidation: { [field]: id } } });
+  return (patch.resultJson as { workspaceValidation: Record<string, unknown> }).workspaceValidation[field];
+}
 
 const adapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -363,8 +385,8 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
             branchIncoherenceRepair: true,
             expectedBranchName: recordedBranch,
             actualBranchName: publishBranch,
-            executionWorkspaceId,
-            sourceIssueId: issueId,
+            executionWorkspaceId: storedOperationMetadataId(executionWorkspaceId),
+            sourceIssueId: storedOperationMetadataId(issueId),
           }),
         }),
       ]),
@@ -378,7 +400,7 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     });
     expect(finalizeOps[0]?.metadata).toMatchObject({
       managedGitWorktreeBranch: {
-        executionWorkspaceId,
+        executionWorkspaceId: storedOperationMetadataId(executionWorkspaceId),
         valid: true,
         reasonCode: null,
         expectedBranchName: recordedBranch,
@@ -436,8 +458,8 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     const workspaceValidation = (finishedRun?.resultJson as Record<string, unknown> | null)?.workspaceValidation;
     expect(workspaceValidation).toMatchObject({
       reason: "git_worktree_branch_incoherence",
-      sourceIssueId: issueId,
-      executionWorkspaceId,
+      sourceIssueId: storedWorkspaceValidationId("sourceIssueId", issueId),
+      executionWorkspaceId: storedWorkspaceValidationId("executionWorkspaceId", executionWorkspaceId),
       expectedBranch: recordedBranch,
       actualBranch: publishBranch,
       cleanliness: "clean",
@@ -465,7 +487,7 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     });
     expect(finalizeOps[0]?.metadata).toMatchObject({
       managedGitWorktreeBranch: expect.objectContaining({
-        executionWorkspaceId,
+        executionWorkspaceId: storedOperationMetadataId(executionWorkspaceId),
         valid: false,
         reasonCode: "branch_mismatch",
         expectedBranchName: recordedBranch,
@@ -534,7 +556,7 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     });
     expect(finalizeOps[0]?.metadata).toMatchObject({
       managedGitWorktreeBranch: {
-        executionWorkspaceId,
+        executionWorkspaceId: storedOperationMetadataId(executionWorkspaceId),
         valid: true,
         reasonCode: null,
         expectedBranchName: publishBranch,

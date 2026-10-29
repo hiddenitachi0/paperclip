@@ -26,6 +26,8 @@ export interface TradingRiskGateInput {
   peakEquityNok: number;
   /** cashNok + positionQuantity * quotePriceNok, computed by the caller so this function stays pure. */
   currentEquityNok: number;
+  /** Set when the strategy's entries are halted (daily-loss / drawdown / price-jump trip); blocks buys only. */
+  entriesHaltedReason?: string | null;
 }
 
 export type TradingRiskVerdict =
@@ -57,9 +59,43 @@ export function singleTickPriceJumpPct(closes: number[]): number | null {
   return (Math.abs(last - prev) / prev) * 100;
 }
 
-export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRiskVerdict {
-  const { side, signalPriceNok, quotePriceNok, requestedQuantity, riskConfig, cashNok, positionQuantity, positionCostNok, ordersToday, realizedPnlTodayNok, peakEquityNok, currentEquityNok } =
-    input;
+/** Which of the "stateless" entries-halt trips (daily loss, drawdown) the numbers show right now, or null. Daily loss is checked first, matching the entry gate's reporting order. */
+export function evaluateEntriesHaltTrip(input: {
+  riskConfig: TradingRiskConfig;
+  realizedPnlTodayNok: number;
+  peakEquityNok: number;
+  currentEquityNok: number;
+}): { cause: "daily_loss_limit" | "drawdown_limit"; reason: string } | null {
+  const { riskConfig, realizedPnlTodayNok, peakEquityNok, currentEquityNok } = input;
+  if (realizedPnlTodayNok <= -riskConfig.dailyLossLimitNok) {
+    return { cause: "daily_loss_limit", reason: `Today's loss limit (${riskConfig.dailyLossLimitNok} NOK) has been reached.` };
+  }
+  if (peakEquityNok > 0) {
+    const drawdownPct = ((peakEquityNok - currentEquityNok) / peakEquityNok) * 100;
+    if (drawdownPct >= riskConfig.maxDrawdownPct) {
+      return { cause: "drawdown_limit", reason: `The drawdown limit (${riskConfig.maxDrawdownPct}%) has been reached.` };
+    }
+  }
+  return null;
+}
+
+/**
+ * The entry gate: every check that applies to opening or adding to a
+ * position (a buy) -- price band, daily order count, daily loss, drawdown,
+ * cash, position/exposure caps, approval. Sells never go through here (see
+ * evaluateTradingExitGate): blocking an exit on any of these limits only
+ * strands the position the limit is trying to protect.
+ */
+export function evaluateTradingEntryGate(input: TradingRiskGateInput): TradingRiskVerdict {
+  const { side, signalPriceNok, quotePriceNok, requestedQuantity, riskConfig, cashNok, positionCostNok, ordersToday, realizedPnlTodayNok, peakEquityNok, currentEquityNok, entriesHaltedReason } = input;
+
+  if (side !== "buy") {
+    return { kind: "block", reason: "The entry gate only evaluates buys." };
+  }
+
+  if (entriesHaltedReason) {
+    return { kind: "block", reason: `New buys are halted for this strategy: ${entriesHaltedReason}` };
+  }
 
   if (priceBandBreach(signalPriceNok, quotePriceNok, riskConfig.priceBandPct)) {
     return { kind: "block", reason: `The live price moved more than ${riskConfig.priceBandPct}% from the signal price -- refusing a stale or jumpy quote.` };
@@ -69,45 +105,59 @@ export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRis
     return { kind: "block", reason: `Today's order limit (${riskConfig.maxOrdersPerDay}) is already used up.` };
   }
 
-  if (realizedPnlTodayNok <= -riskConfig.dailyLossLimitNok) {
-    return { kind: "block", reason: `Today's loss limit (${riskConfig.dailyLossLimitNok} NOK) has been reached.` };
-  }
-
-  if (peakEquityNok > 0) {
-    const drawdownPct = ((peakEquityNok - currentEquityNok) / peakEquityNok) * 100;
-    if (drawdownPct >= riskConfig.maxDrawdownPct) {
-      return { kind: "block", reason: `The drawdown limit (${riskConfig.maxDrawdownPct}%) has been reached.` };
-    }
-  }
+  const trip = evaluateEntriesHaltTrip({ riskConfig, realizedPnlTodayNok, peakEquityNok, currentEquityNok });
+  if (trip) return { kind: "block", reason: trip.reason };
 
   const orderValueNok = requestedQuantity * quotePriceNok;
-
-  if (side === "buy") {
-    if (orderValueNok > cashNok) {
-      return { kind: "block", reason: "Not enough paper cash for this order." };
-    }
-    const resultingPositionNok = positionCostNok + orderValueNok;
-    if (resultingPositionNok > riskConfig.maxPositionNok) {
-      return { kind: "block", reason: `This buy would take the position above its ${riskConfig.maxPositionNok} NOK cap.` };
-    }
-    if (resultingPositionNok > riskConfig.maxTotalExposureNok) {
-      return { kind: "block", reason: `This buy would take total exposure above its ${riskConfig.maxTotalExposureNok} NOK cap.` };
-    }
-  } else {
-    if (requestedQuantity > positionQuantity + 1e-9) {
-      return { kind: "block", reason: "Cannot sell more than the strategy currently holds." };
-    }
+  if (orderValueNok > cashNok) {
+    return { kind: "block", reason: "Not enough paper cash for this order." };
+  }
+  const resultingPositionNok = positionCostNok + orderValueNok;
+  if (resultingPositionNok > riskConfig.maxPositionNok) {
+    return { kind: "block", reason: `This buy would take the position above its ${riskConfig.maxPositionNok} NOK cap.` };
+  }
+  if (resultingPositionNok > riskConfig.maxTotalExposureNok) {
+    return { kind: "block", reason: `This buy would take total exposure above its ${riskConfig.maxTotalExposureNok} NOK cap.` };
   }
 
   if (riskConfig.approvalAboveNok === null || orderValueNok >= riskConfig.approvalAboveNok) {
     const reasonForOperator =
       riskConfig.approvalAboveNok === null
-        ? `${side === "buy" ? "Buy" : "Sell"} about ${Math.round(orderValueNok)} kr of the position; this strategy requires approval on every trade.`
-        : `${side === "buy" ? "Buy" : "Sell"} about ${Math.round(orderValueNok)} kr of the position; this is above the ${riskConfig.approvalAboveNok} kr approval threshold.`;
+        ? `Buy about ${Math.round(orderValueNok)} kr of the position; this strategy requires approval on every trade.`
+        : `Buy about ${Math.round(orderValueNok)} kr of the position; this is above the ${riskConfig.approvalAboveNok} kr approval threshold.`;
     return { kind: "needs_approval", reasonForOperator };
   }
 
   return { kind: "allow" };
+}
+
+/**
+ * The exit gate (DUR-5000): a sell only ever reduces a long spot position, so
+ * it refuses only impossible input -- nothing to sell, more than is held, or
+ * no valid quote. It deliberately ignores the price band, daily order count,
+ * daily loss, drawdown and halted-entries state, and never asks for approval
+ * (an unanswered 5-minute card would strand the position).
+ */
+export function evaluateTradingExitGate(input: Pick<TradingRiskGateInput, "requestedQuantity" | "positionQuantity" | "quotePriceNok">): TradingRiskVerdict {
+  const { requestedQuantity, positionQuantity, quotePriceNok } = input;
+  if (!(positionQuantity > 0)) {
+    return { kind: "block", reason: "There is no open position to sell." };
+  }
+  if (!Number.isFinite(quotePriceNok) || quotePriceNok <= 0) {
+    return { kind: "block", reason: "There is no valid price to sell at." };
+  }
+  if (!(requestedQuantity > 0)) {
+    return { kind: "block", reason: "Nothing to sell." };
+  }
+  if (requestedQuantity > positionQuantity + 1e-9) {
+    return { kind: "block", reason: "Cannot sell more than the strategy currently holds." };
+  }
+  return { kind: "allow" };
+}
+
+/** Routes by side: buys through the entry gate, sells through the exit gate. */
+export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRiskVerdict {
+  return input.side === "sell" ? evaluateTradingExitGate(input) : evaluateTradingEntryGate(input);
 }
 
 /** Paper fee: a flat rate on the notional, the same cost a real spot trade would pay (design report section 2: "exchange fees are typically ~0.1-0.5% per side"). */
