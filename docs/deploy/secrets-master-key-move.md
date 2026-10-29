@@ -83,7 +83,7 @@ uses only the first two files and is **not** how prod is deployed; see step 2.)
 
      ```sh
      SRV=/root/paperclip-secrets/server.env
-     [ -f .env ] && [ -f "$SRV" ] || echo "STOP: run this from the repo root, as root"
+     if [ -f .env ] && [ -f "$SRV" ]; then
      for n in BETTER_AUTH_SECRET PAPERCLIP_AGENT_JWT_SECRET DATABASE_URL \
               DATABASE_BYPASS_URL DATABASE_MIGRATION_URL PAPERCLIP_SERVER_ANTHROPIC_API_KEY; do
        s=$(grep -m1 "^$n=" "$SRV"); e=$(grep -m1 "^$n=" .env)
@@ -95,6 +95,7 @@ uses only the first two files and is **not** how prod is deployed; see step 2.)
        else r=ok; fi
        printf '%-40s %s\n' "$n" "$r"
      done
+     else echo "STOP: run this from the repo root, as root; nothing was checked"; fi
      ```
 
      `BETTER_AUTH_SECRET`, `PAPERCLIP_AGENT_JWT_SECRET` and `DATABASE_URL`
