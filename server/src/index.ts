@@ -1210,6 +1210,18 @@ export async function startServer(): Promise<StartedServer> {
       // restart" -- a running strategy must never resume unattended after a
       // deploy or crash, so every strategy still marked "running" is paused
       // here, once, before the tick timer below is ever armed.
+      // DUR-5002: every strategy that predates the versioned rule book gets a
+      // grandfathered legacy version first (idempotent), so the tick has an
+      // active version to read. A failure here only leaves that strategy
+      // without one, and the tick then refuses to trade it.
+      await tradingAgent
+        .convertLegacyStrategies()
+        .then((result) => {
+          if (result.converted > 0 || result.skipped > 0) logger.warn({ ...result }, "startup trading-agent legacy strategy conversion");
+        })
+        .catch((err) => {
+          logger.error({ err }, "startup trading-agent legacy strategy conversion failed");
+        });
       const tradingReconciled = await tradingAgent.reconcileOnBoot();
       if (tradingReconciled.pausedCount > 0) {
         logger.warn({ ...tradingReconciled }, "startup trading-agent reconciliation paused running strategies");

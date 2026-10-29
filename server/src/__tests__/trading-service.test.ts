@@ -16,6 +16,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { approvalService } from "../services/approvals.ts";
 import { tradingService } from "../services/trading.ts";
+import { tradingStrategyVersionService } from "../services/trading-strategy-versions.ts";
 import { fakeTradingMarketData } from "../services/trading-market-data.ts";
 
 /**
@@ -41,6 +42,7 @@ if (!support.supported) {
 }
 
 const RULE: TradingRuleConfig = { type: "sma_crossover", version: 1, fastPeriod: 2, slowPeriod: 3, orderSizeFraction: 0.5 };
+const SMALL_RULE: TradingRuleConfig = { ...RULE, orderSizeFraction: 0.1 };
 
 function riskConfig(overrides: Partial<TradingRiskConfig> = {}): TradingRiskConfig {
   return {
@@ -649,10 +651,10 @@ d("tradingService", () => {
   // ─── DUR-5000: exits are never blocked or stranded ───────────────────────
 
   /** Opens a position with a real buy at `buyAt`, on `timeframe` candles (last bar closing exactly at buyAt), then returns the strategy. */
-  async function openPosition(companyId: string, buyAt: Date, timeframe: TradingTimeframe, risk: Partial<TradingRiskConfig> = {}) {
+  async function openPosition(companyId: string, buyAt: Date, timeframe: TradingTimeframe, risk: Partial<TradingRiskConfig> = {}, rule: TradingRuleConfig = RULE) {
     const buyBars = barsEndingAt([100, 100, 100, 101], new Date(buyAt.getTime() - tradingTimeframeMs(timeframe)), timeframe);
     const buyer = stubbed(buyAt, buyBars, 101);
-    const strategy = await buyer.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(risk) }, { actorType: "user", actorId: "u1" });
+    const strategy = await buyer.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe, ruleConfig: rule, riskConfig: riskConfig(risk) }, { actorType: "user", actorId: "u1" });
     await buyer.setStatus(companyId, strategy.id, "running");
     expect(await buyer.tick(buyAt)).toMatchObject({ filled: 1 });
     return { strategy, buyer };
@@ -665,6 +667,16 @@ d("tradingService", () => {
   }
 
   const TRADE_START = new Date("2026-01-01T00:00:00Z");
+
+  /** The only way to change a running rule: PATCH files a draft + card, then an owner approves the card on the card itself. */
+  async function changeRiskThroughCard(trading: ReturnType<typeof tradingService>, companyId: string, strategyId: string, risk: TradingRiskConfig) {
+    const patched = await trading.updateStrategy(companyId, strategyId, { riskConfig: risk }, { actorType: "user", actorId: "owner-1" });
+    expect(patched.pendingVersion).not.toBeNull();
+    await approvalService(db).approve(patched.pendingVersion!.approvalId, "owner-1", null, {
+      decidedOnApprovalCard: true,
+      tradingStrategyVersion: { activate: (card) => tradingStrategyVersionService(db).activateFromCard(card, "owner-1") },
+    });
+  }
 
   it("sells at the daily-loss limit, and raises an entries-halted alert", async () => {
     const companyId = await seedCompany();
@@ -722,7 +734,7 @@ d("tradingService", () => {
   it("never raises a card for a sell, even with approval required on every trade", async () => {
     const companyId = await seedCompany();
     const { strategy, buyer } = await openPosition(companyId, TRADE_START, "15m");
-    await buyer.updateStrategy(companyId, strategy.id, { riskConfig: riskConfig({ approvalAboveNok: null }) });
+    await changeRiskThroughCard(buyer, companyId, strategy.id, riskConfig({ approvalAboveNok: null }));
     const sellAt = new Date(TRADE_START.getTime() + 15 * 60_000);
     const trading = sellTick(sellAt, "15m", 3);
     expect(await trading.tick(sellAt)).toMatchObject({ checked: 1, filled: 1, approvalRequested: 0 });
@@ -741,13 +753,14 @@ d("tradingService", () => {
   for (const { timeframe, thresholdPct } of JUMP_FRAMES) {
     it(`a ${timeframe} jump over ${thresholdPct}% blocks buys but not sells, and a smaller jump blocks nothing`, async () => {
       const step = tradingTimeframeMs(timeframe);
-      const wide = { maxDrawdownPct: 95, dailyLossLimitNok: 1_000_000 }; // isolate the jump from the loss/drawdown trips
+      // A small position (10% of cash) keeps even a 46% drop well inside the loss and drawdown limits, which the hard ceiling no longer lets a test widen.
+      const wide = {};
       // Buy side: a jump up past the threshold -> refused, strategy still running.
       const jumpUp = thresholdPct + 1;
       const buyAt = new Date(TRADE_START.getTime() + 10 * step);
       const buyCompany = await seedCompany();
       const jumpBuyer = stubbed(buyAt, barsEndingAt([100, 100, 100, 100 + jumpUp], new Date(buyAt.getTime() - step), timeframe), 100 + jumpUp);
-      const buyStrategy = await jumpBuyer.createStrategy(buyCompany, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
+      const buyStrategy = await jumpBuyer.createStrategy(buyCompany, { ...STRATEGY_INPUT, timeframe, ruleConfig: SMALL_RULE, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
       await jumpBuyer.setStatus(buyCompany, buyStrategy.id, "running");
       expect(await jumpBuyer.tick(buyAt)).toMatchObject({ filled: 0, blocked: 1 });
       const haltedRow = await jumpBuyer.requireStrategy(buyCompany, buyStrategy.id);
@@ -757,14 +770,14 @@ d("tradingService", () => {
       const calmCompany = await seedCompany();
       const calmUp = thresholdPct - 1;
       const calmBuyer = stubbed(buyAt, barsEndingAt([100, 100, 100, 100 + calmUp], new Date(buyAt.getTime() - step), timeframe), 100 + calmUp);
-      const calmStrategy = await calmBuyer.createStrategy(calmCompany, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
+      const calmStrategy = await calmBuyer.createStrategy(calmCompany, { ...STRATEGY_INPUT, timeframe, ruleConfig: SMALL_RULE, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
       await calmBuyer.setStatus(calmCompany, calmStrategy.id, "running");
       expect(await calmBuyer.tick(buyAt)).toMatchObject({ filled: 1, blocked: 0 });
       expect((await calmBuyer.requireStrategy(calmCompany, calmStrategy.id)).pauseReason).toBeNull();
 
       // Sell side: open a position, then a jump DOWN past the threshold on a sell signal -> the exit goes through.
       const sellCompany = await seedCompany();
-      const { strategy } = await openPosition(sellCompany, TRADE_START, timeframe, wide);
+      const { strategy } = await openPosition(sellCompany, TRADE_START, timeframe, wide, SMALL_RULE);
       const sellAt = new Date(TRADE_START.getTime() + step);
       const seller = sellTick(sellAt, timeframe, thresholdPct + 1);
       expect(await seller.tick(sellAt)).toMatchObject({ checked: 1, filled: 1, blocked: 0 });
@@ -777,7 +790,7 @@ d("tradingService", () => {
 
   it("a halted-entries strategy refuses later buys but keeps evaluating exits; resume lifts the halt", async () => {
     const companyId = await seedCompany();
-    const { strategy } = await openPosition(companyId, TRADE_START, "15m", { maxDrawdownPct: 95, dailyLossLimitNok: 1_000_000 });
+    const { strategy } = await openPosition(companyId, TRADE_START, "15m", {}, SMALL_RULE);
     // First a jump (with a buy signal on top) trips the halt while the position is open.
     const t1 = new Date(TRADE_START.getTime() + 15 * 60_000);
     const jump = stubbed(t1, barsEndingAt([100, 100, 100, 130], new Date(t1.getTime() - 15 * 60_000)), 130);

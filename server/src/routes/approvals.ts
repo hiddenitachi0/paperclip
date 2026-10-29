@@ -30,7 +30,8 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
-import { isCryptoWalletTxApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import { isCryptoWalletTxApproval, isTradingStrategyVersionApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import { tradingStrategyVersionService } from "../services/trading-strategy-versions.js";
 import {
   approvalService,
   accessService,
@@ -1643,6 +1644,7 @@ export function approvalRoutes(
   const personasSvc = personaService(db);
   const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
   const reportScriptsSvc = reportScriptsService(db);
+  const tradingVersionsSvc = tradingStrategyVersionService(db, { rawDb });
   const reportingSettings = instanceSettingsService(rawDb);
 
   /**
@@ -2094,6 +2096,14 @@ export function approvalRoutes(
         });
         return;
       }
+    }
+    // DUR-5002: a trading rule-book card shows rules that will run (on paper money); only the strategy's own propose action may file it, built from the stored draft.
+    if (isTradingStrategyVersionApproval({ type: approvalInput.type, payload: approvalInput.payload as Record<string, unknown> })) {
+      res.status(422).json({
+        error: "Trading strategy rule-book cards can only be filed by the strategy itself, from a stored draft.",
+        code: "trading_strategy_version_card_filed_elsewhere",
+      });
+      return;
     }
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
@@ -2614,6 +2624,17 @@ export function approvalRoutes(
         assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a crypto wallet payment is sent");
         if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a crypto wallet payment.");
       }
+      // Trading rule books (DUR-5002): approving switches a strategy to exactly the
+      // stored draft. Only a person who is this company's owner or admin may say yes,
+      // signed in to the approvals page itself -- never an agent, an automation, the
+      // command line (which is what the Telegram buttons use) or a thread reply.
+      if (isTradingStrategyVersionApproval(existingForKindCheck)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a trading strategy's rules change");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a trading strategy rule book.");
+        if (req.actor.source !== "session") {
+          throw forbidden("A trading strategy rule book can only be approved on its card in the Paperclip approvals page, not from Telegram, the command line or an automation.");
+        }
+      }
       // One-click host actions: only a person who is this company's owner or
       // admin (or an instance admin) may say yes, and only to a card that is
       // still exactly the shape the server stamped.
@@ -2643,6 +2664,7 @@ export function approvalRoutes(
         // This route ran the per-kind approve checks above (host-action
         // owner/admin + shape, unsupported deploy kinds).
         decidedOnApprovalCard: true,
+        tradingStrategyVersion: { activate: (card) => tradingVersionsSvc.activateFromCard(card, decidedByUserId) },
         securityReviewBypass: securityReviewBypass
           ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
           : undefined,

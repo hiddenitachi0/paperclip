@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { createTradingStrategySchema, setTradingStrategyStatusSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { createTradingStrategyRequestSchema, setTradingStrategyStatusSchema, updateTradingStrategyRequestSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
@@ -23,7 +23,7 @@ import { tradingService, type TradingServiceDeps } from "../services/trading.js"
 export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
-  const trading = tradingService(db, deps);
+  const trading = tradingService(db, { rawDb, ...deps });
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -44,7 +44,7 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.post(
     "/companies/:companyId/trading/strategies",
-    validate(createTradingStrategySchema),
+    validate(createTradingStrategyRequestSchema),
     writeScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -61,12 +61,21 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.patch(
     "/companies/:companyId/trading/strategies/:strategyId",
-    validate(updateTradingStrategySchema),
+    validate(updateTradingStrategyRequestSchema),
     writeScope(),
     async (req, res) => {
-      res.json(await trading.updateStrategy(req.params.companyId as string, req.params.strategyId as string, req.body));
+      // writeScope() enforces board-only (assertCompanyOwnerAdminOrInstanceAdmin), so actor is always a board user here.
+      const actor = { actorType: "user" as const, actorId: req.actor.userId ?? "board" };
+      // A name or check-interval change is saved. A rule or risk change is NOT written: it becomes a stored draft plus an approval card
+      // (`pendingVersion` in the response); the strategy keeps running its active version until an owner or admin approves the card.
+      res.json(await trading.updateStrategy(req.params.companyId as string, req.params.strategyId as string, req.body, actor));
     },
   );
+
+  /** Every stored version of the strategy's rule book, newest first (specs, who proposed and approved them, digests). */
+  router.get("/companies/:companyId/trading/strategies/:strategyId/versions", readScope(), async (req, res) => {
+    res.json(await trading.listVersions(req.params.companyId as string, req.params.strategyId as string));
+  });
 
   /** The kill switch -- the one route the UI's pause/resume button and the Telegram bridge's command both call. */
   router.post(

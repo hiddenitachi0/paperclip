@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { tradingDailyStats, tradingFifoLots, tradingLedgerEntries } from "@paperclipai/db";
+import { tradingDailyStats, tradingFifoLots, tradingLedgerEntries, tradingStrategies } from "@paperclipai/db";
 import type { TradingLedgerEventType } from "@paperclipai/shared";
 
 /**
@@ -69,6 +69,8 @@ export function tradingLedgerService(db: Db) {
     companyId: string;
     strategyId: string;
     orderId?: string | null;
+    /** The strategy version in force. Omitted = the strategy's active version at the moment of writing (DUR-5002). */
+    strategyVersionId?: string | null;
     eventType: TradingLedgerEventType;
     nokValue?: number | null;
     feeNok?: number | null;
@@ -79,6 +81,10 @@ export function tradingLedgerService(db: Db) {
     await db.insert(tradingLedgerEntries).values({
       companyId: params.companyId,
       strategyId: params.strategyId,
+      strategyVersionId:
+        params.strategyVersionId !== undefined
+          ? params.strategyVersionId
+          : sql`(SELECT ${tradingStrategies.activeVersionId} FROM ${tradingStrategies} WHERE ${tradingStrategies.id} = ${params.strategyId})`,
       orderId: params.orderId ?? null,
       eventType: params.eventType,
       nokValue: params.nokValue ?? null,

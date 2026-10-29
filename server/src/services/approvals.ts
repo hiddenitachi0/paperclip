@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts, reportScriptVersions } from "@paperclipai/db";
 import {
+  TRADING_STRATEGY_VERSION_APPROVAL_KIND,
   hireMonthlySpendingLimitCentsFromPayload,
   LANE_A_THINKING_MODES,
   normalizeLaneAProviderRouting,
@@ -24,6 +25,7 @@ import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
 import { isUnsupportedDeployLikeKind } from "./deploy-workspace.js";
+import { closeStrategyVersionDraftForCard, verifyStrategyVersionCard } from "./trading-strategy-versions.js";
 
 const POSTGRES_UUID_TEXT_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 
@@ -104,6 +106,24 @@ export function isCryptoWalletTxApproval(approval: Pick<typeof approvals.$inferS
   return approval.type === "request_board_approval" && approval.payload?.kind === CRYPTO_WALLET_TX_APPROVAL_KIND;
 }
 
+/**
+ * Trading strategy version cards (kind "trading_strategy_version", DUR-5002)
+ * are filed only by tradingStrategyVersionService from the stored draft, never
+ * through create(): a card someone else wrote could describe different rules
+ * than the ones that would be switched on. Approving one activates exactly that
+ * stored version, owner/admin-only, on the card itself, through the activation
+ * hook (routes/approvals.ts); every other approve path is refused here.
+ */
+export function isTradingStrategyVersionApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === TRADING_STRATEGY_VERSION_APPROVAL_KIND;
+}
+
+const TRADING_STRATEGY_VERSION_CARD_FILED_ELSEWHERE =
+  "Trading strategy rule-book cards can only be filed by the strategy itself, from a stored draft. Propose the change on the strategy instead";
+
+const TRADING_STRATEGY_VERSION_DECISION_ELSEWHERE =
+  "A trading strategy rule book can only be approved by a company owner or admin on its own approval card: approving switches the strategy to exactly the stored draft";
+
 const CRYPTO_WALLET_CARD_FILED_ELSEWHERE =
   "Crypto wallet payment cards can only be filed by the wallet itself, when an agent asks to pay. Use the agent's wallet tools instead";
 
@@ -145,6 +165,13 @@ export interface ApprovalDecisionOptions {
    * refused here -- see APPROVAL_CARD_ONLY below.
    */
   decidedOnApprovalCard?: boolean;
+  /**
+   * Activation hook for a trading_strategy_version card (DUR-5002). Passed only
+   * by the approvals route, after its owner/admin + person checks. It runs after
+   * the card is marked approved; if it throws, the card is put back to pending.
+   * Without it the card cannot be approved at all.
+   */
+  tradingStrategyVersion?: { activate: (approval: typeof approvals.$inferSelect) => Promise<unknown> };
 }
 
 /**
@@ -160,7 +187,13 @@ export interface ApprovalDecisionOptions {
 export function isApprovalCardOnlyKind(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
   if (approval.type !== "request_board_approval") return false;
   const kind = approval.payload?.kind;
-  return kind === "operator_action" || kind === "deploy" || kind === CRYPTO_WALLET_TX_APPROVAL_KIND || isUnsupportedDeployLikeKind(kind);
+  return (
+    kind === "operator_action" ||
+    kind === "deploy" ||
+    kind === CRYPTO_WALLET_TX_APPROVAL_KIND ||
+    kind === TRADING_STRATEGY_VERSION_APPROVAL_KIND ||
+    isUnsupportedDeployLikeKind(kind)
+  );
 }
 
 const APPROVAL_CARD_ONLY_DECISION_ELSEWHERE =
@@ -245,6 +278,13 @@ export function approvalService(db: Db) {
       throw unprocessable(APPROVAL_CARD_ONLY_DECISION_ELSEWHERE, {
         kind: (existing.payload as Record<string, unknown> | null)?.kind,
       });
+    }
+    if (targetStatus === "approved" && isTradingStrategyVersionApproval(existing)) {
+      // Needs the activation hook (so nothing is "approved" without switching the version on), and the card must be exactly the stored draft's card.
+      if (!options.tradingStrategyVersion) {
+        throw unprocessable(TRADING_STRATEGY_VERSION_DECISION_ELSEWHERE, { kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND });
+      }
+      await verifyStrategyVersionCard(db, existing);
     }
     if (targetStatus === "approved") {
       await assertSecurityReviewClearedOrBypassed(existing, options);
@@ -574,6 +614,9 @@ export function approvalService(db: Db) {
       if (isCryptoWalletTxApproval({ type: data.type, payload: data.payload })) {
         throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
       }
+      if (isTradingStrategyVersionApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(TRADING_STRATEGY_VERSION_CARD_FILED_ELSEWHERE, { kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND });
+      }
       return db
         .insert(approvals)
         .values({ ...data, companyId })
@@ -589,6 +632,12 @@ export function approvalService(db: Db) {
     ) => {
       const resolution = await resolveApproval(id, "approved", decidedByUserId, decisionNote, options);
       const { approval: updated, applied } = resolution;
+
+      if (applied && isTradingStrategyVersionApproval(updated) && options.tradingStrategyVersion) {
+        // The card is approved and exactly that stored version is switched on in
+        // the same step; if the activation fails the card goes back to pending.
+        await runCrossCompanyHook(resolution, options.tradingStrategyVersion.activate);
+      }
 
       if (applied && isCrossCompanyInstructionApproval(updated) && options.crossCompanyInstruction) {
         // Guarded cross-company channel: approving the card is the ONLY
@@ -862,6 +911,10 @@ export function approvalService(db: Db) {
         await runCrossCompanyHook(resolution, options.crossCompanyInstruction.markRejected);
       }
 
+      if (applied && isTradingStrategyVersionApproval(updated)) {
+        await closeStrategyVersionDraftForCard(db, updated);
+      }
+
       if (applied && updated.type === "hire_agent") {
         const payload = updated.payload as Record<string, unknown>;
         const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
@@ -921,6 +974,9 @@ export function approvalService(db: Db) {
       }
       if (isCryptoWalletTxApproval(existing) || (payload && isCryptoWalletTxApproval({ type: existing.type, payload }))) {
         throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
+      }
+      if (isTradingStrategyVersionApproval(existing) || (payload && isTradingStrategyVersionApproval({ type: existing.type, payload }))) {
+        throw unprocessable(TRADING_STRATEGY_VERSION_CARD_FILED_ELSEWHERE, { kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND });
       }
 
       const now = new Date();

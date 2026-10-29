@@ -440,6 +440,18 @@ export function smaCrossoverConfigFromSpec(spec: StrategyEngineSpec): SmaCrossov
   return { type: "sma_crossover", version: 1, fastPeriod: fast.period, slowPeriod: slow.period, orderSizeFraction: spec.sizing.fraction };
 }
 
+/**
+ * What rule_config / risk_config must hold for a given active version: the
+ * legacy sma_crossover@1 config for a converted SMA rule, otherwise a pointer
+ * to the version; and the entry-gate limits with neverDo applied.
+ */
+export function projectStrategyCache(spec: StrategyEngineSpec, specDigest: string, versionNo: number): { ruleConfig: TradingStoredRuleConfig; riskConfig: TradingRiskConfig } {
+  return {
+    ruleConfig: smaCrossoverConfigFromSpec(spec) ?? { type: "strategy_spec", version: 2, specDigest, versionNo },
+    riskConfig: effectiveRiskConfig(spec),
+  };
+}
+
 // ─── Entry quantity ────────────────────────────────────────────────────────
 
 /** Order size for an entry, in units of the asset. Pure; the entry gate still decides whether it may go ahead. */
