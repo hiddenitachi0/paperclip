@@ -333,9 +333,15 @@ d("crypto wallets for agents", () => {
     return { companyId, agentId };
   }
 
+  // The limits new test wallets used to start with (a person was asked only
+  // above approvalAbove). Tests of the send path itself keep using them; the
+  // new ask-every-time default has its own tests.
+  const LEGACY_SOLANA_LIMITS = { perTransaction: "0.2", daily: "0.4", total: "2", approvalAbove: "0.08" };
+  const LEGACY_HL_LIMITS = { perTransaction: "25", daily: "50", total: "200", approvalAbove: "10" };
+
   async function makeSolanaWallet(companyId: string, agentId: string, extra: Record<string, unknown> = {}) {
     const owner = boardApp(companyId, "owner");
-    const res = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Purchases", mode: "generate", ...extra });
+    const res = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Purchases", mode: "generate", limits: LEGACY_SOLANA_LIMITS, ...extra });
     expect(res.status).toBe(201);
     return res.body as { id: string; address: string };
   }
@@ -503,7 +509,7 @@ d("crypto wallets for agents", () => {
     responses.length = 0;
     logLines.length = 0;
 
-    const created = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 });
+    const created = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58, limits: LEGACY_SOLANA_LIMITS });
     expect(created.status).toBe(201);
     expect(created.body.address).toBe(kp.address);
     expect(created.body.keyOrigin).toBe("imported");
@@ -650,6 +656,43 @@ d("crypto wallets for agents", () => {
     expect((await boardApp(companyId, "owner").put(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`, { perTransactionUsd: 5000, dailyUsd: 5000, totalUsd: 5000, approvalAboveUsd: null })).status).toBe(400);
   });
 
+  it("asks a person about every agent send from a new test wallet, with a plain card, while owner sends and explicit limits are unchanged", async () => {
+    const { companyId, agentId } = await seed();
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Fresh", mode: "generate" });
+    expect(created.status).toBe(201);
+    expect(created.body.limits.approvalAbove).toBeNull();
+    const wallet = created.body as { id: string; address: string };
+    solState.balances.set(wallet.address, 5_000_000_000);
+    const to = await allow(companyId, wallet.id);
+    const svc = cryptoWalletService(db, db, deps());
+
+    // Even a tiny agent send waits for a card, and sends only after approval.
+    const small = (await agentApp(companyId, agentId).post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.001", purpose: "Tiny test buy" })).body;
+    expect(small.status).toBe("pending_approval");
+    expect(solState.sent).toHaveLength(0);
+    const [card] = await db.select().from(approvals).where(eq(approvals.id, small.approvalId));
+    expect(card!.status).toBe("pending");
+    const text = String((card!.payload as Record<string, unknown>).summary);
+    expect(text).toContain("Buyer agent wants to send");
+    expect(text).toContain("0.001");
+    expect(text).toContain("Supplier");
+    expect(text).toContain(to);
+    expect(text).toContain("Solana test network (devnet)");
+    expect(text).toContain("Tiny test buy");
+    expect(text).toContain("Test coins: no real value.");
+    await db.update(approvals).set({ status: "approved", decidedByUserId: "owner-user" }).where(eq(approvals.id, small.approvalId));
+    await svc.tick(now);
+    expect(solState.sent).toHaveLength(1);
+
+    // Owner sends stay card-free.
+    const ownerSend = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/send`, { to, amount: "0.01", purpose: "Owner top-up" });
+    expect(ownerSend.body.status).toBe("submitted");
+
+    // A wallet created with explicit limits keeps them.
+    const explicit = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Explicit", mode: "generate", limits: LEGACY_SOLANA_LIMITS });
+    expect(explicit.body.limits.approvalAbove).toBe("0.08");
+  });
+
   it("sends an approved card on the next tick, and never sends a turned-down or expired one", async () => {
     const { companyId, agentId } = await seed();
     const wallet = await makeSolanaWallet(companyId, agentId);
@@ -675,9 +718,18 @@ d("crypto wallets for agents", () => {
     now = new Date(now.getTime() + 61 * 60_000);
     await svc.tick(now);
     expect((await statusOf(c.id)).status).toBe("expired_approval");
+    // The expired card is closed too: nothing waits in "Needs you", and approving it later is refused.
+    const cardOf = async (id: string) => (await db.select().from(approvals).where(eq(approvals.id, id)))[0]!;
+    expect((await cardOf(c.approvalId)).status).toBe("cancelled");
+    await expect(approvalService(db).approve(c.approvalId, "owner-user", null, { decidedOnApprovalCard: true })).rejects.toThrow(/Only pending/);
     await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, c.approvalId));
     await svc.tick(now);
     expect((await statusOf(c.id)).status).toBe("expired_approval");
+    // Decided cards stay as decided, and no card for this wallet is left pending.
+    expect((await cardOf(a.approvalId)).status).toBe("approved");
+    expect((await cardOf(b.approvalId)).status).toBe("rejected");
+    const stillPending = await db.select().from(approvals).where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending")));
+    expect(stillPending).toHaveLength(0);
     // The sent one may be re-sent while unconfirmed, but only ever as the same signed transaction.
     expect(new Set(solState.sent.map((t) => t.raw)).size).toBe(1);
 
@@ -790,7 +842,7 @@ d("crypto wallets for agents", () => {
 
   it("caps Hyperliquid leverage at 1x by default and never lets a limit block closing a position", async () => {
     const { companyId, agentId } = await seed();
-    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate" });
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate", limits: LEGACY_HL_LIMITS });
     expect(created.status).toBe(201);
     expect(created.body.maxLeverage).toBe(1);
     const walletId = created.body.id as string;
@@ -1035,7 +1087,7 @@ d("crypto wallets for agents", () => {
 
   it("never re-sends a Hyperliquid order with an unclear answer; it only looks it up until it is found or can no longer be accepted", async () => {
     const { companyId, agentId } = await seed();
-    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate" });
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate", limits: LEGACY_HL_LIMITS });
     const walletId = created.body.id as string;
     const agent = agentApp(companyId, agentId);
     const svc = cryptoWalletService(db, db, deps());
