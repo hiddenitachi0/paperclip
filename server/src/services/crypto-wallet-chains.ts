@@ -10,6 +10,7 @@ import {
   type CryptoNetwork,
 } from "@paperclipai/shared";
 import type { OutboundFetch } from "./safe-outbound-fetch.js";
+import { assertCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
   base58Decode,
   base58Encode,
@@ -55,6 +56,28 @@ export class CryptoChainError extends Error {
     this.name = "CryptoChainError";
     this.code = code;
   }
+}
+
+/**
+ * Server-wide real-money lock (PAPERCLIP_CRYPTO_REAL_MONEY), enforced where
+ * signatures are made so no route, agent tool or future caller can sign for a
+ * main network while it is forbidden. Every signTransfer/signOrder checks it
+ * first, before a key is touched; the Hyperliquid digests check it again
+ * below, so even a new action type built on them cannot sign for Mainnet.
+ * It throws a 403 with a plain sentence.
+ */
+function assertMainnetSigningAllowed(network: CryptoNetwork): void {
+  if (network === "mainnet") assertCryptoRealMoneyAllowed();
+}
+
+/**
+ * Hyperliquid marks the network inside what is signed: L1 actions carry
+ * source 'a' for Mainnet ('b' for Testnet), and user-signed actions
+ * (withdraw3, usdSend, ...) carry hyperliquidChain 'Mainnet'.
+ */
+function assertHyperliquidMainnetDigestAllowed(domainName: string, primaryType: string, message: Record<string, string | bigint | Uint8Array>): void {
+  if (domainName === "Exchange" && primaryType === "Agent" && message.source === "a") assertCryptoRealMoneyAllowed();
+  if (domainName === "HyperliquidSignTransaction" && message.hyperliquidChain === "Mainnet") assertCryptoRealMoneyAllowed();
 }
 
 export interface ChainContext {
@@ -437,6 +460,7 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
       return fee;
     },
     async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
+      assertMainnetSigningAllowed(ctx.network);
       const libs = await loadLibs();
       const rate = await feeRate(ctx);
       if (rate > BTC_MAX_FEE_RATE) {
@@ -626,6 +650,7 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
       return (await feeParams(ctx, from, to, amount)).feeUpperBound;
     },
     async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
+      assertMainnetSigningAllowed(ctx.network);
       const libs = await loadLibs();
       await assertChainId(ctx);
       const nonce = hexQuantity(await jsonRpc(ctx, "eth_getTransactionCount", [from, "pending"], what), what);
@@ -837,6 +862,7 @@ export function solanaAdapter(): CryptoChainAdapter {
       return SOLANA_FEE_LAMPORTS;
     },
     async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
+      assertMainnetSigningAllowed(ctx.network);
       if (SOLANA_FEE_LAMPORTS > maxFee) {
         throw new CryptoChainError("fee_over_budget", "This payment did not reserve enough for the Solana network fee.");
       }
@@ -961,6 +987,7 @@ export function eip712Digest(
   fields: Eip712Field[],
   message: Record<string, string | bigint | Uint8Array>,
 ): Uint8Array {
+  assertHyperliquidMainnetDigestAllowed(domain.name, primaryType, message);
   const domainSeparator = eip712Encode(libs, "EIP712Domain", EIP712_DOMAIN_FIELDS, domain);
   const structHash = eip712Encode(libs, primaryType, fields, message);
   return libs.keccak256(concatBytes(Uint8Array.of(0x19, 0x01), domainSeparator, structHash));
@@ -974,6 +1001,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /** Hyperliquid's "L1 action" signature: msgpack(action) + nonce + no-vault byte, signed as a phantom agent. */
 export function hyperliquidL1ActionDigest(libs: CryptoLibs, action: MsgpackValue, nonce: bigint, network: CryptoNetwork): Uint8Array {
+  assertMainnetSigningAllowed(network);
   const connectionId = libs.keccak256(concatBytes(msgpackEncode(action), bigintToFixedBytes(nonce, 8), Uint8Array.of(0)));
   return eip712Digest(
     libs,
@@ -1073,6 +1101,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
   }
 
   async function signL1(ctx: ChainContext, privateKey: string, action: MsgpackValue): Promise<{ body: string; nonce: number }> {
+    assertMainnetSigningAllowed(ctx.network);
     const libs = await loadLibs();
     const nonce = nextNonce();
     const digest = hyperliquidL1ActionDigest(libs, action, BigInt(nonce), ctx.network);
@@ -1098,6 +1127,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       return HYPERLIQUID_WITHDRAW_FEE;
     },
     async signTransfer(ctx, { privateKey, to, amount, maxFee }) {
+      assertMainnetSigningAllowed(ctx.network);
       if (HYPERLIQUID_WITHDRAW_FEE > maxFee) {
         throw new CryptoChainError("fee_over_budget", "This withdrawal did not reserve enough for Hyperliquid's 1 USDC fee.");
       }
@@ -1177,6 +1207,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       };
     },
     async signOrder(ctx, input) {
+      assertMainnetSigningAllowed(ctx.network);
       const asset = await assetIndex(ctx, input.coin);
       const sizeDecimals = input.size.includes(".") ? input.size.split(".")[1]!.length : 0;
       if (sizeDecimals > asset.szDecimals) {

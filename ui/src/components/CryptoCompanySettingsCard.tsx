@@ -81,6 +81,12 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
         </p>
       </div>
 
+      {settings.realMoneyLocked ? (
+        <div className="space-y-1" data-testid="crypto-real-money-locked">
+          <p className="text-sm font-medium">Real money</p>
+          <p className="text-sm text-muted-foreground">Real money is switched off on this server (administrator setting)</p>
+        </div>
+      ) : (
       <div className="space-y-1">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -105,6 +111,7 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
           <p className="text-xs text-muted-foreground">Only the company's owner can turn real money on.</p>
         ) : null}
       </div>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>

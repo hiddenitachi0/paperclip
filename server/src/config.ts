@@ -2,8 +2,6 @@ import { readConfigFile } from "./config-file.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { parse as parseDotenv } from "dotenv";
-import { readFileSync } from "node:fs";
 import { resolvePaperclipEnvPath } from "./paths.js";
 import {
   DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS,
@@ -13,7 +11,8 @@ import {
 } from "./services/heartbeat-timer-jitter.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import { readNonBlankEnvValue } from "./env-values.js";
-import { adoptServerSecretsFromEnvFile, readServerSecret } from "./server-secrets.js";
+import { readServerSecret } from "./server-secrets.js";
+import { loadEnvFileIntoProcessEnv } from "./env-file-loader.js";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
@@ -38,26 +37,6 @@ import {
   resolveDefaultStorageDir,
   resolveHomeAwarePath,
 } from "./home-paths.js";
-
-/**
- * Load a .env file into process.env without overriding what is already set
- * (dotenv's `override: false`). DUR-3994 Stage 1: the server's own key names
- * never go into process.env from here -- agents would inherit them, and an
- * agent can write these files, so a key there could be planted for the next
- * restart. See adoptServerSecretsFromEnvFile for what happens to them.
- */
-function loadEnvFileIntoProcessEnv(path: string, label: string): void {
-  let entries: Record<string, string>;
-  try {
-    entries = parseDotenv(readFileSync(path));
-  } catch {
-    return;
-  }
-  const passThrough = adoptServerSecretsFromEnvFile(entries, label);
-  for (const [name, value] of Object.entries(passThrough)) {
-    if (process.env[name] === undefined) process.env[name] = value;
-  }
-}
 
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
@@ -119,6 +98,9 @@ export interface Config {
   heartbeatTimerJitterMaxMs: number;
   // DUR-62: the weekly check-up. Off unless PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true.
   weeklyCheckupEnabled: boolean;
+  // DUR-4304: board two-factor login. Off unless PAPERCLIP_TWO_FACTOR_ENABLED=true;
+  // while off every /api/auth/2fa route is a 404 and sign-in is unchanged.
+  twoFactorEnabled: boolean;
   // Compute and log findings, but never write the report.
   weeklyCheckupDryRun: boolean;
   weeklyCheckupIntervalDays: number;
@@ -516,6 +498,7 @@ export function loadConfig(): Config {
     // on per deployment (and optionally per company) once he has read a dry
     // run; see services/organization-checkup.ts for what it reports.
     weeklyCheckupEnabled: process.env.PAPERCLIP_WEEKLY_CHECKUP_ENABLED === "true",
+    twoFactorEnabled: process.env.PAPERCLIP_TWO_FACTOR_ENABLED === "true",
     weeklyCheckupDryRun: process.env.PAPERCLIP_WEEKLY_CHECKUP_DRY_RUN === "true",
     weeklyCheckupIntervalDays: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_INTERVAL_DAYS) || 7),
     weeklyCheckupTickMinutes: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_TICK_MINUTES) || 60),

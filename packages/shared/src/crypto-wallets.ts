@@ -409,6 +409,8 @@ export interface CompanyCryptoSettings {
   companyId: string;
   mainnetEnabled: boolean;
   mainnetEnabledAt: string | null;
+  /** True while the server's administrator has real money locked off (PAPERCLIP_CRYPTO_REAL_MONEY is not 'allowed'). mainnetEnabled is then ignored, not changed. */
+  realMoneyLocked: boolean;
   allWalletsFrozen: boolean;
   frozenReason: string | null;
   /** Only the endpoints the company changed; anything missing uses DEFAULT_CRYPTO_RPC_ENDPOINTS. */

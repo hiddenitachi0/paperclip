@@ -7,6 +7,7 @@ import {
   TRADING_MARKET_SYMBOLS,
   TRADING_ASSETS,
   ccxtSymbolFor,
+  TRADING_MODES,
   createTradingStrategySchema,
   dropFormingCandles,
   evaluateSmaCrossover,
@@ -19,6 +20,12 @@ import {
   simpleMovingAverage,
   tradingRiskConfigSchema,
 } from "./trading.js";
+
+describe("TRADING_MODES", () => {
+  it("stays paper-only: no strategy can run in a real-money mode", () => {
+    expect([...TRADING_MODES]).toEqual(["paper"]);
+  });
+});
 
 describe("TRADING_HARD_CEILING", () => {
   // Pinned on purpose: this snapshot is the "protected config" guard from

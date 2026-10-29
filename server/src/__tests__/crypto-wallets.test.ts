@@ -14,6 +14,7 @@ import {
   companySecrets,
   createDb,
   cryptoWallets,
+  companyCryptoSettings,
   cryptoWalletTransactions,
   tradingLedgerEntries,
 } from "@paperclipai/db";
@@ -214,6 +215,7 @@ d("crypto wallets for agents", () => {
   let secretService!: typeof import("../services/secrets.js").secretService;
   let approvalService!: typeof import("../services/approvals.js").approvalService;
   const previousKeyFile = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+  const previousRealMoney = process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
   const tmpDir = path.join(os.tmpdir(), `paperclip-crypto-wallets-${randomUUID()}`);
 
   let solState: FakeSolanaState;
@@ -227,6 +229,9 @@ d("crypto wallets for agents", () => {
 
   beforeAll(async () => {
     mkdirSync(tmpDir, { recursive: true });
+    // Most of this suite is about the per-company real-money switch, so the server-wide lock is open for it;
+    // the lock's own test below closes it again.
+    process.env.PAPERCLIP_CRYPTO_REAL_MONEY = "allowed";
     process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = path.join(tmpDir, "master.key");
     const started = await startEmbeddedPostgresTestDatabase("crypto-wallets");
     stopDb = started.cleanup;
@@ -248,6 +253,8 @@ d("crypto wallets for agents", () => {
     vi.restoreAllMocks();
     await stopDb?.();
     rmSync(tmpDir, { recursive: true, force: true });
+    if (previousRealMoney === undefined) delete process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
+    else process.env.PAPERCLIP_CRYPTO_REAL_MONEY = previousRealMoney;
     if (previousKeyFile === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
     else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKeyFile;
   });
@@ -381,6 +388,109 @@ d("crypto wallets for agents", () => {
     expect(tx.body.status).toBe("blocked");
     expect(tx.body.blockReason).toMatch(/Real money is switched off/);
     expect(solState.sent).toHaveLength(0);
+  });
+
+  // ─── Server-wide real-money lock ───────────────────────────────────────
+
+  it("refuses everything real-money while PAPERCLIP_CRYPTO_REAL_MONEY is not 'allowed', without writing any wallet or settings state", async () => {
+    // Set up a company that already has real money on and a funded main-network wallet, while the lock is open.
+    const { companyId, agentId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    const agent = agentApp(companyId, agentId);
+    expect((await owner.patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" })).status).toBe(200);
+    const sol = await makeSolanaWallet(companyId, agentId, { network: "mainnet" });
+    const hlWallet = (await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", network: "mainnet", label: "Trader", mode: "generate" })).body as { id: string };
+    solState.genesis = MAINNET_GENESIS;
+    solState.balances.set(sol.address, 5_000_000_000);
+    const to = await allow(companyId, sol.id, randomSolAddress(), "owner");
+    const walletRowsBefore = await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
+    const [settingsBefore] = await db.select().from(companyCryptoSettings).where(eq(companyCryptoSettings.companyId, companyId));
+    const txCountBefore = (await db.select({ id: cryptoWalletTransactions.id }).from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.companyId, companyId))).length;
+
+    // A second company with no settings of its own, to try to switch real money on.
+    const other = await seed();
+
+    const lockMessage = /Real money is switched off on this server \(administrator setting\)/;
+    delete process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
+    try {
+      const otherOwner = boardApp(other.companyId, "owner");
+
+      // Creating or importing a main-network wallet.
+      const created = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network: "mainnet", label: "More", mode: "generate" });
+      expect(created.status).toBe(403);
+      expect(created.body.error).toMatch(lockMessage);
+      const imported = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network: "mainnet", label: "More", mode: "import", privateKey: solanaKeypair().secretBase58 });
+      expect(imported.status).toBe(403);
+      expect(imported.body.error).toMatch(lockMessage);
+
+      // Turning the company setting on, even as the owner who types the phrase.
+      const turnOn = await otherOwner.patch(`/api/companies/${other.companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" });
+      expect(turnOn.status).toBe(403);
+      expect(turnOn.body.error).toMatch(lockMessage);
+      expect((await otherOwner.get(`/api/companies/${other.companyId}/crypto/settings`)).body).toMatchObject({ mainnetEnabled: false, realMoneyLocked: true });
+      expect(await db.select().from(companyCryptoSettings).where(eq(companyCryptoSettings.companyId, other.companyId))).toHaveLength(0);
+
+      // The stored real-money choice is reported as it was, with the lock on top; turning it off still works.
+      expect((await owner.get(`/api/companies/${companyId}/crypto/settings`)).body).toMatchObject({ mainnetEnabled: true, realMoneyLocked: true });
+
+      // Sending from the existing main-network wallet: agent, owner and a dry-run quote.
+      const send = await agent.post(`/api/agent-wallets/${sol.id}/send`, { to, amount: "0.01", purpose: "Pay a supplier" });
+      expect(send.status).toBe(403);
+      expect(send.body.error).toMatch(lockMessage);
+      const ownerSend = await owner.post(`/api/companies/${companyId}/crypto/wallets/${sol.id}/send`, { to, amount: "0.01", purpose: "Pay a supplier" });
+      expect(ownerSend.status).toBe(403);
+      expect(ownerSend.body.error).toMatch(lockMessage);
+      const quote = await agent.post(`/api/agent-wallets/${sol.id}/quote`, { to, amount: "0.01" });
+      expect(quote.body.outcome).toMatch(/refused.*switched off on this server/i);
+
+      // A Hyperliquid order from a main-network wallet.
+      const order = await agent.post(`/api/agent-wallets/${hlWallet.id}/hyperliquid-order`, { coin: "BTC", side: "buy", size: "0.05", limitPrice: "100", purpose: "Trade" });
+      expect(order.status).toBe(403);
+      expect(order.body.error).toMatch(lockMessage);
+      expect(hl.orders).toHaveLength(0);
+
+      // Flipping the setting straight in the database changes nothing about signing.
+      await db.insert(companyCryptoSettings).values({ companyId: other.companyId, mainnetEnabled: true }).onConflictDoUpdate({ target: companyCryptoSettings.companyId, set: { mainnetEnabled: true } });
+      expect((await boardApp(other.companyId, "owner").post(`/api/companies/${other.companyId}/crypto/wallets`, { agentId: other.agentId, chain: "solana", network: "mainnet", label: "x", mode: "generate" })).status).toBe(403);
+      const direct = await agent.post(`/api/agent-wallets/${sol.id}/send`, { to, amount: "0.01", purpose: "Direct flip" });
+      expect(direct.status).toBe(403);
+
+      // The network was never asked to send anything, and nothing was recorded.
+      expect(solState.calls).not.toContain("sendTransaction");
+      expect(solState.sent).toHaveLength(0);
+      expect((await db.select({ id: cryptoWalletTransactions.id }).from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.companyId, companyId))).length).toBe(txCountBefore);
+
+      // Testnet flows are unchanged.
+      const testnet = await makeSolanaWallet(companyId, agentId);
+      solState.genesis = DEVNET_GENESIS;
+      solState.balances.set(testnet.address, 5_000_000_000);
+      const testTo = await allow(companyId, testnet.id);
+      const testSend = await agent.post(`/api/agent-wallets/${testnet.id}/send`, { to: testTo, amount: "0.01", purpose: "Test coins" });
+      expect(testSend.status).toBe(202);
+      expect(testSend.body.status).toBe("submitted");
+    } finally {
+      process.env.PAPERCLIP_CRYPTO_REAL_MONEY = "allowed";
+    }
+
+    // Nothing persisted: no wallet was frozen or changed and the company setting is exactly as before.
+    const walletRowsAfter = await db.select().from(cryptoWallets).where(and(eq(cryptoWallets.companyId, companyId), inArray(cryptoWallets.id, [sol.id, hlWallet.id])));
+    for (const before of walletRowsBefore) {
+      const after = walletRowsAfter.find((w) => w.id === before.id);
+      expect(after?.status).toBe(before.status);
+      expect(after?.frozenReason).toBe(before.frozenReason);
+      expect(after?.frozenAt).toEqual(before.frozenAt);
+      expect(after?.status).not.toBe("frozen");
+    }
+    const [settingsAfter] = await db.select().from(companyCryptoSettings).where(eq(companyCryptoSettings.companyId, companyId));
+    expect(settingsAfter).toEqual(settingsBefore);
+
+    // Lifting the lock needs no clean-up: the same wallet sends again.
+    solState.genesis = MAINNET_GENESIS;
+    const sentBefore = solState.sent.length;
+    const resumed = await agent.post(`/api/agent-wallets/${sol.id}/send`, { to, amount: "0.01", purpose: "Back on" });
+    expect(resumed.status).toBe(202);
+    expect(resumed.body.status).toBe("submitted");
+    expect(solState.sent).toHaveLength(sentBefore + 1);
   });
 
   // ─── Keys never leave the server ───────────────────────────────────────

@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
+import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
 import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
@@ -116,6 +117,7 @@ import {
   recordUserUpdatedViaApp,
   resolveAdminAuthSigningSecret,
 } from "./services/admin-auth-audit.js";
+import { twoFactorGate } from "./auth/two-factor-gate.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
@@ -767,8 +769,13 @@ export async function startServer(): Promise<StartedServer> {
       },
     });
     betterAuthHandler = createBetterAuthHandler(auth);
-    resolveSession = (req) => resolveBetterAuthSession(auth, req);
-    resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+    // DUR-4304: with two-factor login on, a session that has not passed its
+    // second factor resolves to "no session" everywhere (HTTP and sockets).
+    const gate = twoFactorGate(db as any, { enabled: config.twoFactorEnabled });
+    resolveSession = gate.wrapRequestResolver((req) => resolveBetterAuthSession(auth, req));
+    resolveSessionFromHeaders = gate.wrapHeadersResolver((headers) =>
+      resolveBetterAuthSessionFromHeaders(auth, headers),
+    );
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
     authReady = true;
   }
@@ -889,6 +896,7 @@ export async function startServer(): Promise<StartedServer> {
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
+    twoFactorEnabled: config.deploymentMode === "authenticated" && config.twoFactorEnabled,
     pluginWorkerManager,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
@@ -2363,6 +2371,7 @@ export async function startServer(): Promise<StartedServer> {
     server.listen(listenPort, config.host, () => {
       server.off("error", onError);
       logger.info(`Server listening on ${config.host}:${listenPort}`);
+      logger.warn(describeCryptoRealMoneyLockForBoot());
       if (process.env.PAPERCLIP_OPEN_ON_LISTEN === "true") {
         const openHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
         const url = `http://${openHost}:${listenPort}`;
