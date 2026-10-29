@@ -146,6 +146,18 @@ describe("redactSensitive", () => {
     expect(out.bot_token).toBe("[REDACTED]");
     expect(out.name).toBe("CEO");
   });
+  // DUR-4304: the board two-factor routes' code and sealed enrolment state.
+  it("redacts the two-factor `totpCode` and `enrollmentToken` fields", () => {
+    const out = redactSensitive({
+      totpCode: "123456",
+      enrollmentToken: "tfe1.CANARY",
+      isRecoveryCode: false,
+    }) as Record<string, unknown>;
+
+    expect(JSON.stringify(out)).not.toContain("123456");
+    expect(JSON.stringify(out)).not.toContain("CANARY");
+    expect(out.isRecoveryCode).toBe(false);
+  });
   // DUR-3997: the data-source form's credential fields, in every spelling a
   // client might send, must never reach the log on a failed save.
   it("redacts every data-source credential field and the credential object itself", () => {
