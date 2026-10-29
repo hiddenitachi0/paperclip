@@ -1828,6 +1828,13 @@
       "when": 1793221026301,
       "tag": "0261_trading_candle_timeframe",
       "breakpoints": true
+    },
+    {
+      "idx": 262,
+      "version": "7",
+      "when": 1793297041320,
+      "tag": "0262_trading_strategy_versions",
+      "breakpoints": true
     }
   ]
 }

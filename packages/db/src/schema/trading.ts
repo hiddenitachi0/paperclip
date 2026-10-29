@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { check, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, doublePrecision, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { approvals } from "./approvals.js";
 import { companies } from "./companies.js";
 import { cryptoWallets, cryptoWalletTransactions } from "./crypto_wallets.js";
 
@@ -54,6 +55,70 @@ import { cryptoWallets, cryptoWalletTransactions } from "./crypto_wallets.js";
  * this migration references any of the five tables, so a rollback loses only
  * this feature's own strategies, orders and ledger history.
  */
+/**
+ * DUR-5002 (migration 0262): the versioned rule book. One immutable row per
+ * proposed version of a strategy's StrategySpec v2 (see
+ * packages/shared/src/trading-strategy-spec.ts): draft -> approved ->
+ * superseded. The tick reads only the version `trading_strategies.
+ * active_version_id` points at; `rule_config` / `risk_config` on the strategy
+ * row are a cache of it, written only in the activation transaction (a trigger
+ * refuses any other write).
+ *
+ * `spec` is the engine part of the document; `guidelines` are stored beside it
+ * and never reach the engine. `spec_digest` is the SHA-256 of the canonical
+ * form of both, and the approval card carries it. A trigger refuses any change
+ * to the content columns (spec, guidelines, digest, version, owner, proposer)
+ * once the row exists, and only allows the status moves draft -> approved,
+ * draft -> superseded and approved -> superseded. `grandfathered` marks the
+ * legacy version made from a pre-existing sma_crossover@1 strategy: it may be
+ * approved without a person, and passes the start gate unchanged.
+ *
+ * Rollback: see migration 0262 (drop the triggers, the three added columns,
+ * then this table). Rows in trading_orders / trading_ledger_entries keep their
+ * strategy_version_id only until then.
+ */
+export const tradingStrategyVersions = pgTable(
+  "trading_strategy_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    strategyId: uuid("strategy_id").notNull().references((): AnyPgColumn => tradingStrategies.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    guidelines: text("guidelines").notNull().default(""),
+    status: text("status").notNull().default("draft"),
+    proposedByType: text("proposed_by_type").notNull(),
+    proposedById: text("proposed_by_id"),
+    approvedByUserId: text("approved_by_user_id"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    /** The approval card (approvals row) that shows this version; set when the card is filed. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    specDigest: text("spec_digest").notNull(),
+    grandfathered: boolean("grandfathered").notNull().default(false),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    strategyVersionUq: uniqueIndex("trading_strategy_versions_strategy_version_uq").on(table.strategyId, table.version),
+    // The target of trading_strategies' composite foreign key: an active version must belong to the same strategy and company.
+    ownerUq: uniqueIndex("trading_strategy_versions_owner_uq").on(table.id, table.strategyId, table.companyId),
+    oneDraftUq: uniqueIndex("trading_strategy_versions_one_draft_uq").on(table.strategyId).where(sql`${table.status} = 'draft'`),
+    approvalUq: uniqueIndex("trading_strategy_versions_approval_uq").on(table.approvalId).where(sql`${table.approvalId} IS NOT NULL`),
+    companyIdx: index("trading_strategy_versions_company_idx").on(table.companyId, table.strategyId),
+    statusCheck: check("trading_strategy_versions_status_check", sql`${table.status} IN ('draft', 'approved', 'superseded')`),
+    proposerTypeCheck: check("trading_strategy_versions_proposer_type_check", sql`${table.proposedByType} IN ('user', 'agent', 'system')`),
+    proposerIdCheck: check("trading_strategy_versions_proposer_id_check", sql`${table.proposedByType} = 'system' OR ${table.proposedById} IS NOT NULL`),
+    versionCheck: check("trading_strategy_versions_version_check", sql`${table.version} > 0`),
+    digestCheck: check("trading_strategy_versions_digest_check", sql`${table.specDigest} ~ '^[0-9a-f]{64}$'`),
+    // An approved version names who approved it, unless it is the automatic legacy conversion.
+    approvalPairCheck: check(
+      "trading_strategy_versions_approval_pair_check",
+      sql`${table.status} <> 'approved' OR ${table.grandfathered} OR (${table.approvedByUserId} IS NOT NULL AND ${table.approvedAt} IS NOT NULL)`,
+    ),
+  }),
+);
+
 export const tradingStrategies = pgTable(
   "trading_strategies",
   {
@@ -84,8 +149,15 @@ export const tradingStrategies = pgTable(
     consecutiveErrors: integer("consecutive_errors").notNull().default(0),
     lastTickAt: timestamp("last_tick_at", { withTimezone: true }),
     lastTickError: text("last_tick_error"),
+    // DUR-5002 (migration 0262): rule_config / risk_config are a CACHE of the
+    // active version (trading_strategy_versions), written only in the
+    // activation transaction; a trigger refuses any other write to them.
     ruleConfig: jsonb("rule_config").notNull(),
     riskConfig: jsonb("risk_config").notNull(),
+    // The one version the tick reads. Null only before the automatic legacy
+    // conversion has run; the composite foreign key below keeps it on the same
+    // strategy and company, and a trigger requires it to be approved.
+    activeVersionId: uuid("active_version_id"),
     startingCashNok: integer("starting_cash_nok").notNull(),
     // The asset's NOK price at creation time, used to compute the dashboard's
     // buy-and-hold benchmark. Null if the initial quote fetch failed -- the
@@ -124,6 +196,11 @@ export const tradingStrategies = pgTable(
     checkEveryCheck: check("trading_strategies_check_every_minutes_check", sql`${table.checkEveryMinutes} >= 5 AND ${table.checkEveryMinutes} <= 240`),
     startingCashCheck: check("trading_strategies_starting_cash_nok_check", sql`${table.startingCashNok} > 0`),
     positionQuantityCheck: check("trading_strategies_position_quantity_check", sql`${table.positionQuantity} >= 0`),
+    activeVersionFk: foreignKey({
+      name: "trading_strategies_active_version_fk",
+      columns: [table.activeVersionId, table.id, table.companyId],
+      foreignColumns: [tradingStrategyVersions.id, tradingStrategyVersions.strategyId, tradingStrategyVersions.companyId],
+    }),
   }),
 );
 
@@ -136,6 +213,8 @@ export const tradingOrders = pgTable(
     side: text("side").notNull(),
     status: text("status").notNull(),
     ruleVersion: text("rule_version").notNull(),
+    // DUR-5002: the strategy version that produced this order.
+    strategyVersionId: uuid("strategy_version_id").references(() => tradingStrategyVersions.id, { onDelete: "set null" }),
     signalPriceNok: doublePrecision("signal_price_nok").notNull(),
     requestedQuantity: doublePrecision("requested_quantity").notNull(),
     filledQuantity: doublePrecision("filled_quantity"),
@@ -153,6 +232,7 @@ export const tradingOrders = pgTable(
   },
   (table) => ({
     strategyIdx: index("trading_orders_strategy_idx").on(table.strategyId, table.createdAt),
+    versionIdx: index("trading_orders_version_idx").on(table.strategyVersionId),
     pendingApprovalIdx: index("trading_orders_pending_approval_idx").on(table.status, table.approvalExpiresAt),
     sideCheck: check("trading_orders_side_check", sql`${table.side} IN ('buy', 'sell')`),
     statusCheck: check(
@@ -191,6 +271,8 @@ export const tradingLedgerEntries = pgTable(
     // instead; the ledger_owner_check below requires one of the two.
     strategyId: uuid("strategy_id").references(() => tradingStrategies.id, { onDelete: "cascade" }),
     orderId: uuid("order_id").references(() => tradingOrders.id, { onDelete: "set null" }),
+    // DUR-5002: the strategy version in force when this row was written (null for wallet events).
+    strategyVersionId: uuid("strategy_version_id").references(() => tradingStrategyVersions.id, { onDelete: "set null" }),
     walletId: uuid("wallet_id").references(() => cryptoWallets.id, { onDelete: "cascade" }),
     walletTransactionId: uuid("wallet_transaction_id").references(() => cryptoWalletTransactions.id, { onDelete: "set null" }),
     txHash: text("tx_hash"),
@@ -205,6 +287,7 @@ export const tradingLedgerEntries = pgTable(
   },
   (table) => ({
     strategyIdx: index("trading_ledger_entries_strategy_idx").on(table.strategyId, table.createdAt),
+    versionIdx: index("trading_ledger_entries_version_idx").on(table.strategyVersionId),
     walletIdx: index("trading_ledger_entries_wallet_idx").on(table.walletId, table.createdAt),
     eventTypeCheck: check(
       "trading_ledger_entries_event_type_check",
