@@ -96,6 +96,11 @@ d("trading USD/NOK rate (DUR-5001)", () => {
     await db.insert(fxRates).values(rates.map(([rateDate, rate]) => ({ rateDate, rate, source: "norges_bank" })));
   }
 
+  /** Make a freshly created strategy look like one that existed before the switch: drop its creation note. */
+  async function asPreSwitch(strategyId: string) {
+    await db.delete(tradingLedgerEntries).where(and(eq(tradingLedgerEntries.strategyId, strategyId), sql`${tradingLedgerEntries.detail}->>'reason' = 'valuation_switch'`));
+  }
+
   function trading(now: Date, closes: number[], quoteUsd: number, fxFetcher?: FxRateFetcher) {
     // Last bar opens 15 minutes before `now`, so it has just closed.
     const candles = barsEndingAt(closes, new Date(now.getTime() - tradingTimeframeMs("15m")));
@@ -254,6 +259,7 @@ d("trading USD/NOK rate (DUR-5001)", () => {
     const now = new Date("2026-10-29T12:00:00Z");
     const svc = trading(now, FLAT_CLOSES, 25);
     const strategy = await svc.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await asPreSwitch(strategy.id);
     // Peak left over from the old NOK valuation (a high-water mark of 3000 NOK = 260.87 USD at 11.5), position 4 coins.
     await db
       .update(tradingStrategies)
@@ -280,11 +286,38 @@ d("trading USD/NOK rate (DUR-5001)", () => {
     expect((await svc.requireStrategy(companyId, strategy.id)).peakEquityUsd).toBe(1);
   });
 
+  it("a strategy created after the switch keeps its drawdown peak across a restart", async () => {
+    const companyId = await seedCompany();
+    await seedRates([["2026-10-29", 9.3]]);
+    const now = new Date("2026-10-29T12:00:00Z");
+    const svc = trading(now, FLAT_CLOSES, 25);
+    const strategy = await svc.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    const peakUsd = strategy.peakEquityUsd!;
+    // 18% down from the peak, as a strategy sitting at its drawdown stop.
+    await db
+      .update(tradingStrategies)
+      .set({ cashUsd: peakUsd * 0.82, status: "paused", pauseReason: "drawdown_limit" })
+      .where(eq(tradingStrategies.id, strategy.id));
+
+    expect(await svc.applyValuationSwitch()).toEqual({ switched: 0 });
+
+    const row = await svc.requireStrategy(companyId, strategy.id);
+    expect(row.peakEquityUsd).toBe(peakUsd);
+    expect(row.status).toBe("paused");
+    const notes = await db
+      .select()
+      .from(tradingLedgerEntries)
+      .where(and(eq(tradingLedgerEntries.strategyId, strategy.id), sql`${tradingLedgerEntries.detail}->>'reason' = 'valuation_switch'`));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.detail).toMatchObject({ created: true });
+  });
+
   it("values the position at cost for the peak reset when the live quote is unavailable", async () => {
     const companyId = await seedCompany();
     const now = new Date("2026-10-29T12:00:00Z");
     const svc = tradingService(db, { now: () => now, fxRates: fxRatesService(db), marketData: fakeTradingMarketData({ quotes: { BTC: { bidUsd: 20, askUsd: 20, at: now } } }) });
     const strategy = await svc.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await asPreSwitch(strategy.id);
     const [order] = await db
       .insert(tradingOrders)
       .values({ companyId, strategyId: strategy.id, side: "buy", status: "filled", ruleVersion: "x", signalPriceNok: 230, requestedQuantity: 2, filledQuantity: 2, filledPriceNok: 230, fxRate: 11.5, fxSource: TRADING_FX_SOURCE_FIXED_ESTIMATE })

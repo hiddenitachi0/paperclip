@@ -158,6 +158,22 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       })
       .returning();
+    // Born on the daily rate, so the boot-time valuation switch (which resets
+    // the drawdown peak) must never touch it: without this note a restart
+    // would release a drawdown stop on any strategy created after the deploy.
+    await ledger.writeLedgerEntry({
+      companyId,
+      strategyId: row!.id,
+      eventType: "reconciliation",
+      detail: {
+        reason: "valuation_switch",
+        note: "strategy created on the daily Norges Bank rate; no valuation switch needed",
+        created: true,
+        rate: fx.rate,
+        rateDate: fx.date,
+        rateSource: fx.source,
+      },
+    });
     return row!;
   }
 
@@ -252,6 +268,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
    * really holds. A strategy whose USD figures a pre-0262 build left empty is
    * filled in at the old 11.5 first. Call once at boot, before the tick timer
    * is armed; re-running it changes nothing for a strategy already noted.
+   * Strategies created after the switch get the note at creation, so only
+   * strategies that existed at the deploy are ever reset.
    */
   async function applyValuationSwitch(): Promise<{ switched: number }> {
     const rows = await db.select().from(tradingStrategies);
