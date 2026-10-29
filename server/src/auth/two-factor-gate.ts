@@ -118,6 +118,32 @@ function authRoutePath(req: Request): string | null {
   return pathname.replace(/^\/api\/auth(?=\/|$)/, "").replace(/\/+$/, "") || "/";
 }
 
+/**
+ * better-call builds the request it routes on as
+ * `${x-forwarded-proto || "http"}://${:authority || host}${path}`, taking both
+ * headers from the client. A value like `http://h/api/auth/list-sessions?` makes
+ * the real path land in the query string, so better-auth routes on a path the
+ * guard never saw. Real clients and proxies only ever send a bare scheme and a
+ * bare host[:port]; anything else is refused before the allowlist is consulted.
+ */
+const PLAIN_PROTO = /^(https?)$/i;
+const PLAIN_HOST = /^([a-z0-9]([a-z0-9._-]*[a-z0-9])?|\[[0-9a-f:.]+\])(:\d{1,5})?$/i;
+
+function singleHeader(value: string | string[] | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  return Array.isArray(value) ? null : value;
+}
+
+function routingHeadersArePlain(req: Request): boolean {
+  const proto = singleHeader(req.headers["x-forwarded-proto"]);
+  if (proto !== undefined && (proto === null || !PLAIN_PROTO.test(proto))) return false;
+  const authority = singleHeader(req.headers[":authority"]);
+  if (authority !== undefined && (authority === null || !PLAIN_HOST.test(authority))) return false;
+  // better-call falls back to Host, so it must be plain whenever :authority is absent (and always, to be safe).
+  const host = singleHeader(req.headers.host);
+  return typeof host === "string" && PLAIN_HOST.test(host);
+}
+
 export function pendingSessionAuthGuard(opts: {
   enabled: boolean;
   /** The gate-wrapped resolver: resolving populates `getPendingTwoFactor`. */
@@ -125,6 +151,9 @@ export function pendingSessionAuthGuard(opts: {
 }) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (!opts.enabled || !opts.resolveSession) return next();
+    if (!routingHeadersArePlain(req)) {
+      return res.status(403).json({ error: "Two-factor verification required" });
+    }
     const path = authRoutePath(req);
     if (path !== null && PENDING_ALLOWED_AUTH_PATHS.has(path)) return next();
     try {
