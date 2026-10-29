@@ -30,8 +30,15 @@ export type TradingMode = (typeof TRADING_MODES)[number];
  * paused: no new orders; safe default, and what every strategy starts in
  *   (manual creation) and returns to after a server restart -- "starts
  *   paused after restart" is a hard design requirement, not a preference.
- * halted_risk: the risk gate or a circuit breaker stopped it; stays halted
- *   until an operator explicitly resumes (never auto-resumes).
+ * halted_risk: the data-error circuit breaker (or a reconciliation mismatch)
+ *   stopped it completely; stays halted until an operator explicitly resumes
+ *   (never auto-resumes).
+ *
+ * "Entries halted" (DUR-5000) is not a status: a daily-loss, drawdown or
+ * price-jump trip leaves the strategy `running` with a pauseReason of
+ * daily_loss_limit / drawdown_limit / circuit_breaker. New buys are blocked
+ * (see tradingEntriesHaltedReason) but exits keep being evaluated for open
+ * positions. Resuming from the kill switch clears it.
  */
 export const TRADING_STRATEGY_STATUSES = ["paused", "running", "halted_risk"] as const;
 export type TradingStrategyStatus = (typeof TRADING_STRATEGY_STATUSES)[number];
@@ -45,6 +52,14 @@ export const TRADING_PAUSE_REASONS = [
   "reconciliation_mismatch",
 ] as const;
 export type TradingPauseReason = (typeof TRADING_PAUSE_REASONS)[number];
+
+/** Pause reasons that, on a `running` strategy, mean "entries halted": buys blocked, exits still evaluated. */
+export const TRADING_ENTRIES_HALT_REASONS = ["daily_loss_limit", "drawdown_limit", "circuit_breaker"] as const;
+export type TradingEntriesHaltReason = (typeof TRADING_ENTRIES_HALT_REASONS)[number];
+export function tradingEntriesHaltedReason(status: string, pauseReason: string | null): TradingEntriesHaltReason | null {
+  if (status !== "running") return null;
+  return (TRADING_ENTRIES_HALT_REASONS as readonly string[]).includes(pauseReason ?? "") ? (pauseReason as TradingEntriesHaltReason) : null;
+}
 
 export const TRADING_ORDER_SIDES = ["buy", "sell"] as const;
 export type TradingOrderSide = (typeof TRADING_ORDER_SIDES)[number];
@@ -348,8 +363,18 @@ export const TRADING_MAX_CHECK_MINUTES = 240;
 export const TRADING_TICK_BATCH = 25;
 /** A stale price (candle older than this) blocks new orders -- circuit breaker, design report section 5.4. */
 export const TRADING_MAX_PRICE_AGE_MINUTES = 60;
-/** A single-tick price jump beyond this % halts the strategy for review rather than trading through it. */
-export const TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT = 15;
+/**
+ * A single-candle price jump beyond this % (per timeframe: a normal 4h or 1d
+ * candle moves more than a 15m one) halts NEW BUYS for the strategy until an
+ * operator resumes it. It never blocks an exit: a sell only reduces the open
+ * long position, so a jump is exactly when the strategy must be able to get out.
+ */
+export const TRADING_PRICE_JUMP_PCT_BY_TIMEFRAME = { "15m": 15, "1h": 20, "4h": 30, "1d": 45 } as const satisfies Record<(typeof TRADING_TIMEFRAMES)[number], number>;
+/** The 15m threshold, kept as the original single-timeframe constant. */
+export const TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT = TRADING_PRICE_JUMP_PCT_BY_TIMEFRAME["15m"];
+export function tradingPriceJumpThresholdPct(timeframe: (typeof TRADING_TIMEFRAMES)[number]): number {
+  return TRADING_PRICE_JUMP_PCT_BY_TIMEFRAME[timeframe];
+}
 /** Consecutive exchange/fetch errors before a strategy is halted rather than just backed off (mirrors watchers' backoff, but trading halts instead of silently retrying forever). */
 export const TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS = 5;
 export const TRADING_TRADE_APPROVAL_EXPIRY_MS = 5 * 60 * 1000;
@@ -425,11 +450,11 @@ export function describeTradingPauseReason(reason: TradingPauseReason | null): s
     case "restart":
       return "paused after a server restart, waiting to be resumed";
     case "daily_loss_limit":
-      return "halted: today's loss limit was reached";
+      return "new buys stopped: today's loss limit was reached (exits still run)";
     case "drawdown_limit":
-      return "halted: the drawdown limit was reached";
+      return "new buys stopped: the drawdown limit was reached (exits still run)";
     case "circuit_breaker":
-      return "halted: a circuit breaker fired (stale or jumpy price data, or repeated exchange errors)";
+      return "stopped by a circuit breaker (a sudden price jump stops new buys but exits still run; stale price data or repeated exchange errors stop everything)";
     case "reconciliation_mismatch":
       return "halted: the paper ledger and position no longer add up, needs a human look";
     default: {
