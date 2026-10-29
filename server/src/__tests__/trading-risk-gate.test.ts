@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TRADING_RISK_CONFIG, type TradingRiskConfig } from "@paperclipai/shared";
-import { evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok, type TradingRiskGateInput } from "../services/trading-risk-gate.js";
+import { DEFAULT_TRADING_RISK_CONFIG, tradingEntriesHaltedReason, tradingPriceJumpThresholdPct, type TradingRiskConfig } from "@paperclipai/shared";
+import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok, type TradingRiskGateInput } from "../services/trading-risk-gate.js";
 
 /**
  * The risk gate is the last line of defense before a paper order is filled --
@@ -119,6 +119,79 @@ describe("evaluateTradingRiskGate", () => {
       input({ ordersToday: DEFAULT_TRADING_RISK_CONFIG.maxOrdersPerDay, realizedPnlTodayNok: -DEFAULT_TRADING_RISK_CONFIG.dailyLossLimitNok }),
     );
     expect(verdict).toEqual({ kind: "block", reason: expect.stringContaining("order limit") });
+  });
+});
+
+describe("exit gate (DUR-5000): a sell never hits the entry-side blocks", () => {
+  const holding = { side: "sell" as const, requestedQuantity: 1, positionQuantity: 1, positionCostNok: 100 };
+
+  it("sells at the daily-loss limit", () => {
+    const verdict = evaluateTradingRiskGate(input({ ...holding, realizedPnlTodayNok: -DEFAULT_TRADING_RISK_CONFIG.dailyLossLimitNok * 5 }));
+    expect(verdict).toEqual({ kind: "allow" });
+  });
+
+  it("sells at the drawdown limit", () => {
+    const verdict = evaluateTradingRiskGate(input({ ...holding, peakEquity: 10_000, currentEquity: 5_000 }));
+    expect(verdict).toEqual({ kind: "allow" });
+  });
+
+  it("sells after the daily order count is used up", () => {
+    const verdict = evaluateTradingRiskGate(input({ ...holding, ordersToday: DEFAULT_TRADING_RISK_CONFIG.maxOrdersPerDay + 50 }));
+    expect(verdict).toEqual({ kind: "allow" });
+  });
+
+  it("sells with a wide price band (the quote far from the signal price)", () => {
+    const verdict = evaluateTradingRiskGate(input({ ...holding, signalPriceNok: 100, quotePriceNok: 40 }));
+    expect(verdict).toEqual({ kind: "allow" });
+  });
+
+  it("never asks for approval, even when every trade would need one", () => {
+    const config: TradingRiskConfig = { ...PERMISSIVE_CONFIG, approvalAboveNok: null };
+    expect(evaluateTradingRiskGate(input({ ...holding, riskConfig: config }))).toEqual({ kind: "allow" });
+    expect(evaluateTradingExitGate({ ...holding, quotePriceNok: 100 })).toEqual({ kind: "allow" });
+  });
+
+  it("refuses only impossible input: no position, no valid quote, more than held", () => {
+    expect(evaluateTradingExitGate({ requestedQuantity: 1, positionQuantity: 0, quotePriceNok: 100 })).toEqual({ kind: "block", reason: expect.stringContaining("no open position") });
+    expect(evaluateTradingExitGate({ requestedQuantity: 1, positionQuantity: 1, quotePriceNok: 0 })).toEqual({ kind: "block", reason: expect.stringContaining("no valid price") });
+    expect(evaluateTradingExitGate({ requestedQuantity: 1, positionQuantity: 1, quotePriceNok: Number.NaN })).toEqual({ kind: "block", reason: expect.stringContaining("no valid price") });
+    expect(evaluateTradingExitGate({ requestedQuantity: 2, positionQuantity: 1, quotePriceNok: 100 })).toEqual({ kind: "block", reason: expect.stringContaining("Cannot sell") });
+  });
+
+  it("still blocks the same state for a buy (the entry gate keeps every check)", () => {
+    expect(evaluateTradingEntryGate(input({ realizedPnlTodayNok: -DEFAULT_TRADING_RISK_CONFIG.dailyLossLimitNok })).kind).toBe("block");
+    expect(evaluateTradingEntryGate(input({ ordersToday: DEFAULT_TRADING_RISK_CONFIG.maxOrdersPerDay })).kind).toBe("block");
+    expect(evaluateTradingEntryGate(input({ side: "sell" })).kind).toBe("block");
+  });
+
+  it("blocks buys, never sells, while entries are halted", () => {
+    expect(evaluateTradingEntryGate(input({ entriesHaltedReason: "price jump" }))).toEqual({ kind: "block", reason: expect.stringContaining("halted") });
+    expect(evaluateTradingRiskGate(input({ ...holding, entriesHaltedReason: "price jump" }))).toEqual({ kind: "allow" });
+  });
+});
+
+describe("evaluateEntriesHaltTrip", () => {
+  const base = { riskConfig: DEFAULT_TRADING_RISK_CONFIG, realizedPnlTodayNok: 0, peakEquity: 10_000, currentEquity: 10_000 };
+  it("reports nothing when inside both limits", () => {
+    expect(evaluateEntriesHaltTrip(base)).toBeNull();
+  });
+  it("reports the daily-loss and drawdown trips", () => {
+    expect(evaluateEntriesHaltTrip({ ...base, realizedPnlTodayNok: -DEFAULT_TRADING_RISK_CONFIG.dailyLossLimitNok })?.cause).toBe("daily_loss_limit");
+    expect(evaluateEntriesHaltTrip({ ...base, currentEquity: 10_000 * (1 - DEFAULT_TRADING_RISK_CONFIG.maxDrawdownPct / 100) })?.cause).toBe("drawdown_limit");
+  });
+});
+
+describe("jump threshold by timeframe and entries-halt state", () => {
+  it("scales with the candle size", () => {
+    expect(["15m", "1h", "4h", "1d"].map((tf) => tradingPriceJumpThresholdPct(tf as "15m"))).toEqual([15, 20, 30, 45]);
+  });
+  it("only a running strategy with a halt reason is entries-halted", () => {
+    expect(tradingEntriesHaltedReason("running", "circuit_breaker")).toBe("circuit_breaker");
+    expect(tradingEntriesHaltedReason("running", "drawdown_limit")).toBe("drawdown_limit");
+    expect(tradingEntriesHaltedReason("running", null)).toBeNull();
+    expect(tradingEntriesHaltedReason("paused", "circuit_breaker")).toBeNull();
+    expect(tradingEntriesHaltedReason("halted_risk", "circuit_breaker")).toBeNull();
+    expect(tradingEntriesHaltedReason("running", "restart")).toBeNull();
   });
 });
 

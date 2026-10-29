@@ -3,15 +3,17 @@ import type { Db } from "@paperclipai/db";
 import { approvals, tradingOrders, tradingStrategies } from "@paperclipai/db";
 import {
   TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS,
-  TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT,
   TRADING_ENGINE_VERSION,
   TRADING_ESTIMATED_USD_NOK_RATE,
   TRADING_MAX_CATCH_UP_BARS,
   TRADING_TICK_BATCH,
   TRADING_TRADE_APPROVAL_EXPIRY_MS,
   ccxtSymbolFor,
+  describeTradingPauseReason,
   evaluateTradingRule,
   tradingRuleVersionLabel,
+  tradingEntriesHaltedReason,
+  tradingPriceJumpThresholdPct,
   tradingSignalStillHolds,
   tradingWarmUpBars,
   type CreateTradingStrategyInput,
@@ -29,7 +31,7 @@ import { logger } from "../middleware/logger.js";
 import { approvalService } from "./approvals.js";
 import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rates.js";
 import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
-import { evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
+import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
 
 /**
@@ -414,6 +416,36 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     logger.warn({ strategyId: row.id, companyId: row.companyId, reason, ...detail }, "trading: strategy halted");
   }
 
+  /**
+   * "Entries halted" (DUR-5000): a daily-loss, drawdown or price-jump trip. The
+   * strategy stays `running` -- buys are blocked by the entry gate, exits keep
+   * being evaluated -- and the reason is kept in pauseReason until an operator
+   * resumes it (a daily-loss halt also lifts itself on the next UTC day). Until
+   * the vigilance-alerts card exists the alert is a circuit_breaker ledger row
+   * plus a log line.
+   */
+  async function haltEntries(row: TradingStrategyRow, cause: "daily_loss_limit" | "drawdown_limit" | "circuit_breaker", now: Date, detail: Record<string, unknown>) {
+    await db
+      .update(tradingStrategies)
+      .set({ pauseReason: cause satisfies TradingPauseReason, updatedAt: now })
+      .where(and(eq(tradingStrategies.id, row.id), eq(tradingStrategies.status, "running")));
+    await ledger.writeLedgerEntry({
+      companyId: row.companyId,
+      strategyId: row.id,
+      eventType: "circuit_breaker",
+      detail: { alert: "entries_halted", cause, note: "New buys are stopped; exits for an open position keep being evaluated.", ...detail },
+    });
+    logger.warn({ strategyId: row.id, companyId: row.companyId, cause, ...detail }, "trading: entries halted");
+  }
+
+  async function clearEntriesHalt(row: TradingStrategyRow, now: Date, detail: Record<string, unknown>) {
+    await db
+      .update(tradingStrategies)
+      .set({ pauseReason: null, updatedAt: now })
+      .where(and(eq(tradingStrategies.id, row.id), eq(tradingStrategies.status, "running")));
+    await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, eventType: "reconciliation", detail: { reason: "entries_halt_lifted", ...detail } });
+  }
+
   async function recordTickFailure(row: TradingStrategyRow, message: string, now: Date) {
     const consecutiveErrors = row.consecutiveErrors + 1;
     if (consecutiveErrors >= TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS) {
@@ -610,6 +642,21 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       await db.update(tradingStrategies).set({ peakEquityUsd, peakEquityNok: peakEquityUsd * fx.rate }).where(eq(tradingStrategies.id, row.id));
     }
 
+    // Entries-halt state: daily-loss, drawdown and price-jump trips block new
+    // buys (the entry gate) but never exits. A daily-loss halt lifts itself once
+    // the day's loss counter resets; the others wait for an operator.
+    const counters = dayCounters(row, now);
+    let entriesHalt = tradingEntriesHaltedReason(row.status, row.pauseReason);
+    const trip = evaluateEntriesHaltTrip({ riskConfig, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquity: peakEquityUsd, currentEquity: currentEquityUsd });
+    if (entriesHalt === "daily_loss_limit" && trip?.cause !== "daily_loss_limit") {
+      await clearEntriesHalt(row, now, { cause: "daily_loss_limit", note: "A new day began; the daily loss limit no longer applies." });
+      entriesHalt = null;
+    }
+    if (entriesHalt === null && trip) {
+      await haltEntries(row, trip.cause, now, { reason: trip.reason, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquityUsd, currentEquityUsd });
+      entriesHalt = trip.cause;
+    }
+
     // Which closed bars are new since the last evaluation? Never evaluated =
     // only the latest bar: a fresh or migrated strategy must not trade history.
     const bars = candles.candles;
@@ -634,9 +681,10 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     }
 
     const jumpPct = singleTickPriceJumpPct(candles.closes);
-    if (jumpPct !== null && jumpPct > TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT) {
-      await haltStrategy(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct }, latestBar.openTime);
-      return "halted";
+    const jumpThresholdPct = tradingPriceJumpThresholdPct(timeframe);
+    if (jumpPct !== null && jumpPct > jumpThresholdPct && entriesHalt === null) {
+      await haltEntries(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct, jumpThresholdPct, timeframe });
+      entriesHalt = "circuit_breaker";
     }
 
     // Evaluate every new closed bar in order, each with its own history. An
@@ -692,21 +740,27 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       return "no_action";
     }
 
-    const counters = dayCounters(row, now);
-    const verdict = evaluateTradingRiskGate({
-      side,
-      signalPriceNok: lastCloseNok,
-      quotePriceNok,
-      requestedQuantity,
-      riskConfig,
-      cashNok: usd.cashUsd * fx.rate,
-      positionQuantity: row.positionQuantity,
-      positionCostNok: row.positionCostNok,
-      ordersToday: counters.ordersToday,
-      realizedPnlTodayNok: counters.realizedPnlTodayNok,
-      peakEquity: peakEquityUsd,
-      currentEquity: currentEquityUsd,
-    });
+    // Sells go through the exit gate: it refuses only impossible input and
+    // never applies the price band, order count, loss or drawdown blocks, nor
+    // asks for a card an unanswered 5-minute timeout would strand.
+    const verdict =
+      side === "sell"
+        ? evaluateTradingExitGate({ requestedQuantity, positionQuantity: row.positionQuantity, quotePriceNok })
+        : evaluateTradingEntryGate({
+            side,
+            signalPriceNok: lastCloseNok,
+            quotePriceNok,
+            requestedQuantity,
+            riskConfig,
+            cashNok: usd.cashUsd * fx.rate,
+            positionQuantity: row.positionQuantity,
+            positionCostNok: row.positionCostNok,
+            ordersToday: counters.ordersToday,
+            realizedPnlTodayNok: counters.realizedPnlTodayNok,
+            peakEquity: peakEquityUsd,
+            currentEquity: currentEquityUsd,
+            entriesHaltedReason: entriesHalt ? describeTradingPauseReason(entriesHalt) : null,
+          });
 
     if (verdict.kind === "block") {
       const [order] = await db
@@ -744,6 +798,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       if (order.approvalExpiresAt && order.approvalExpiresAt.getTime() <= now.getTime()) {
         await db.update(tradingOrders).set({ status: "expired_approval" }).where(eq(tradingOrders.id, order.id));
         await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: "approval_expired" } });
+        // Close the board card too: no dead card stays in "Needs you", and a late approve of the stale card is refused (a cancelled approval cannot be approved).
+        if (order.approvalId) {
+          try {
+            await approvalsSvc.withdraw(order.approvalId, "Expired: nobody answered in time, so the trade was skipped.");
+          } catch (err) {
+            logger.warn({ err, approvalId: order.approvalId, orderId: order.id }, "trading: could not close the expired trade card (already decided?)");
+          }
+        }
         resolved++;
         continue;
       }
@@ -759,6 +821,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       if (approval.status === "approved") {
         const [row] = await db.select().from(tradingStrategies).where(eq(tradingStrategies.id, order.strategyId));
         if (!row) continue;
+        // The owner's pause / kill switch and the data-error halt stop everything; a halted-entries state stops buys only (exits still run).
+        const entriesHalt = tradingEntriesHaltedReason(row.status, row.pauseReason);
+        if (row.status !== "running" || (order.side === "buy" && entriesHalt !== null)) {
+          await db.update(tradingOrders).set({ status: "rejected", rejectionReason: row.status !== "running" ? "The strategy was paused or halted before the approved trade could be placed." : "New buys were halted before the approved trade could be placed." }).where(eq(tradingOrders.id, order.id));
+          await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: row.status !== "running" ? "strategy_not_running_after_approval" : "entries_halted_after_approval" } });
+          resolved++;
+          continue;
+        }
         const asset = row.asset as Parameters<TradingMarketDataSource["fetchQuote"]>[0];
         const quote = await marketData.fetchQuote(asset, now);
         const riskConfig = row.riskConfig as TradingRiskConfig;
@@ -774,7 +844,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         // the pending order, so a new day's rate cannot look like price drift.
         const signalPriceUsd = order.signalPriceNok / (order.fxRate ?? TRADING_ESTIMATED_USD_NOK_RATE);
         const drift = Math.abs(priceUsd - signalPriceUsd) / signalPriceUsd;
-        if (drift * 100 > riskConfig.priceBandPct) {
+        if (order.side === "buy" && drift * 100 > riskConfig.priceBandPct) {
           await db.update(tradingOrders).set({ status: "rejected", rejectionReason: "The price moved too far while the approval was pending." }).where(eq(tradingOrders.id, order.id));
           await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: "price_drift_after_approval" } });
           resolved++;
