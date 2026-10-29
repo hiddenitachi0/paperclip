@@ -418,6 +418,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(budgetPolicies);
     for (let attempt = 0; attempt < 5; attempt += 1) {
+      // A fire-and-forget run (e.g. the process-loss retry a reap dispatches)
+      // can still log activity for its agent after the wipes above; clear it
+      // again or every retry hits activity_log_agent_id_agents_id_fk.
+      await db.delete(activityLog);
       await db.delete(agentRuntimeState);
       try {
         await db.delete(agents);
