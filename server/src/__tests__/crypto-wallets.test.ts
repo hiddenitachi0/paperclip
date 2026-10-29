@@ -21,6 +21,8 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { base58Decode, base58Encode } from "../services/crypto-wallet-encoding.ts";
 import {
+  bitcoinAdapter,
+  CryptoChainError,
   solanaAdapter,
   type ChainContext,
   type CryptoChainAdapter,
@@ -333,9 +335,15 @@ d("crypto wallets for agents", () => {
     return { companyId, agentId };
   }
 
+  // The limits new test wallets used to start with (a person was asked only
+  // above approvalAbove). Tests of the send path itself keep using them; the
+  // new ask-every-time default has its own tests.
+  const LEGACY_SOLANA_LIMITS = { perTransaction: "0.2", daily: "0.4", total: "2", approvalAbove: "0.08" };
+  const LEGACY_HL_LIMITS = { perTransaction: "25", daily: "50", total: "200", approvalAbove: "10" };
+
   async function makeSolanaWallet(companyId: string, agentId: string, extra: Record<string, unknown> = {}) {
     const owner = boardApp(companyId, "owner");
-    const res = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Purchases", mode: "generate", ...extra });
+    const res = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Purchases", mode: "generate", limits: LEGACY_SOLANA_LIMITS, ...extra });
     expect(res.status).toBe(201);
     return res.body as { id: string; address: string };
   }
@@ -503,7 +511,7 @@ d("crypto wallets for agents", () => {
     responses.length = 0;
     logLines.length = 0;
 
-    const created = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 });
+    const created = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58, limits: LEGACY_SOLANA_LIMITS });
     expect(created.status).toBe(201);
     expect(created.body.address).toBe(kp.address);
     expect(created.body.keyOrigin).toBe("imported");
@@ -650,6 +658,43 @@ d("crypto wallets for agents", () => {
     expect((await boardApp(companyId, "owner").put(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`, { perTransactionUsd: 5000, dailyUsd: 5000, totalUsd: 5000, approvalAboveUsd: null })).status).toBe(400);
   });
 
+  it("asks a person about every agent send from a new test wallet, with a plain card, while owner sends and explicit limits are unchanged", async () => {
+    const { companyId, agentId } = await seed();
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Fresh", mode: "generate" });
+    expect(created.status).toBe(201);
+    expect(created.body.limits.approvalAbove).toBeNull();
+    const wallet = created.body as { id: string; address: string };
+    solState.balances.set(wallet.address, 5_000_000_000);
+    const to = await allow(companyId, wallet.id);
+    const svc = cryptoWalletService(db, db, deps());
+
+    // Even a tiny agent send waits for a card, and sends only after approval.
+    const small = (await agentApp(companyId, agentId).post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.001", purpose: "Tiny test buy" })).body;
+    expect(small.status).toBe("pending_approval");
+    expect(solState.sent).toHaveLength(0);
+    const [card] = await db.select().from(approvals).where(eq(approvals.id, small.approvalId));
+    expect(card!.status).toBe("pending");
+    const text = String((card!.payload as Record<string, unknown>).summary);
+    expect(text).toContain("Buyer agent wants to send");
+    expect(text).toContain("0.001");
+    expect(text).toContain("Supplier");
+    expect(text).toContain(to);
+    expect(text).toContain("Solana test network (devnet)");
+    expect(text).toContain("Tiny test buy");
+    expect(text).toContain("Test coins: no real value.");
+    await db.update(approvals).set({ status: "approved", decidedByUserId: "owner-user" }).where(eq(approvals.id, small.approvalId));
+    await svc.tick(now);
+    expect(solState.sent).toHaveLength(1);
+
+    // Owner sends stay card-free.
+    const ownerSend = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/send`, { to, amount: "0.01", purpose: "Owner top-up" });
+    expect(ownerSend.body.status).toBe("submitted");
+
+    // A wallet created with explicit limits keeps them.
+    const explicit = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Explicit", mode: "generate", limits: LEGACY_SOLANA_LIMITS });
+    expect(explicit.body.limits.approvalAbove).toBe("0.08");
+  });
+
   it("sends an approved card on the next tick, and never sends a turned-down or expired one", async () => {
     const { companyId, agentId } = await seed();
     const wallet = await makeSolanaWallet(companyId, agentId);
@@ -675,9 +720,18 @@ d("crypto wallets for agents", () => {
     now = new Date(now.getTime() + 61 * 60_000);
     await svc.tick(now);
     expect((await statusOf(c.id)).status).toBe("expired_approval");
+    // The expired card is closed too: nothing waits in "Needs you", and approving it later is refused.
+    const cardOf = async (id: string) => (await db.select().from(approvals).where(eq(approvals.id, id)))[0]!;
+    expect((await cardOf(c.approvalId)).status).toBe("cancelled");
+    await expect(approvalService(db).approve(c.approvalId, "owner-user", null, { decidedOnApprovalCard: true })).rejects.toThrow(/Only pending/);
     await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, c.approvalId));
     await svc.tick(now);
     expect((await statusOf(c.id)).status).toBe("expired_approval");
+    // Decided cards stay as decided, and no card for this wallet is left pending.
+    expect((await cardOf(a.approvalId)).status).toBe("approved");
+    expect((await cardOf(b.approvalId)).status).toBe("rejected");
+    const stillPending = await db.select().from(approvals).where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending")));
+    expect(stillPending).toHaveLength(0);
     // The sent one may be re-sent while unconfirmed, but only ever as the same signed transaction.
     expect(new Set(solState.sent.map((t) => t.raw)).size).toBe(1);
 
@@ -790,7 +844,7 @@ d("crypto wallets for agents", () => {
 
   it("caps Hyperliquid leverage at 1x by default and never lets a limit block closing a position", async () => {
     const { companyId, agentId } = await seed();
-    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate" });
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate", limits: LEGACY_HL_LIMITS });
     expect(created.status).toBe(201);
     expect(created.body.maxLeverage).toBe(1);
     const walletId = created.body.id as string;
@@ -1035,7 +1089,7 @@ d("crypto wallets for agents", () => {
 
   it("never re-sends a Hyperliquid order with an unclear answer; it only looks it up until it is found or can no longer be accepted", async () => {
     const { companyId, agentId } = await seed();
-    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate" });
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate", limits: LEGACY_HL_LIMITS });
     const walletId = created.body.id as string;
     const agent = agentApp(companyId, agentId);
     const svc = cryptoWalletService(db, db, deps());
@@ -1076,5 +1130,71 @@ d("crypto wallets for agents", () => {
     const tx = Buffer.from(solState.sent[0]!.raw, "base64");
     expect(base58Encode(new Uint8Array(tx.subarray(65 + 4, 65 + 4 + 32)))).toBe(wallet.address);
     expect(base58Decode(wallet.address)).toHaveLength(32);
+  });
+
+  // ─── Test-network hardening (DUR-5023) ────────────────────────────────
+
+  async function enableMainnet(companyId: string) {
+    expect((await boardApp(companyId, "owner").patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" })).status).toBe(200);
+  }
+
+  it("refuses to import a private key while the real-money lock is on, on every network, and keeps generating working", async () => {
+    const { companyId, agentId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    const kp = solanaKeypair();
+    delete process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
+    try {
+      const refused = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 });
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toMatch(/Importing a private key is switched off while real money is locked/);
+      expect(JSON.stringify(refused.body)).not.toContain(kp.secretBase58);
+      expect(await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).toHaveLength(0);
+      expect((await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Made here", mode: "generate" })).status).toBe(201);
+    } finally {
+      process.env.PAPERCLIP_CRYPTO_REAL_MONEY = "allowed";
+    }
+    // With the lock open an import is still possible.
+    expect((await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 })).status).toBe(201);
+  });
+
+  it("refuses a key or address that already exists on the other network (Solana: same address on both)", async () => {
+    const { companyId, agentId } = await seed();
+    await enableMainnet(companyId);
+    const owner = boardApp(companyId, "owner");
+    const kp = solanaKeypair();
+    const make = (network: "testnet" | "mainnet", key: string) =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network, label: "Reuse", mode: "import", privateKey: key });
+    expect((await make("testnet", kp.secretBase58)).status).toBe(201);
+    const onMainnet = await make("mainnet", kp.secretBase58);
+    expect(onMainnet.status).toBe(409);
+    expect(onMainnet.body.error).toMatch(/already used by a wallet on the other network/);
+    // The other way round.
+    const other = solanaKeypair();
+    expect((await make("mainnet", other.secretBase58)).status).toBe(201);
+    expect((await make("testnet", other.secretBase58)).status).toBe(409);
+    // Same network, same key is still the old duplicate refusal.
+    expect((await make("testnet", kp.secretBase58)).status).toBe(409);
+    const rows = await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
+    expect(rows).toHaveLength(2);
+    // A different key on the other network is fine.
+    expect((await make("mainnet", solanaKeypair().secretBase58)).status).toBe(201);
+  });
+
+  it("refuses a bitcoin key that already backs a wallet on the other network, though its tb1 and bc1 addresses differ", async () => {
+    const { companyId, agentId } = await seed();
+    await enableMainnet(companyId);
+    adapters = { ...adapters, bitcoin: bitcoinAdapter(async () => { throw new CryptoChainError("libs_missing", "not installed"); }) };
+    const owner = boardApp(companyId, "owner");
+    const key = (await adapters.bitcoin.generateKey("testnet")).privateKey;
+    const make = (network: "testnet" | "mainnet") =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "bitcoin", network, label: "Reuse", mode: "import", privateKey: key });
+    const first = await make("testnet");
+    expect(first.status).toBe(201);
+    expect(first.body.address).toMatch(/^tb1/);
+    const second = await make("mainnet");
+    expect(second.status).toBe(409);
+    expect(second.body.error).toMatch(/already used by a wallet on the other network/);
+    expect(JSON.stringify(second.body)).not.toContain(key);
+    expect(await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).toHaveLength(1);
   });
 });

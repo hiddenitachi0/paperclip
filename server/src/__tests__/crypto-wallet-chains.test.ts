@@ -446,3 +446,87 @@ describe("Hyperliquid status lookups (follow-up 3)", () => {
     await expect(hl.getTxStatus(history([]), { ...withdraw, checkedAt: late })).resolves.toBe("failed");
   });
 });
+
+describe("test-network hardening: the provider must be on the wallet's own network (DUR-5023)", () => {
+  // The stub is never used: the network check happens before any signing library call.
+  const stubLibs: CryptoLibsLoader = async () => ({}) as never;
+  const BTC_GENESIS = {
+    mainnet: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+    testnet4: "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
+    signet: "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+    testnet3: "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943",
+  };
+  const ETH_FROM = "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23";
+  const ETH_TO = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
+  const KEY = "00".repeat(31) + "01";
+
+  function btcCtx(network: "testnet" | "mainnet", genesis: string): ChainContext {
+    const fetch = vi.fn(async (url: string) => {
+      if (url.endsWith("/block-height/0")) return new Response(`${genesis}\n`, { status: 200 });
+      throw new Error(`signing must stop before ${url}`);
+    }) as unknown as OutboundFetch;
+    return { network, rpcUrl: "https://btc.example.org/api", fetch };
+  }
+
+  it("Bitcoin: a provider on the wrong network never signs, whichever way round", async () => {
+    const btc = bitcoinAdapter(stubLibs);
+    const args = { privateKey: KEY, from: "tb1qxyz", to: "tb1qabc", amount: 1000n, maxFee: 10_000n };
+    await expect(btc.signTransfer(btcCtx("testnet", BTC_GENESIS.mainnet), args)).rejects.toMatchObject({ code: "wrong_network" });
+    await expect(btc.signTransfer(btcCtx("testnet", BTC_GENESIS.testnet3), args)).rejects.toMatchObject({ code: "wrong_network" });
+    await expect(btc.signTransfer(btcCtx("testnet", "not-a-hash"), args)).rejects.toMatchObject({ code: "wrong_network" });
+    // Mainnet signing is behind the real-money lock; lift it here to reach the network check itself.
+    vi.stubEnv("PAPERCLIP_CRYPTO_REAL_MONEY", "allowed");
+    try {
+      await expect(btc.signTransfer(btcCtx("mainnet", BTC_GENESIS.testnet4), args)).rejects.toMatchObject({ code: "wrong_network" });
+      await expect(btc.signTransfer(btcCtx("mainnet", BTC_GENESIS.signet), args)).rejects.toMatchObject({ code: "wrong_network" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("Bitcoin: testnet4 and signet pass the network check (the next call is the fee lookup)", async () => {
+    const btc = bitcoinAdapter(stubLibs);
+    const args = { privateKey: KEY, from: "tb1qxyz", to: "tb1qabc", amount: 1000n, maxFee: 10_000n };
+    for (const genesis of [BTC_GENESIS.testnet4, BTC_GENESIS.signet]) {
+      const ctx = btcCtx("testnet", genesis);
+      // Past the genesis check the fake refuses anything else, which proves the check let it through.
+      await expect(btc.signTransfer(ctx, args)).rejects.toThrow(/signing must stop before|insufficient|network service/);
+      expect((ctx.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+    }
+  });
+
+  it.each([1, 8453, 42161, 10, 137])("Ethereum: a test wallet refuses a provider on chain %i, even through an owner's RPC address", async (chainId) => {
+    const eth = ethereumAdapter(stubLibs);
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const method = JSON.parse(String(init?.body)).method;
+      if (method === "eth_chainId") return json({ result: `0x${chainId.toString(16)}` });
+      throw new Error(`signing must stop before ${method}`);
+    }) as unknown as OutboundFetch;
+    const ctx: ChainContext = { network: "testnet", rpcUrl: "https://owner-chosen-mainnet-rpc.example.org", fetch };
+    await expect(eth.signTransfer(ctx, { privateKey: KEY, from: ETH_FROM, to: ETH_TO, amount: 1n, maxFee: 10n ** 18n })).rejects.toMatchObject({ code: "wrong_network" });
+    // Nor does a stored chain ID of a real chain widen anything.
+    await expect(eth.signTransfer({ ...ctx, chainId }, { privateKey: KEY, from: ETH_FROM, to: ETH_TO, amount: 1n, maxFee: 10n ** 18n })).rejects.toMatchObject({ code: "wrong_network" });
+  });
+
+  it("Ethereum: a test wallet must match its stored chain ID, and a mainnet wallet is held to chain 1", async () => {
+    const eth = ethereumAdapter(stubLibs);
+    const reply = (chainId: number) =>
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (JSON.parse(String(init?.body)).method === "eth_chainId") return json({ result: `0x${chainId.toString(16)}` });
+        throw new Error("signing must stop here");
+      }) as unknown as OutboundFetch;
+    const args = { privateKey: KEY, from: ETH_FROM, to: ETH_TO, amount: 1n, maxFee: 10n ** 18n };
+    // Sepolia provider, wallet stored on Hoodi: both allow-listed, but they differ.
+    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(11155111), chainId: 560048 }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    // Hoodi provider, nothing stored: held to Sepolia.
+    await expect(eth.signTransfer({ network: "testnet", rpcUrl: "https://rpc.example.org", fetch: reply(560048) }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    // A test provider behind a mainnet wallet.
+    vi.stubEnv("PAPERCLIP_CRYPTO_REAL_MONEY", "allowed");
+    try {
+      await expect(eth.signTransfer({ network: "mainnet", rpcUrl: "https://rpc.example.org", fetch: reply(11155111) }, args)).rejects.toMatchObject({ code: "wrong_network" });
+      await expect(eth.signTransfer({ network: "mainnet", rpcUrl: "https://rpc.example.org", fetch: reply(8453) }, args)).rejects.toMatchObject({ code: "wrong_network" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

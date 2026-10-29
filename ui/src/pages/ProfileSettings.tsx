@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TelegramLinkCard } from "@/components/TelegramLinkCard";
+import { TwoFactorCard } from "@/components/TwoFactorCard";
 
 function deriveInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -368,6 +369,8 @@ export function ProfileSettings() {
             </div>
           </form>
         </div>
+
+        <TwoFactorCard />
 
         <TelegramLinkCard />
       </section>

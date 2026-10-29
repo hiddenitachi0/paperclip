@@ -47,7 +47,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
-import { assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
+import { assertCryptoKeyImportAllowed, assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
   CryptoChainError,
   defaultCryptoChainAdapters,
@@ -410,6 +410,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
   async function createWallet(companyId: string, input: CreateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     if (input.network === "mainnet") assertCryptoRealMoneyAllowed();
+    if (input.mode === "import") assertCryptoKeyImportAllowed();
     const agent = await requireAgent(companyId, input.agentId);
     const settings = await getSettings(companyId);
     if (input.network === "mainnet" && !settings.mainnetEnabled) {
@@ -418,7 +419,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     if (input.network === "mainnet" && input.limits !== undefined && !actor.isOwner) {
       throw forbidden("Only the company's owner can set limits on a real-money wallet. Leave the limits out to start with the safe defaults.");
     }
-    const limits = limitsToBaseUnits(input.chain, input.limits ?? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain]);
+    // New test wallets ask a person for every agent send (approvalAbove
+    // empty); explicit limits and the real-money defaults are unchanged.
+    const defaultLimits: CryptoWalletLimits =
+      input.network === "mainnet" ? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain] : { ...DEFAULT_CRYPTO_WALLET_LIMITS[input.chain], approvalAbove: null };
+    const limits = limitsToBaseUnits(input.chain, input.limits ?? defaultLimits);
     const adapter = adapterFor(input.chain);
 
     let material: { privateKey: string; address: string };
@@ -433,6 +438,27 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       .from(cryptoWallets)
       .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.chain, input.chain), eq(cryptoWallets.network, input.network), eq(cryptoWallets.address, material.address)));
     if (duplicate) throw conflict("This company already has a wallet with that key.");
+
+    // One key, one network: the same key (or the address it makes) must never
+    // back both a test wallet and a real-money wallet. EVM and Solana keys make
+    // the same address on both networks; a bitcoin key makes a tb1 and a bc1
+    // address, so the other network's address is derived from the key.
+    const otherNetwork: CryptoNetwork = input.network === "mainnet" ? "testnet" : "mainnet";
+    const sameKeyFamily = input.chain === "bitcoin" || input.chain === "solana" ? [input.chain] : ["ethereum", "hyperliquid"];
+    let otherAddress: string;
+    try {
+      otherAddress = await adapter.deriveAddress(material.privateKey, otherNetwork);
+    } catch {
+      throw unprocessable("Could not read that key.");
+    }
+    const onOtherNetwork = await db
+      .select({ address: cryptoWallets.address })
+      .from(cryptoWallets)
+      .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.network, otherNetwork), inArray(cryptoWallets.chain, sameKeyFamily)));
+    const reused = (address: string) => (sameKeyFamily.length > 1 ? address.toLowerCase() : address);
+    if (onOtherNetwork.some((w) => reused(w.address) === reused(otherAddress) || reused(w.address) === reused(material.address))) {
+      throw conflict("That key or address is already used by a wallet on the other network (test and real-money wallets must never share a key). Use a new wallet.");
+    }
 
     const info = CRYPTO_CHAIN_INFO[input.chain];
     const shortAddress = `${material.address.slice(0, 8)}…${material.address.slice(-6)}`;
@@ -843,8 +869,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
             tx.feeUpperBound && BigInt(tx.feeUpperBound) > 0n ? `, plus a network fee of at most ${formatChainAmount(chain, tx.feeUpperBound)}` : ""
           }`;
     const expiresAt = tx.approvalExpiresAt ?? new Date(nowOf().getTime() + CRYPTO_TX_APPROVAL_EXPIRY_MS);
-    const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Reason given: "${tx.purpose}". ${reasonForOperator} ${
-      realMoney ? "This is REAL money and cannot be undone." : "This is on a test network; test coins have no value."
+    const networkLabel = cryptoNetworkLabel(chain, wallet.network as CryptoNetwork);
+    const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Network: ${networkLabel}. Reason given: "${tx.purpose}". ${reasonForOperator} ${
+      realMoney ? "This is REAL money and cannot be undone." : "Test coins: no real value."
     }`;
     const [approval] = await db
       .insert(approvals)
@@ -860,6 +887,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           transactionId: tx.id,
           chain,
           network: wallet.network,
+          networkLabel,
+          destination: tx.destination,
+          destinationLabel,
           title: `${realMoney ? "Real money: " : "Test coins: "}${agentName} wants to ${tx.kind === "order" ? "trade" : "pay"} from a crypto wallet`,
           summary,
           plainSummary: `${summary} If nobody answers within an hour, nothing is sent.`,
@@ -1396,6 +1426,15 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           .where(and(eq(cryptoWalletTransactions.id, row.id), eq(cryptoWalletTransactions.status, "pending_approval")))
           .returning();
         if (!expired) return row;
+        // Close the board card too, so no dead card stays in "Needs you" and
+        // approving it later does nothing. A card a person already decided is
+        // left as it is.
+        if (row.approvalId) {
+          await db
+            .update(approvals)
+            .set({ status: "cancelled", decisionNote: "Expired: nobody answered in time, so nothing was sent.", decidedAt: now, updatedAt: now })
+            .where(and(eq(approvals.id, row.approvalId), eq(approvals.companyId, row.companyId), inArray(approvals.status, ["pending", "revision_requested"])));
+        }
         await writeLedger({ companyId: row.companyId, walletId: row.walletId, eventType: "wallet_tx_rejected", tx: expired, detail: { reason: "approval_expired" } });
         return expired;
       }

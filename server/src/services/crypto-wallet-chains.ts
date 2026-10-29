@@ -6,6 +6,7 @@ import {
   EVM_MAX_FEE_PER_GAS,
   EVM_MAX_PRIORITY_FEE_PER_GAS,
   formatCryptoAmount,
+  isTestEvmChainId,
   type CryptoChain,
   type CryptoNetwork,
 } from "@paperclipai/shared";
@@ -85,6 +86,12 @@ export interface ChainContext {
   /** The endpoint for this chain and network (company setting or default). */
   rpcUrl: string;
   fetch: OutboundFetch;
+  /**
+   * The EVM chain ID stored on the wallet, once one is stored. A test wallet
+   * with none stored is held to Sepolia. Either way the provider's chain ID
+   * must match it and be on the code allow-list (TEST_EVM_CHAIN_IDS).
+   */
+  chainId?: number;
 }
 
 export interface SignedTransfer {
@@ -363,10 +370,35 @@ const BTC_MAX_FEE_RATE = 100; // sat/vB -- a fee spike above this waits rather t
 
 const BTC_FEE_CEILING = BigInt(CRYPTO_NETWORK_FEE_CEILING.bitcoin);
 
+/**
+ * Genesis block ids: how a bitcoin service proves which network it is on
+ * (Esplora answers GET /block-height/0 with the genesis hash). A test wallet
+ * accepts testnet4 and signet; testnet3 (dead) is not accepted.
+ */
+export const BITCOIN_GENESIS_HASHES: Record<CryptoNetwork, string[]> = {
+  testnet: [
+    "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043", // testnet4
+    "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6", // signet
+  ],
+  mainnet: ["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"],
+};
+
 /** Esplora answers for "this exact transaction is already there" -- a re-send of the same bytes, not a failure. */
 const BTC_ALREADY_KNOWN = /already in block ?chain|txn-already-known|txn-already-in-mempool|already known/i;
 
 export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): CryptoChainAdapter {
+  async function assertGenesis(ctx: ChainContext): Promise<void> {
+    const response = await ctx.fetch(joinUrl(ctx.rpcUrl, "/block-height/0"));
+    if (!response.ok) throw new CryptoChainError("rpc_http", `The bitcoin network service answered with an error (HTTP ${response.status}).`);
+    const genesis = (await response.text()).trim().toLowerCase();
+    if (!BITCOIN_GENESIS_HASHES[ctx.network].includes(genesis)) {
+      throw new CryptoChainError(
+        "wrong_network",
+        `The bitcoin network service is not on the ${ctx.network === "mainnet" ? "main network" : "test network (testnet4 or signet)"} this wallet belongs to. Check the network address in the crypto settings.`,
+      );
+    }
+  }
+
   async function feeRate(ctx: ChainContext): Promise<number> {
     try {
       const response = await ctx.fetch(joinUrl(ctx.rpcUrl, "/fee-estimates"));
@@ -462,6 +494,7 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
     async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
       assertMainnetSigningAllowed(ctx.network);
       const libs = await loadLibs();
+      await assertGenesis(ctx);
       const rate = await feeRate(ctx);
       if (rate > BTC_MAX_FEE_RATE) {
         throw new CryptoChainError("fee_too_high", "Bitcoin network fees are unusually high right now. Try again later.");
@@ -595,14 +628,32 @@ export function cappedEvmFees(baseFee: bigint, reportedPriority: bigint): { maxF
 export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): CryptoChainAdapter {
   const what = "The Ethereum network service";
 
-  async function assertChainId(ctx: ChainContext) {
+  /** Chain ID this wallet signs for: mainnet is fixed; a test wallet uses its stored chain ID (Sepolia until one is stored), which must be on the code allow-list. */
+  function expectedChainId(ctx: ChainContext): bigint {
+    if (ctx.network === "mainnet") return BigInt(EVM_CHAIN_IDS.mainnet);
+    const wanted = BigInt(ctx.chainId ?? EVM_CHAIN_IDS.testnet);
+    if (!isTestEvmChainId(wanted)) {
+      throw new CryptoChainError("wrong_network", "This wallet's stored chain is not an allowed test network, so nothing was signed.");
+    }
+    return wanted;
+  }
+
+  /**
+   * The provider must be on the very chain the wallet belongs to. For a test
+   * wallet that chain must also be on the allow-list, so no RPC override can
+   * make a test wallet sign on chain 1, 8453, 42161 or any other real chain.
+   * Returns the verified chain ID, which is the one the transaction is signed for.
+   */
+  async function assertChainId(ctx: ChainContext): Promise<bigint> {
+    const expected = expectedChainId(ctx);
     const chainId = hexQuantity(await jsonRpc(ctx, "eth_chainId", [], what), what);
-    if (chainId !== BigInt(EVM_CHAIN_IDS[ctx.network])) {
+    if (chainId !== expected || (ctx.network === "testnet" && !isTestEvmChainId(chainId))) {
       throw new CryptoChainError(
         "wrong_network",
-        `The Ethereum network service is on a different network than this wallet (${ctx.network === "mainnet" ? "main network" : "Sepolia test network"}). Check the network address in the crypto settings.`,
+        `The Ethereum network service is on a different network than this wallet (${ctx.network === "mainnet" ? "main network" : "test network"}). Check the network address in the crypto settings.`,
       );
     }
+    return chainId;
   }
 
   async function feeParams(ctx: ChainContext, from: string, to: string, amount: bigint) {
@@ -652,13 +703,12 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
     async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
       assertMainnetSigningAllowed(ctx.network);
       const libs = await loadLibs();
-      await assertChainId(ctx);
+      const chainId = await assertChainId(ctx);
       const nonce = hexQuantity(await jsonRpc(ctx, "eth_getTransactionCount", [from, "pending"], what), what);
       const fees = await feeParams(ctx, from, to, amount);
       if (fees.feeUpperBound > maxFee) {
         throw new CryptoChainError("fee_over_budget", "The Ethereum network fee went up above what this payment reserved. Nothing was sent; try again.");
       }
-      const chainId = BigInt(EVM_CHAIN_IDS[ctx.network]);
       const fields = [
         bigintToBytes(chainId),
         bigintToBytes(nonce),
