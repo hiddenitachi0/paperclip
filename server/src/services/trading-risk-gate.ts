@@ -17,15 +17,17 @@ export interface TradingRiskGateInput {
   quotePriceNok: number;
   requestedQuantity: number;
   riskConfig: TradingRiskConfig;
+  /** Cash in NOK at the rate used for this order (the strategy's cash is kept in USD). */
   cashNok: number;
   positionQuantity: number;
   /** Cost basis of the currently open position, for exposure/position-size checks after the trade. */
   positionCostNok: number;
   ordersToday: number;
   realizedPnlTodayNok: number;
-  peakEquityNok: number;
-  /** cashNok + positionQuantity * quotePriceNok, computed by the caller so this function stays pure. */
-  currentEquityNok: number;
+  /** Highest equity seen. Equity and its peak are in USD (DUR-5001) so the NOK rate cannot look like a drawdown; the gate only uses their ratio, so any one currency works. */
+  peakEquity: number;
+  /** cash + positionQuantity * bid in the same currency as peakEquity, computed by the caller so this function stays pure. */
+  currentEquity: number;
 }
 
 export type TradingRiskVerdict =
@@ -58,7 +60,7 @@ export function singleTickPriceJumpPct(closes: number[]): number | null {
 }
 
 export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRiskVerdict {
-  const { side, signalPriceNok, quotePriceNok, requestedQuantity, riskConfig, cashNok, positionQuantity, positionCostNok, ordersToday, realizedPnlTodayNok, peakEquityNok, currentEquityNok } =
+  const { side, signalPriceNok, quotePriceNok, requestedQuantity, riskConfig, cashNok, positionQuantity, positionCostNok, ordersToday, realizedPnlTodayNok, peakEquity, currentEquity } =
     input;
 
   if (priceBandBreach(signalPriceNok, quotePriceNok, riskConfig.priceBandPct)) {
@@ -73,8 +75,8 @@ export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRis
     return { kind: "block", reason: `Today's loss limit (${riskConfig.dailyLossLimitNok} NOK) has been reached.` };
   }
 
-  if (peakEquityNok > 0) {
-    const drawdownPct = ((peakEquityNok - currentEquityNok) / peakEquityNok) * 100;
+  if (peakEquity > 0) {
+    const drawdownPct = ((peakEquity - currentEquity) / peakEquity) * 100;
     if (drawdownPct >= riskConfig.maxDrawdownPct) {
       return { kind: "block", reason: `The drawdown limit (${riskConfig.maxDrawdownPct}%) has been reached.` };
     }

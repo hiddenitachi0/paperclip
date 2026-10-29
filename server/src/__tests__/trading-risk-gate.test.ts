@@ -27,8 +27,8 @@ function input(overrides: Partial<TradingRiskGateInput> = {}): TradingRiskGateIn
     positionCostNok: 0,
     ordersToday: 0,
     realizedPnlTodayNok: 0,
-    peakEquityNok: 10_000,
-    currentEquityNok: 10_000,
+    peakEquity: 10_000,
+    currentEquity: 10_000,
     ...overrides,
   };
 }
@@ -70,7 +70,7 @@ describe("evaluateTradingRiskGate", () => {
   it("blocks once drawdown from the equity peak reaches the configured percentage", () => {
     const peak = 10_000;
     const current = peak * (1 - DEFAULT_TRADING_RISK_CONFIG.maxDrawdownPct / 100);
-    const verdict = evaluateTradingRiskGate(input({ peakEquityNok: peak, currentEquityNok: current }));
+    const verdict = evaluateTradingRiskGate(input({ peakEquity: peak, currentEquity: current }));
     expect(verdict).toEqual({ kind: "block", reason: expect.stringContaining("drawdown limit") });
   });
 

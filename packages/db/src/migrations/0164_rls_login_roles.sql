@@ -277,6 +277,10 @@ DECLARE
     'feedback_exports',
     'feedback_votes',
     'finance_events',
+    -- DUR-5001. Created (and granted on) in 0262_trading_fx_rates.sql;
+    -- instance-wide market data (no company_id), so it is in this list only,
+    -- not in the company-scoped one below.
+    'fx_rates',
     'goals',
     'heartbeat_run_events',
     'heartbeat_run_watchdog_decisions',

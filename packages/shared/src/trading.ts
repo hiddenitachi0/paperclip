@@ -121,10 +121,26 @@ export function ccxtSymbolFor(asset: TradingAsset): string {
   return TRADING_MARKET_SYMBOLS[asset];
 }
 
-/** Quotes are in USD; reuse the existing purchase-gate FX table rather than a second one. */
+/** Fixed 11.5 conversion. The trading service no longer uses it (it stamps the daily Norges Bank rate on each fill, DUR-5001); kept for callers that want the old fixed estimate. */
 export function usdToNok(amountUsd: number): number {
   return amountUsd * DEFAULT_FX_RATES_TO_NOK.USD;
 }
+
+// ─── USD/NOK rate (DUR-5001) ────────────────────────────────────────────────
+
+/**
+ * The fixed rate every trading figure used before the daily Norges Bank rate
+ * (DUR-5001), and the last-resort fallback when no rate is stored at all.
+ * Deliberately NOT DEFAULT_FX_RATES_TO_NOK: the purchase gate shares that
+ * table and must not move with the trading rate.
+ */
+export const TRADING_ESTIMATED_USD_NOK_RATE = 11.5;
+/** fx_source of every order/lot made before the daily rate existed. */
+export const TRADING_FX_SOURCE_FIXED_ESTIMATE = "fixed_estimate_11.5";
+/** fx_source of a fill made while no rate was stored at all (rate 11.5, flagged as a guess). */
+export const TRADING_FX_SOURCE_ESTIMATED = "estimated";
+/** fx_source of a rate Norges Bank published. */
+export const TRADING_FX_SOURCE_NORGES_BANK = "norges_bank";
 
 // ─── Protected risk ceilings ────────────────────────────────────────────────
 
@@ -410,6 +426,20 @@ export interface TradingDashboardSummary {
   /** What simply holding the starting cash in the asset from strategy creation would be worth now -- the design report's "did it beat buy-and-hold" benchmark. */
   buyAndHoldValueNok: number | null;
   feesPaidNok: number;
+  /**
+   * DUR-5001: strategies are scored in USD, the market's own currency, so the
+   * NOK rate creates no fake gains or losses. The NOK figures above are the
+   * display/tax view and move with the rate; verdicts should use these.
+   */
+  startingCashUsd: number;
+  cashUsd: number;
+  equityUsd: number;
+  totalPnlUsd: number;
+  buyAndHoldValueUsd: number | null;
+  /** The USD/NOK rate used for the NOK display figures above, the date it was published for (null = no rate stored) and where it came from. */
+  fxRate: number;
+  fxDate: string | null;
+  fxSource: string;
   ordersToday: number;
   realizedPnlToday: number;
   lastTickAt: string | null;
