@@ -4,6 +4,7 @@ import { approvals, tradingOrders, tradingStrategies } from "@paperclipai/db";
 import {
   TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS,
   TRADING_ENGINE_VERSION,
+  TRADING_ESTIMATED_USD_NOK_RATE,
   TRADING_MAX_CATCH_UP_BARS,
   TRADING_TICK_BATCH,
   TRADING_TRADE_APPROVAL_EXPIRY_MS,
@@ -15,7 +16,6 @@ import {
   tradingPriceJumpThresholdPct,
   tradingSignalStillHolds,
   tradingWarmUpBars,
-  usdToNok,
   type CreateTradingStrategyInput,
   type TradingDashboardSummary,
   type TradingAsset,
@@ -29,9 +29,10 @@ import {
 import { notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { approvalService } from "./approvals.js";
+import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rates.js";
 import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
 import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
-import { tradingLedgerService } from "./trading-ledger.js";
+import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
 
 /**
  * The trading agent (DUR-4153/DUR-4171): CRUD for strategies, the tick loop
@@ -51,6 +52,8 @@ export type TradingStrategyRow = typeof tradingStrategies.$inferSelect;
 export interface TradingServiceDeps {
   now?: () => Date;
   marketData?: TradingMarketDataSource;
+  /** The USD/NOK rate source. Default: read-only over the stored daily rates (the server's scheduler passes one that also fetches them). */
+  fxRates?: FxRatesService;
 }
 
 export interface TradingTickResult {
@@ -71,9 +74,31 @@ function candleLimit(config: TradingRuleConfig): number {
   return tradingWarmUpBars(config) + TRADING_MAX_CATCH_UP_BARS + 1;
 }
 
+function fxStampOf(fx: FxRateQuote): TradingFxStamp {
+  return { fxRate: fx.rate, fxDate: fx.date, fxSource: fx.source };
+}
+
+/**
+ * The USD side of a strategy's accounting (DUR-5001). Strategies are scored
+ * in USD so the NOK rate creates no fake gains or losses; the NOK columns are
+ * the display/tax view. A row a pre-0262 build wrote (during a deploy
+ * overlap) has no USD figures yet and is read back at the old fixed 11.5,
+ * which is exactly what that build converted at.
+ */
+function usdSideOf(row: TradingStrategyRow) {
+  const r = TRADING_ESTIMATED_USD_NOK_RATE;
+  return {
+    startingCashUsd: row.startingCashUsd ?? row.startingCashNok / r,
+    cashUsd: row.cashUsd ?? row.cashNok / r,
+    peakEquityUsd: row.peakEquityUsd ?? row.peakEquityNok / r,
+    startingQuoteUsd: row.startingQuoteUsd ?? (row.startingQuoteNok !== null ? row.startingQuoteNok / r : null),
+  };
+}
+
 export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
   const nowOf = () => deps.now?.() ?? new Date();
   const marketData = deps.marketData ?? ccxtTradingMarketData();
+  const fxRates = deps.fxRates ?? fxRatesService(db);
   const ledger = tradingLedgerService(db);
   const approvalsSvc = approvalService(db);
 
@@ -107,7 +132,10 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     // the benchmark degrades to null (same convention as dashboard()'s own
     // quoteNok-unavailable case) until the next successful quote.
     const quote = await marketData.fetchQuote(input.asset, now);
-    const startingQuoteNok = isTradingMarketDataError(quote) ? null : usdToNok(quote.bidUsd);
+    const fx = await fxRates.current(now);
+    const startingQuoteUsd = isTradingMarketDataError(quote) ? null : quote.bidUsd;
+    const startingQuoteNok = startingQuoteUsd === null ? null : startingQuoteUsd * fx.rate;
+    const startingCashUsd = input.startingCashNok / fx.rate;
     const [row] = await db
       .insert(tradingStrategies)
       .values({
@@ -123,11 +151,31 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         riskConfig: input.riskConfig,
         startingCashNok: input.startingCashNok,
         startingQuoteNok,
+        startingQuoteUsd,
+        startingCashUsd,
         cashNok: input.startingCashNok,
+        cashUsd: startingCashUsd,
         peakEquityNok: input.startingCashNok,
+        peakEquityUsd: startingCashUsd,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       })
       .returning();
+    // Born on the daily rate, so the boot-time valuation switch (which resets
+    // the drawdown peak) must never touch it: without this note a restart
+    // would release a drawdown stop on any strategy created after the deploy.
+    await ledger.writeLedgerEntry({
+      companyId,
+      strategyId: row!.id,
+      eventType: "reconciliation",
+      detail: {
+        reason: "valuation_switch",
+        note: "strategy created on the daily Norges Bank rate; no valuation switch needed",
+        created: true,
+        rate: fx.rate,
+        rateDate: fx.date,
+        rateSource: fx.source,
+      },
+    });
     return row!;
   }
 
@@ -212,6 +260,61 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return { noted };
   }
 
+  /**
+   * The one-time switch to the daily Norges Bank rate (DUR-5001). Per
+   * strategy, once: reset peak equity to current equity and write a ledger
+   * note. Without the reset a rate below 11.5 could look like a drawdown right
+   * after the deploy and trip the limit. Current equity is cash + the open
+   * position at the live bid; if the quote cannot be fetched it is cash + the
+   * position at cost, so the peak can never end up above what the strategy
+   * really holds. A strategy whose USD figures a pre-0262 build left empty is
+   * filled in at the old 11.5 first. Call once at boot, before the tick timer
+   * is armed; re-running it changes nothing for a strategy already noted.
+   * Strategies created after the switch get the note at creation, so only
+   * strategies that existed at the deploy are ever reset.
+   */
+  async function applyValuationSwitch(): Promise<{ switched: number }> {
+    const rows = await db.select().from(tradingStrategies);
+    const now = nowOf();
+    const fx = await fxRates.current(now);
+    let switched = 0;
+    for (const row of rows) {
+      if (await ledger.hasValuationSwitchNote({ companyId: row.companyId, strategyId: row.id })) continue;
+      const usd = usdSideOf(row);
+      const quote = await marketData.fetchQuote(row.asset as TradingAsset, now);
+      const positionValueUsd = isTradingMarketDataError(quote) ? await ledger.openPositionCostUsd(row.id) : row.positionQuantity * quote.bidUsd;
+      const equityUsd = usd.cashUsd + positionValueUsd;
+      await db
+        .update(tradingStrategies)
+        .set({
+          startingCashUsd: usd.startingCashUsd,
+          cashUsd: usd.cashUsd,
+          startingQuoteUsd: usd.startingQuoteUsd,
+          peakEquityUsd: equityUsd,
+          peakEquityNok: equityUsd * fx.rate,
+          updatedAt: now,
+        })
+        .where(eq(tradingStrategies.id, row.id));
+      await ledger.writeLedgerEntry({
+        companyId: row.companyId,
+        strategyId: row.id,
+        eventType: "reconciliation",
+        detail: {
+          reason: "valuation_switch",
+          note: "valuation switched to the daily Norges Bank rate",
+          peakEquityBeforeNok: row.peakEquityNok,
+          peakEquityAfterUsd: equityUsd,
+          rate: fx.rate,
+          rateDate: fx.date,
+          rateSource: fx.source,
+          positionValuedAt: isTradingMarketDataError(quote) ? "cost" : "live_bid",
+        },
+      });
+      switched++;
+    }
+    return { switched };
+  }
+
   /** Boot check of the symbol map against the exchange's market list; never throws (a failed check just means create refuses until it can be done). */
   async function verifyMarketsOnBoot(): Promise<{ missing: TradingAsset[]; strategiesOnMissingMarkets: number } | null> {
     const check = await marketData.verifyMarkets();
@@ -232,8 +335,13 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     const row = await requireStrategy(companyId, strategyId);
     const now = nowOf();
     const quote = await marketData.fetchQuote(row.asset as CreateTradingStrategyInput["asset"], now);
-    const quoteNok = isTradingMarketDataError(quote) ? null : usdToNok(quote.bidUsd);
+    const fx = await fxRates.current(now);
+    const usd = usdSideOf(row);
+    const bidUsd = isTradingMarketDataError(quote) ? null : quote.bidUsd;
+    const quoteNok = bidUsd === null ? null : bidUsd * fx.rate;
     const positionValueNok = quoteNok !== null ? row.positionQuantity * quoteNok : row.positionCostNok;
+    const positionValueUsd = bidUsd !== null ? row.positionQuantity * bidUsd : await ledger.openPositionCostUsd(row.id);
+    const equityUsd = usd.cashUsd + positionValueUsd;
     const unrealizedPnlNok = positionValueNok - row.positionCostNok;
     const today = utcDay(now);
     const dailyStats = await ledger.listDailyStats({ companyId, strategyId, limit: 3650 });
@@ -251,8 +359,19 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       realizedPnlNok: totalRealized,
       unrealizedPnlNok,
       totalPnlNok: totalRealized + unrealizedPnlNok,
-      buyAndHoldValueNok: quoteNok !== null && row.startingQuoteNok !== null ? (row.startingCashNok / row.startingQuoteNok) * quoteNok : null,
+      // Buy-and-hold is the asset's own USD move applied to the starting cash,
+      // so it does not change with the NOK rate (and is identical to the
+      // old fixed-11.5 figure for a strategy created before the daily rate).
+      buyAndHoldValueNok: bidUsd !== null && usd.startingQuoteUsd !== null ? row.startingCashNok * (bidUsd / usd.startingQuoteUsd) : null,
       feesPaidNok: totalFees,
+      startingCashUsd: usd.startingCashUsd,
+      cashUsd: usd.cashUsd,
+      equityUsd,
+      totalPnlUsd: equityUsd - usd.startingCashUsd,
+      buyAndHoldValueUsd: bidUsd !== null && usd.startingQuoteUsd !== null ? usd.startingCashUsd * (bidUsd / usd.startingQuoteUsd) : null,
+      fxRate: fx.rate,
+      fxDate: fx.date,
+      fxSource: fx.source,
       ordersToday: row.ordersTodayDate === today ? row.ordersToday : 0,
       realizedPnlToday: row.realizedPnlTodayDate === today ? row.realizedPnlTodayNok : 0,
       lastTickAt: row.lastTickAt?.toISOString() ?? null,
@@ -358,10 +477,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return approval!.id;
   }
 
-  async function fillBuy(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
+  async function fillBuy(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
+    const priceNok = priceUsd * fx.rate;
+    const orderValueUsd = quantity * priceUsd;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
+    const feeUsd = tradingFeeNok(orderValueUsd, riskConfig.feeRatePct);
+    const stamp = fxStampOf(fx);
     const [order] = await db
       .insert(tradingOrders)
       .values({
@@ -375,16 +498,18 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         filledQuantity: quantity,
         filledPriceNok: priceNok,
         feeNok: fee,
+        ...stamp,
       })
       .returning();
-    await ledger.addFifoLot({ companyId: row.companyId, strategyId: row.id, sourceOrderId: order!.id, quantity, costNokPerUnit: (orderValueNok + fee) / quantity, acquiredAt: now });
-    await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "order_filled", nokValue: orderValueNok, feeNok: fee, detail: { side: "buy", quantity, priceNok } });
+    await ledger.addFifoLot({ companyId: row.companyId, strategyId: row.id, sourceOrderId: order!.id, quantity, costNokPerUnit: (orderValueNok + fee) / quantity, acquiredAt: now, fx: stamp });
+    await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "order_filled", nokValue: orderValueNok, feeNok: fee, detail: { side: "buy", quantity, priceNok, priceUsd, ...stamp } });
     const counters = dayCounters(row, now);
     await ledger.recordDailyStat({ companyId: row.companyId, strategyId: row.id, at: now, feesDeltaNok: fee, ordersDelta: 1 });
     await db
       .update(tradingStrategies)
       .set({
         cashNok: row.cashNok - orderValueNok - fee,
+        cashUsd: usdSideOf(row).cashUsd - orderValueUsd - feeUsd,
         positionQuantity: row.positionQuantity + quantity,
         positionCostNok: row.positionCostNok + orderValueNok + fee,
         ...counters,
@@ -400,10 +525,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       .where(eq(tradingStrategies.id, row.id));
   }
 
-  async function fillSell(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
+  async function fillSell(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
+    const priceNok = priceUsd * fx.rate;
+    const orderValueUsd = quantity * priceUsd;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
+    const feeUsd = tradingFeeNok(orderValueUsd, riskConfig.feeRatePct);
+    const stamp = fxStampOf(fx);
     const consumed = await ledger.consumeFifoLots({ strategyId: row.id, quantity });
     const proceedsNok = orderValueNok - fee;
     const realizedPnlNok = proceedsNok - consumed.costNokConsumed;
@@ -421,6 +550,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         filledPriceNok: priceNok,
         feeNok: fee,
         realizedPnlNok,
+        ...stamp,
       })
       .returning();
     await ledger.writeLedgerEntry({
@@ -432,7 +562,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       feeNok: fee,
       fifoCostNok: consumed.costNokConsumed,
       realizedPnlNok,
-      detail: { side: "sell", quantity: consumed.quantityConsumed, priceNok },
+      detail: { side: "sell", quantity: consumed.quantityConsumed, priceNok, priceUsd, realizedPnlUsd: orderValueUsd - feeUsd - consumed.costUsdConsumed, ...stamp },
     });
     const counters = dayCounters(row, now);
     await ledger.recordDailyStat({ companyId: row.companyId, strategyId: row.id, at: now, realizedPnlDeltaNok: realizedPnlNok, feesDeltaNok: fee, ordersDelta: 1 });
@@ -440,6 +570,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       .update(tradingStrategies)
       .set({
         cashNok: row.cashNok + proceedsNok,
+        cashUsd: usdSideOf(row).cashUsd + orderValueUsd - feeUsd,
         positionQuantity: Math.max(0, row.positionQuantity - consumed.quantityConsumed),
         positionCostNok: Math.max(0, row.positionCostNok - consumed.costNokConsumed),
         ...counters,
@@ -497,12 +628,18 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       return quote.kind === "upstream" || quote.kind === "no_data" ? "error" : "halted";
     }
 
-    const quoteBidNok = usdToNok(quote.bidUsd);
-    const quoteAskNok = usdToNok(quote.askUsd);
-    const currentEquityNok = row.cashNok + row.positionQuantity * quoteBidNok;
-    const peakEquityNok = Math.max(row.peakEquityNok, currentEquityNok);
-    if (peakEquityNok !== row.peakEquityNok) {
-      await db.update(tradingStrategies).set({ peakEquityNok }).where(eq(tradingStrategies.id, row.id));
+    // One rate for the whole tick, stamped on whatever fills. Equity, the
+    // drawdown peak and order sizing are all in USD (the market's own
+    // currency), so a move in the NOK rate can never look like a gain or a
+    // loss; NOK only prices the order for display, the caps and the tax ledger.
+    const fx = await fxRates.current(now);
+    const usd = usdSideOf(row);
+    const quoteBidNok = quote.bidUsd * fx.rate;
+    const quoteAskNok = quote.askUsd * fx.rate;
+    const currentEquityUsd = usd.cashUsd + row.positionQuantity * quote.bidUsd;
+    const peakEquityUsd = Math.max(usd.peakEquityUsd, currentEquityUsd);
+    if (peakEquityUsd !== row.peakEquityUsd) {
+      await db.update(tradingStrategies).set({ peakEquityUsd, peakEquityNok: peakEquityUsd * fx.rate }).where(eq(tradingStrategies.id, row.id));
     }
 
     // Entries-halt state: daily-loss, drawdown and price-jump trips block new
@@ -510,13 +647,13 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     // the day's loss counter resets; the others wait for an operator.
     const counters = dayCounters(row, now);
     let entriesHalt = tradingEntriesHaltedReason(row.status, row.pauseReason);
-    const trip = evaluateEntriesHaltTrip({ riskConfig, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquityNok, currentEquityNok });
+    const trip = evaluateEntriesHaltTrip({ riskConfig, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquity: peakEquityUsd, currentEquity: currentEquityUsd });
     if (entriesHalt === "daily_loss_limit" && trip?.cause !== "daily_loss_limit") {
       await clearEntriesHalt(row, now, { cause: "daily_loss_limit", note: "A new day began; the daily loss limit no longer applies." });
       entriesHalt = null;
     }
     if (entriesHalt === null && trip) {
-      await haltEntries(row, trip.cause, now, { reason: trip.reason, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquityNok, currentEquityNok });
+      await haltEntries(row, trip.cause, now, { reason: trip.reason, realizedPnlTodayNok: counters.realizedPnlTodayNok, peakEquityUsd, currentEquityUsd });
       entriesHalt = trip.cause;
     }
 
@@ -589,13 +726,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     }
 
     const signal = acting.side;
-    const lastCloseNok = usdToNok(latestBar.close);
+    const lastCloseNok = latestBar.close * fx.rate;
     const evaluatedBarAt = latestBar.openTime;
 
     const ruleVersion = tradingRuleVersionLabel(ruleConfig);
     const side = signal;
     const quotePriceNok = side === "buy" ? quoteAskNok : quoteBidNok;
-    const requestedQuantity = side === "buy" ? (ruleConfig.type === "sma_crossover" ? (ruleConfig.orderSizeFraction * row.cashNok) / quotePriceNok : 0) : row.positionQuantity;
+    const quotePriceUsd = side === "buy" ? quote.askUsd : quote.bidUsd;
+    const requestedQuantity = side === "buy" ? (ruleConfig.type === "sma_crossover" ? (ruleConfig.orderSizeFraction * usd.cashUsd) / quotePriceUsd : 0) : row.positionQuantity;
 
     if (requestedQuantity <= 0) {
       await markNoAction(row, now, evaluatedBarAt);
@@ -614,13 +752,13 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
             quotePriceNok,
             requestedQuantity,
             riskConfig,
-            cashNok: row.cashNok,
+            cashNok: usd.cashUsd * fx.rate,
             positionQuantity: row.positionQuantity,
             positionCostNok: row.positionCostNok,
             ordersToday: counters.ordersToday,
             realizedPnlTodayNok: counters.realizedPnlTodayNok,
-            peakEquityNok,
-            currentEquityNok,
+            peakEquity: peakEquityUsd,
+            currentEquity: currentEquityUsd,
             entriesHaltedReason: entriesHalt ? describeTradingPauseReason(entriesHalt) : null,
           });
 
@@ -638,7 +776,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       const expiresAt = new Date(now.getTime() + TRADING_TRADE_APPROVAL_EXPIRY_MS);
       const [order] = await db
         .insert(tradingOrders)
-        .values({ companyId: row.companyId, strategyId: row.id, side, status: "pending_approval", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, approvalExpiresAt: expiresAt })
+        .values({ companyId: row.companyId, strategyId: row.id, side, status: "pending_approval", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, approvalExpiresAt: expiresAt, ...fxStampOf(fx) })
         .returning();
       const approvalId = await createTradeApproval(row, order!.id, verdict.reasonForOperator, expiresAt);
       await db.update(tradingOrders).set({ approvalId }).where(eq(tradingOrders.id, order!.id));
@@ -647,8 +785,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       return "approval_requested";
     }
 
-    if (side === "buy") await fillBuy(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now, evaluatedBarAt);
-    else await fillSell(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now, evaluatedBarAt);
+    if (side === "buy") await fillBuy(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, evaluatedBarAt);
+    else await fillSell(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, evaluatedBarAt);
     return "filled";
   }
 
@@ -700,8 +838,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           resolved++;
           continue;
         }
-        const priceNok = usdToNok(order.side === "buy" ? quote.askUsd : quote.bidUsd);
-        const drift = Math.abs(priceNok - order.signalPriceNok) / order.signalPriceNok;
+        const fx = await fxRates.current(now);
+        const priceUsd = order.side === "buy" ? quote.askUsd : quote.bidUsd;
+        // Compare in USD: the signal price was converted at the rate stamped on
+        // the pending order, so a new day's rate cannot look like price drift.
+        const signalPriceUsd = order.signalPriceNok / (order.fxRate ?? TRADING_ESTIMATED_USD_NOK_RATE);
+        const drift = Math.abs(priceUsd - signalPriceUsd) / signalPriceUsd;
         if (order.side === "buy" && drift * 100 > riskConfig.priceBandPct) {
           await db.update(tradingOrders).set({ status: "rejected", rejectionReason: "The price moved too far while the approval was pending." }).where(eq(tradingOrders.id, order.id));
           await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: "price_drift_after_approval" } });
@@ -709,8 +851,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           continue;
         }
         await db.update(tradingOrders).set({ status: "rejected" }).where(eq(tradingOrders.id, order.id)); // superseded by the fresh fill row fillBuy/fillSell inserts
-        if (order.side === "buy") await fillBuy(row, order.requestedQuantity, priceNok, order.ruleVersion, order.signalPriceNok, now);
-        else await fillSell(row, order.requestedQuantity, priceNok, order.ruleVersion, order.signalPriceNok, now);
+        if (order.side === "buy") await fillBuy(row, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now);
+        else await fillSell(row, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now);
         resolved++;
       }
     }
@@ -744,6 +886,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     setStatus,
     reconcileOnBoot,
     noteEngineVersion,
+    applyValuationSwitch,
     verifyMarketsOnBoot,
     dashboard,
     tick,
