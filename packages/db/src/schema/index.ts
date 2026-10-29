@@ -176,6 +176,7 @@ export { videoStorylineDirectors } from "./video_storyline_directors.js";
 export { videoStorylineWriterMessages } from "./video_storyline_writer_messages.js";
 export { mediaLoras, mediaModelSetups, mediaProjectDefaults } from "./media_model_setups.js";
 export { mediaModelSetupTrials } from "./media_model_setup_trials.js";
+export { tradingCandles, tradingCandleIngestEvents } from "./trading_candles.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
 export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions } from "./crypto_wallets.js";
 export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms, contractSettings } from "./contracts.js";
