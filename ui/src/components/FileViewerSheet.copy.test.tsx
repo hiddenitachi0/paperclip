@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -97,8 +98,17 @@ describe("FileViewerSheet copy actions", () => {
     window.history.pushState({}, "", "/PAP/issues/PAP-10629?file=videos%2F90-days-paperclip%2Ftweet.md");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     flushSync(() => root.unmount());
+    // Radix FocusScope (inside the Dialog) defers its unmount cleanup to a
+    // setTimeout(0) that builds a `new CustomEvent(...)` and dispatches it on
+    // the dialog container. Let that timer fire now, while jsdom is still the
+    // active environment. Left pending, it can run after Vitest has torn the
+    // environment down and restored Node's CustomEvent, and jsdom then throws
+    // "Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not
+    // of type 'Event'" as an unhandled error that fails the whole run. Timers
+    // with the same delay fire in scheduling order, so this one runs after it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
@@ -126,11 +136,15 @@ describe("FileViewerSheet copy actions", () => {
   async function click(label: string) {
     const button = document.body.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
     expect(button).not.toBeNull();
-    flushSync(() => {
+    // The copy handlers update state after awaiting the clipboard promise, and
+    // outside act() React would commit that update from a setImmediate task.
+    // A fixed setTimeout(0) wait could fire first when the event loop is busy,
+    // and the assertion then saw the DOM before "Copied ..." was rendered.
+    // act() keeps flushing React work until the queue is empty, so the
+    // assertions always see the committed result.
+    await act(async () => {
       button!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
-    await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   it("copies file contents and shows confirmation", async () => {
