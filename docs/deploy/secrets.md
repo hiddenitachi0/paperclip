@@ -53,18 +53,27 @@ own `PAPERCLIP_*` runtime variables.
 
 ## Default Provider: `local_encrypted`
 
-Secrets are encrypted with a local master key stored at:
+Secrets are encrypted with a local master key. The server looks for it in this
+order:
 
-```
-~/.paperclip/instances/default/secrets/master.key
-```
+1. `PAPERCLIP_SECRETS_MASTER_KEY`, handed to the server privately (see below).
+2. The key file at `PAPERCLIP_SECRETS_MASTER_KEY_FILE`, which defaults to
+   `~/.paperclip/instances/default/secrets/master.key`. This file is
+   auto-created during onboarding and on first use.
 
-This key is auto-created during onboarding. The key never leaves your machine.
-Paperclip best-effort enforces `0600` permissions when it creates or loads the
-key file. `paperclipai doctor` and the provider health API warn when the file is
-readable by group or other users.
+The key never leaves your machine. Paperclip best-effort enforces `0600`
+permissions when it creates or loads the key file. `paperclipai doctor` and the
+provider health API warn when the file is readable by group or other users.
 
-Back up the key file together with database backups. A database backup without
+A key file is readable by every agent run on the same host user. For
+authenticated deployments the provider health API therefore warns while the key
+comes from a file. Move the key into the server key file and set
+`PAPERCLIP_SECRETS_REQUIRE_ENV_KEY=true` (the Docker secrets overlay sets it
+for you). With that flag the provider never reads or creates a key file, and a
+missing key is an error rather than a silently generated new key. See
+[Moving the secrets master key](/deploy/secrets-master-key-move).
+
+Back up the key together with database backups. A database backup without
 the key cannot decrypt local secrets, and a key backup without the database
 metadata is not enough to restore named secret versions.
 
@@ -97,6 +106,7 @@ pnpm paperclipai secrets doctor --company-id <company-id>
 |----------|-------------|
 | `PAPERCLIP_SECRETS_MASTER_KEY` | 32-byte key as base64, hex, or raw string |
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | Custom key file path |
+| `PAPERCLIP_SECRETS_REQUIRE_ENV_KEY` | Set to `true` or `1` to require `PAPERCLIP_SECRETS_MASTER_KEY` and never touch a key file |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | Set to `true` to enforce secret refs |
 
 ## Strict Mode

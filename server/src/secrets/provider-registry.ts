@@ -1,4 +1,4 @@
-import type { SecretProvider, SecretProviderDescriptor } from "@paperclipai/shared";
+import type { DeploymentMode, SecretProvider, SecretProviderDescriptor } from "@paperclipai/shared";
 import { awsSecretsManagerProvider } from "./aws-secrets-manager-provider.js";
 import { localEncryptedProvider } from "./local-encrypted-provider.js";
 import {
@@ -29,6 +29,8 @@ export function listSecretProviders(): SecretProviderDescriptor[] {
   return providers.map((provider) => provider.descriptor());
 }
 
-export async function checkSecretProviders(): Promise<SecretProviderHealthCheck[]> {
-  return Promise.all(providers.map((provider) => provider.healthCheck()));
+export async function checkSecretProviders(
+  input: { deploymentMode?: DeploymentMode } = {},
+): Promise<SecretProviderHealthCheck[]> {
+  return Promise.all(providers.map((provider) => provider.healthCheck(input)));
 }
