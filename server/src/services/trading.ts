@@ -4,23 +4,30 @@ import { approvals, tradingOrders, tradingStrategies } from "@paperclipai/db";
 import {
   TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS,
   TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT,
+  TRADING_ENGINE_VERSION,
+  TRADING_MAX_CATCH_UP_BARS,
   TRADING_TICK_BATCH,
   TRADING_TRADE_APPROVAL_EXPIRY_MS,
+  ccxtSymbolFor,
   evaluateTradingRule,
   tradingRuleVersionLabel,
+  tradingSignalStillHolds,
+  tradingWarmUpBars,
   usdToNok,
   type CreateTradingStrategyInput,
   type TradingDashboardSummary,
+  type TradingAsset,
+  type TradingTimeframe,
   type TradingPauseReason,
   type TradingRiskConfig,
   type TradingRuleConfig,
   type TradingStrategyStatus,
   type UpdateTradingStrategyInput,
 } from "@paperclipai/shared";
-import { notFound } from "../errors.js";
+import { notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { approvalService } from "./approvals.js";
-import { ccxtTradingMarketData, isTradingMarketDataError, type TradingMarketDataSource } from "./trading-market-data.js";
+import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
 import { evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService } from "./trading-ledger.js";
 
@@ -53,14 +60,13 @@ export interface TradingTickResult {
   halted: number;
 }
 
-const TRADING_CANDLE_TIMEFRAME = "15m";
-
 function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/** Enough closed bars for the slowest indicator to warm up AND for a full catch-up to evaluate each missed bar with its own history, plus the forming bar the exchange appends (which is dropped). */
 function candleLimit(config: TradingRuleConfig): number {
-  return config.type === "sma_crossover" ? config.slowPeriod + 5 : 50;
+  return tradingWarmUpBars(config) + TRADING_MAX_CATCH_UP_BARS + 1;
 }
 
 export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
@@ -83,6 +89,16 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
 
   async function createStrategy(companyId: string, input: CreateTradingStrategyInput, actor: { actorType: "user" | "agent"; actorId: string }): Promise<TradingStrategyRow> {
     const now = nowOf();
+    // One symbol map, checked against the exchange's market list: a strategy
+    // for a market that is not there could only ever fail its price check.
+    // "unknown" (market list unreachable) fails closed too.
+    const availability = await marketData.marketAvailability(input.asset);
+    if (availability === "missing") {
+      throw unprocessable(`${input.asset} cannot be traded: the market ${ccxtSymbolFor(input.asset)} is not on the exchange. Pick another coin.`);
+    }
+    if (availability === "unknown") {
+      throw unprocessable("Could not check the exchange's market list just now, so the strategy was not created. Try again in a moment.");
+    }
     // Best-effort: record the asset's price at creation so the dashboard can
     // later compute a real buy-and-hold benchmark. A failed fetch here must
     // not block creating the strategy -- startingQuoteNok just stays null and
@@ -98,6 +114,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         asset: input.asset,
         mode: "paper",
         status: "paused",
+        timeframe: input.timeframe,
         checkEveryMinutes: input.checkEveryMinutes,
         nextCheckAt: now,
         ruleConfig: input.ruleConfig,
@@ -163,6 +180,52 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return { pausedCount: running.length };
   }
 
+  /**
+   * One ledger note per strategy when the engine version changes (DUR-4999),
+   * so a strategy's history shows where its behaviour changed even though its
+   * stored rule_config version never does. Call once at boot.
+   */
+  async function noteEngineVersion(): Promise<{ noted: number }> {
+    const rows = await db.select({ id: tradingStrategies.id, companyId: tradingStrategies.companyId }).from(tradingStrategies);
+    let noted = 0;
+    for (const row of rows) {
+      const previous = await ledger.latestEngineVersionNote({ companyId: row.companyId, strategyId: row.id });
+      if (previous === TRADING_ENGINE_VERSION) continue;
+      await ledger.writeLedgerEntry({
+        companyId: row.companyId,
+        strategyId: row.id,
+        eventType: "reconciliation",
+        detail: {
+          reason: "engine_version",
+          engineVersion: TRADING_ENGINE_VERSION,
+          previousEngineVersion: previous,
+          note:
+            previous === null
+              ? `Trading engine ${TRADING_ENGINE_VERSION}: decisions now use closed candles only. Earlier history was made by an older engine.`
+              : `Trading engine changed from ${previous} to ${TRADING_ENGINE_VERSION}.`,
+        },
+      });
+      noted++;
+    }
+    return { noted };
+  }
+
+  /** Boot check of the symbol map against the exchange's market list; never throws (a failed check just means create refuses until it can be done). */
+  async function verifyMarketsOnBoot(): Promise<{ missing: TradingAsset[]; strategiesOnMissingMarkets: number } | null> {
+    const check = await marketData.verifyMarkets();
+    if (isTradingMarketDataError(check)) {
+      logger.warn({ message: check.message }, "trading: market list check failed at boot");
+      return null;
+    }
+    let strategiesOnMissingMarkets = 0;
+    if (check.missing.length > 0) {
+      const rows = await db.select({ asset: tradingStrategies.asset }).from(tradingStrategies);
+      strategiesOnMissingMarkets = rows.filter((r) => check.missing.includes(r.asset as TradingAsset)).length;
+      logger.warn({ missing: check.missing.map((a) => ccxtSymbolFor(a)), strategiesOnMissingMarkets }, "trading: mapped markets missing from the exchange's market list");
+    }
+    return { missing: check.missing, strategiesOnMissingMarkets };
+  }
+
   async function dashboard(companyId: string, strategyId: string): Promise<TradingDashboardSummary> {
     const row = await requireStrategy(companyId, strategyId);
     const now = nowOf();
@@ -223,8 +286,11 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       : { ordersTodayDate: today, ordersToday: 0, realizedPnlTodayDate: today, realizedPnlTodayNok: 0 };
   }
 
-  async function haltStrategy(row: TradingStrategyRow, reason: TradingPauseReason, now: Date, detail: Record<string, unknown>) {
-    await db.update(tradingStrategies).set({ status: "halted_risk", pauseReason: reason, checkLeaseUntil: null, lastTickAt: now, updatedAt: now }).where(eq(tradingStrategies.id, row.id));
+  async function haltStrategy(row: TradingStrategyRow, reason: TradingPauseReason, now: Date, detail: Record<string, unknown>, evaluatedBarAt?: Date) {
+    await db
+      .update(tradingStrategies)
+      .set({ status: "halted_risk", pauseReason: reason, checkLeaseUntil: null, lastTickAt: now, updatedAt: now, ...(evaluatedBarAt ? { lastEvaluatedBarAt: evaluatedBarAt } : {}) })
+      .where(eq(tradingStrategies.id, row.id));
     await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, eventType: "circuit_breaker", detail });
     logger.warn({ strategyId: row.id, companyId: row.companyId, reason, ...detail }, "trading: strategy halted");
   }
@@ -260,7 +326,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return approval!.id;
   }
 
-  async function fillBuy(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date) {
+  async function fillBuy(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
@@ -297,11 +363,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         nextCheckAt: new Date(now.getTime() + row.checkEveryMinutes * 60_000),
         checkLeaseUntil: null,
         updatedAt: now,
+        ...(evaluatedBarAt ? { lastEvaluatedBarAt: evaluatedBarAt } : {}),
       })
       .where(eq(tradingStrategies.id, row.id));
   }
 
-  async function fillSell(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date) {
+  async function fillSell(row: TradingStrategyRow, quantity: number, priceNok: number, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
@@ -352,15 +419,25 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         nextCheckAt: new Date(now.getTime() + row.checkEveryMinutes * 60_000),
         checkLeaseUntil: null,
         updatedAt: now,
+        ...(evaluatedBarAt ? { lastEvaluatedBarAt: evaluatedBarAt } : {}),
       })
       .where(eq(tradingStrategies.id, row.id));
   }
 
-  async function markNoAction(row: TradingStrategyRow, now: Date) {
+  async function markNoAction(row: TradingStrategyRow, now: Date, evaluatedBarAt?: Date) {
     const counters = dayCounters(row, now);
     await db
       .update(tradingStrategies)
-      .set({ ...counters, lastTickAt: now, lastTickError: null, consecutiveErrors: 0, nextCheckAt: new Date(now.getTime() + row.checkEveryMinutes * 60_000), checkLeaseUntil: null, updatedAt: now })
+      .set({
+        ...counters,
+        lastTickAt: now,
+        lastTickError: null,
+        consecutiveErrors: 0,
+        nextCheckAt: new Date(now.getTime() + row.checkEveryMinutes * 60_000),
+        checkLeaseUntil: null,
+        updatedAt: now,
+        ...(evaluatedBarAt ? { lastEvaluatedBarAt: evaluatedBarAt } : {}),
+      })
       .where(eq(tradingStrategies.id, row.id));
   }
 
@@ -369,7 +446,15 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     const ruleConfig = row.ruleConfig as TradingRuleConfig;
     const riskConfig = row.riskConfig as TradingRiskConfig;
 
-    const candles = await marketData.fetchCandles(asset, TRADING_CANDLE_TIMEFRAME, candleLimit(ruleConfig), now);
+    const timeframe = row.timeframe as TradingTimeframe;
+    const raw = await marketData.fetchCandles(asset, timeframe, candleLimit(ruleConfig), now);
+    if (isTradingMarketDataError(raw)) {
+      await recordTickFailure(row, raw.message, now);
+      return raw.kind === "upstream" || raw.kind === "no_data" ? "error" : "halted";
+    }
+    // Closed bars only: the forming bar never reaches the rule, and price age
+    // is measured from the newest closed bar's close time.
+    const candles = prepareClosedCandles(raw, timeframe, now, ccxtSymbolFor(asset));
     if (isTradingMarketDataError(candles)) {
       await recordTickFailure(row, candles.message, now);
       return candles.kind === "upstream" || candles.kind === "no_data" ? "error" : "halted";
@@ -380,14 +465,6 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       return quote.kind === "upstream" || quote.kind === "no_data" ? "error" : "halted";
     }
 
-    const jumpPct = singleTickPriceJumpPct(candles.closes);
-    if (jumpPct !== null && jumpPct > TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT) {
-      await haltStrategy(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct });
-      return "halted";
-    }
-
-    const signal = evaluateTradingRule(candles.closes, ruleConfig);
-    const lastCloseNok = usdToNok(candles.closes[candles.closes.length - 1]!);
     const quoteBidNok = usdToNok(quote.bidUsd);
     const quoteAskNok = usdToNok(quote.askUsd);
     const currentEquityNok = row.cashNok + row.positionQuantity * quoteBidNok;
@@ -396,10 +473,76 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       await db.update(tradingStrategies).set({ peakEquityNok }).where(eq(tradingStrategies.id, row.id));
     }
 
-    if (signal === "hold") {
-      await markNoAction(row, now);
+    // Which closed bars are new since the last evaluation? Never evaluated =
+    // only the latest bar: a fresh or migrated strategy must not trade history.
+    const bars = candles.candles;
+    const latestIndex = bars.length - 1;
+    const latestBar = bars[latestIndex]!;
+    const lastEvaluatedMs = row.lastEvaluatedBarAt?.getTime() ?? null;
+    const firstNewIndex = lastEvaluatedMs === null ? latestIndex : bars.findIndex((b) => b.openTime.getTime() > lastEvaluatedMs);
+    if (firstNewIndex < 0) {
+      await markNoAction(row, now); // no new closed bar since the last check
       return "no_action";
     }
+    const newBarCount = latestIndex - firstNewIndex + 1;
+    if (newBarCount > TRADING_MAX_CATCH_UP_BARS) {
+      await ledger.writeLedgerEntry({
+        companyId: row.companyId,
+        strategyId: row.id,
+        eventType: "reconciliation",
+        detail: { reason: "catch_up_gap", missedBars: newBarCount, maxCatchUpBars: TRADING_MAX_CATCH_UP_BARS, timeframe, skippedThrough: latestBar.openTime.toISOString() },
+      });
+      await markNoAction(row, now, latestBar.openTime);
+      return "no_action";
+    }
+
+    const jumpPct = singleTickPriceJumpPct(candles.closes);
+    if (jumpPct !== null && jumpPct > TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT) {
+      await haltStrategy(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct }, latestBar.openTime);
+      return "halted";
+    }
+
+    // Evaluate every new closed bar in order, each with its own history. An
+    // older bar's entry only acts if its condition still holds on the latest
+    // closed bar; held entries are all the same side, so only the newest one
+    // acts. Everything else is logged, not silently dropped.
+    const events: Array<{ index: number; side: "buy" | "sell" }> = [];
+    for (let i = firstNewIndex; i <= latestIndex; i++) {
+      const signalAtBar = evaluateTradingRule(candles.closes.slice(0, i + 1), ruleConfig);
+      if (signalAtBar !== "hold") events.push({ index: i, side: signalAtBar });
+    }
+    const held = events.filter((e) => e.index === latestIndex || tradingSignalStillHolds(candles.closes, ruleConfig, e.side));
+    const acting = held[held.length - 1] ?? null;
+    for (const e of events) {
+      if (e === acting) continue;
+      await ledger.writeLedgerEntry({
+        companyId: row.companyId,
+        strategyId: row.id,
+        eventType: "signal",
+        detail: {
+          kind: "missed_while_not_checking",
+          side: e.side,
+          barOpenTime: bars[e.index]!.openTime.toISOString(),
+          reason: held.includes(e) ? "superseded_by_later_signal" : "no_longer_holds",
+        },
+      });
+    }
+    if (acting === null) {
+      await markNoAction(row, now, latestBar.openTime);
+      return "no_action";
+    }
+    if (acting.index < latestIndex) {
+      await ledger.writeLedgerEntry({
+        companyId: row.companyId,
+        strategyId: row.id,
+        eventType: "signal",
+        detail: { kind: "caught_up_entry", side: acting.side, barOpenTime: bars[acting.index]!.openTime.toISOString(), stillHoldsOn: latestBar.openTime.toISOString() },
+      });
+    }
+
+    const signal = acting.side;
+    const lastCloseNok = usdToNok(latestBar.close);
+    const evaluatedBarAt = latestBar.openTime;
 
     const ruleVersion = tradingRuleVersionLabel(ruleConfig);
     const side = signal;
@@ -407,7 +550,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     const requestedQuantity = side === "buy" ? (ruleConfig.type === "sma_crossover" ? (ruleConfig.orderSizeFraction * row.cashNok) / quotePriceNok : 0) : row.positionQuantity;
 
     if (requestedQuantity <= 0) {
-      await markNoAction(row, now);
+      await markNoAction(row, now, evaluatedBarAt);
       return "no_action";
     }
 
@@ -433,7 +576,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         .values({ companyId: row.companyId, strategyId: row.id, side, status: "rejected", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, rejectionReason: verdict.reason })
         .returning();
       await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "risk_block", detail: { side, reason: verdict.reason } });
-      await markNoAction(row, now);
+      await markNoAction(row, now, evaluatedBarAt);
       return "blocked";
     }
 
@@ -446,12 +589,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       const approvalId = await createTradeApproval(row, order!.id, verdict.reasonForOperator, expiresAt);
       await db.update(tradingOrders).set({ approvalId }).where(eq(tradingOrders.id, order!.id));
       await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "signal", detail: { side, reason: "needs_approval", approvalId } });
-      await markNoAction(row, now);
+      await markNoAction(row, now, evaluatedBarAt);
       return "approval_requested";
     }
 
-    if (side === "buy") await fillBuy(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now);
-    else await fillSell(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now);
+    if (side === "buy") await fillBuy(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now, evaluatedBarAt);
+    else await fillSell(row, requestedQuantity, quotePriceNok, ruleVersion, lastCloseNok, now, evaluatedBarAt);
     return "filled";
   }
 
@@ -530,6 +673,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     updateStrategy,
     setStatus,
     reconcileOnBoot,
+    noteEngineVersion,
+    verifyMarketsOnBoot,
     dashboard,
     tick,
     listLedgerEntries: (companyId: string, strategyId: string, limit = 200) => ledger.listLedgerEntries({ companyId, strategyId, limit }),

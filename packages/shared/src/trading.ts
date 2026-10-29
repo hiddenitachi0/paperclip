@@ -78,7 +78,7 @@ export type TradingLedgerEventType = (typeof TRADING_LEDGER_EVENT_TYPES)[number]
 
 // ─── Tradable assets (spot only, no leverage -- design report section 4) ──
 
-/** Reuse the same coin list watchers already offer, so the operator picks from one familiar list. CCXT symbol is "<BASE>/USDT". */
+/** Reuse the same coin list watchers already offer, so the operator picks from one familiar list. */
 export const TRADING_ASSETS = [
   "BTC",
   "ETH",
@@ -95,11 +95,33 @@ export const TRADING_ASSETS = [
 ] as const;
 export type TradingAsset = (typeof TRADING_ASSETS)[number];
 
+/**
+ * The one symbol map (DUR-4999, decision 6): every asset trades against USD
+ * on Kraken. server/src/services/trading-market-data.ts checks it at boot
+ * against the exchange's own market list and refuses to create a strategy
+ * for an asset whose market is missing (Kraken has no BNB market, for one).
+ * Nothing else builds a symbol string.
+ */
+export const TRADING_MARKET_SYMBOLS: Readonly<Record<TradingAsset, string>> = {
+  BTC: "BTC/USD",
+  ETH: "ETH/USD",
+  SOL: "SOL/USD",
+  XRP: "XRP/USD",
+  BNB: "BNB/USD",
+  ADA: "ADA/USD",
+  DOGE: "DOGE/USD",
+  TRX: "TRX/USD",
+  AVAX: "AVAX/USD",
+  DOT: "DOT/USD",
+  LINK: "LINK/USD",
+  LTC: "LTC/USD",
+};
+
 export function ccxtSymbolFor(asset: TradingAsset): string {
-  return `${asset}/USDT`;
+  return TRADING_MARKET_SYMBOLS[asset];
 }
 
-/** USDT tracks USD closely enough for this purpose; reuse the existing purchase-gate FX table rather than a second one. */
+/** Quotes are in USD; reuse the existing purchase-gate FX table rather than a second one. */
 export function usdToNok(amountUsd: number): number {
   return amountUsd * DEFAULT_FX_RATES_TO_NOK.USD;
 }
@@ -151,8 +173,64 @@ export const DEFAULT_TRADING_RISK_CONFIG: TradingRiskConfig = {
   maxDrawdownPct: 10,
   priceBandPct: 2,
   approvalAboveNok: 500,
-  feeRatePct: 0.25,
+  // DUR-4999 (decision 5): 0.40% per side, a realistic retail taker fee.
+  feeRatePct: 0.4,
 };
+
+// ─── Candle timeframes and the engine version (DUR-4999) ───────────────────
+
+/**
+ * Bump when a change to the engine alters what a strategy would do with the
+ * same rule config (closed-candle-only evaluation was engine 2). It goes in
+ * every rule label (`sma_crossover@1 · engine 2`) instead of changing the
+ * `version: z.literal(1)` stored in rule_config, so old rows keep parsing.
+ */
+export const TRADING_ENGINE_VERSION = 2;
+
+export const TRADING_TIMEFRAMES = ["15m", "1h", "4h", "1d"] as const;
+export type TradingTimeframe = (typeof TRADING_TIMEFRAMES)[number];
+/** Decision 4: new strategies decide on 4-hour candles. Existing rows were created on 15m and keep it (column default). */
+export const DEFAULT_TRADING_TIMEFRAME: TradingTimeframe = "4h";
+
+const TIMEFRAME_MS: Record<TradingTimeframe, number> = {
+  "15m": 15 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+};
+
+export function tradingTimeframeMs(timeframe: TradingTimeframe): number {
+  return TIMEFRAME_MS[timeframe];
+}
+
+/** Exchanges publish a closed bar a little late. */
+export const TRADING_CANDLE_GRACE_MINUTES = 10;
+/** Evaluating more than this many missed bars in one tick is a gap, not a catch-up: record it and skip. */
+export const TRADING_MAX_CATCH_UP_BARS = 50;
+
+export interface TradingCandle {
+  /** Bar start. The bar closes at openTime + timeframe. */
+  openTime: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export function tradingCandleCloseTime(candle: Pick<TradingCandle, "openTime">, timeframe: TradingTimeframe): Date {
+  return new Date(candle.openTime.getTime() + TIMEFRAME_MS[timeframe]);
+}
+
+/** Drops every still-forming bar (openTime + timeframe > now). Oldest-first in, oldest-first out. */
+export function dropFormingCandles<T extends Pick<TradingCandle, "openTime">>(candles: readonly T[], timeframe: TradingTimeframe, now: Date): T[] {
+  return candles.filter((c) => c.openTime.getTime() + TIMEFRAME_MS[timeframe] <= now.getTime());
+}
+
+/** How old a closed bar may be (measured from its CLOSE time) before the price is "stale": one timeframe plus the grace. */
+export function tradingMaxCandleAgeMs(timeframe: TradingTimeframe): number {
+  return TIMEFRAME_MS[timeframe] + TRADING_CANDLE_GRACE_MINUTES * 60_000;
+}
 
 // ─── Deterministic rule engine (Phase 1: one simple rule) ──────────────────
 
@@ -191,7 +269,7 @@ export const DEFAULT_TRADING_RULE_CONFIG: SmaCrossoverConfig = {
 };
 
 export function tradingRuleVersionLabel(config: TradingRuleConfig): string {
-  return `${config.type}@${config.version}`;
+  return `${config.type}@${config.version} · engine ${TRADING_ENGINE_VERSION}`;
 }
 
 export type TradingSignal = "buy" | "sell" | "hold";
@@ -219,6 +297,34 @@ export function evaluateSmaCrossover(closes: readonly number[], config: SmaCross
   if (prevFast <= prevSlow && curFast > curSlow) return "buy";
   if (prevFast >= prevSlow && curFast < curSlow) return "sell";
   return "hold";
+}
+
+/**
+ * Does the state a crossover signal announced still hold on the latest bar?
+ * A buy needs fast above slow, a sell needs fast below slow. Used by the
+ * catch-up: an old bar's entry only acts if it still holds now.
+ */
+export function smaCrossoverStillHolds(closes: readonly number[], config: SmaCrossoverConfig, signal: "buy" | "sell"): boolean {
+  const fast = simpleMovingAverage(closes, config.fastPeriod);
+  const slow = simpleMovingAverage(closes, config.slowPeriod);
+  if (fast === null || slow === null) return false;
+  return signal === "buy" ? fast > slow : fast < slow;
+}
+
+export function tradingSignalStillHolds(closes: readonly number[], config: TradingRuleConfig, signal: "buy" | "sell"): boolean {
+  switch (config.type) {
+    case "sma_crossover":
+      return smaCrossoverStillHolds(closes, config, signal);
+    default: {
+      const exhaustive: never = config.type;
+      throw new Error(`Unknown trading rule type: ${exhaustive}`);
+    }
+  }
+}
+
+/** Closed bars the slowest indicator needs before it can produce a signal (the +1 is the "previous" pair a crossover compares against). */
+export function tradingWarmUpBars(config: TradingRuleConfig): number {
+  return config.type === "sma_crossover" ? config.slowPeriod + 1 : 50;
 }
 
 export function evaluateTradingRule(closes: readonly number[], config: TradingRuleConfig): TradingSignal {
@@ -261,6 +367,8 @@ export const createTradingStrategySchema = z
   .object({
     name: strategyFields.name,
     asset: strategyFields.asset,
+    /** Candle size the rule decides on. Not editable afterwards (PATCH is unchanged): a different timeframe is a different strategy. */
+    timeframe: z.enum(TRADING_TIMEFRAMES).optional().default(DEFAULT_TRADING_TIMEFRAME),
     checkEveryMinutes: strategyFields.checkEveryMinutes.optional().default(15),
     startingCashNok: strategyFields.startingCashNok.optional().default(3_000),
     ruleConfig: strategyFields.ruleConfig.optional().default(DEFAULT_TRADING_RULE_CONFIG),

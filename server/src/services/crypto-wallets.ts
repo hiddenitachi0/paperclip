@@ -47,7 +47,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
-import { assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
+import { assertCryptoKeyImportAllowed, assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
   CryptoChainError,
   defaultCryptoChainAdapters,
@@ -410,6 +410,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
   async function createWallet(companyId: string, input: CreateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     if (input.network === "mainnet") assertCryptoRealMoneyAllowed();
+    if (input.mode === "import") assertCryptoKeyImportAllowed();
     const agent = await requireAgent(companyId, input.agentId);
     const settings = await getSettings(companyId);
     if (input.network === "mainnet" && !settings.mainnetEnabled) {
@@ -437,6 +438,27 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       .from(cryptoWallets)
       .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.chain, input.chain), eq(cryptoWallets.network, input.network), eq(cryptoWallets.address, material.address)));
     if (duplicate) throw conflict("This company already has a wallet with that key.");
+
+    // One key, one network: the same key (or the address it makes) must never
+    // back both a test wallet and a real-money wallet. EVM and Solana keys make
+    // the same address on both networks; a bitcoin key makes a tb1 and a bc1
+    // address, so the other network's address is derived from the key.
+    const otherNetwork: CryptoNetwork = input.network === "mainnet" ? "testnet" : "mainnet";
+    const sameKeyFamily = input.chain === "bitcoin" || input.chain === "solana" ? [input.chain] : ["ethereum", "hyperliquid"];
+    let otherAddress: string;
+    try {
+      otherAddress = await adapter.deriveAddress(material.privateKey, otherNetwork);
+    } catch {
+      throw unprocessable("Could not read that key.");
+    }
+    const onOtherNetwork = await db
+      .select({ address: cryptoWallets.address })
+      .from(cryptoWallets)
+      .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.network, otherNetwork), inArray(cryptoWallets.chain, sameKeyFamily)));
+    const reused = (address: string) => (sameKeyFamily.length > 1 ? address.toLowerCase() : address);
+    if (onOtherNetwork.some((w) => reused(w.address) === reused(otherAddress) || reused(w.address) === reused(material.address))) {
+      throw conflict("That key or address is already used by a wallet on the other network (test and real-money wallets must never share a key). Use a new wallet.");
+    }
 
     const info = CRYPTO_CHAIN_INFO[input.chain];
     const shortAddress = `${material.address.slice(0, 8)}…${material.address.slice(-6)}`;

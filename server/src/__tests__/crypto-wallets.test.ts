@@ -21,6 +21,8 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { base58Decode, base58Encode } from "../services/crypto-wallet-encoding.ts";
 import {
+  bitcoinAdapter,
+  CryptoChainError,
   solanaAdapter,
   type ChainContext,
   type CryptoChainAdapter,
@@ -1128,5 +1130,71 @@ d("crypto wallets for agents", () => {
     const tx = Buffer.from(solState.sent[0]!.raw, "base64");
     expect(base58Encode(new Uint8Array(tx.subarray(65 + 4, 65 + 4 + 32)))).toBe(wallet.address);
     expect(base58Decode(wallet.address)).toHaveLength(32);
+  });
+
+  // ─── Test-network hardening (DUR-5023) ────────────────────────────────
+
+  async function enableMainnet(companyId: string) {
+    expect((await boardApp(companyId, "owner").patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" })).status).toBe(200);
+  }
+
+  it("refuses to import a private key while the real-money lock is on, on every network, and keeps generating working", async () => {
+    const { companyId, agentId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    const kp = solanaKeypair();
+    delete process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
+    try {
+      const refused = await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 });
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toMatch(/Importing a private key is switched off while real money is locked/);
+      expect(JSON.stringify(refused.body)).not.toContain(kp.secretBase58);
+      expect(await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).toHaveLength(0);
+      expect((await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Made here", mode: "generate" })).status).toBe(201);
+    } finally {
+      process.env.PAPERCLIP_CRYPTO_REAL_MONEY = "allowed";
+    }
+    // With the lock open an import is still possible.
+    expect((await owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", label: "Imported", mode: "import", privateKey: kp.secretBase58 })).status).toBe(201);
+  });
+
+  it("refuses a key or address that already exists on the other network (Solana: same address on both)", async () => {
+    const { companyId, agentId } = await seed();
+    await enableMainnet(companyId);
+    const owner = boardApp(companyId, "owner");
+    const kp = solanaKeypair();
+    const make = (network: "testnet" | "mainnet", key: string) =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network, label: "Reuse", mode: "import", privateKey: key });
+    expect((await make("testnet", kp.secretBase58)).status).toBe(201);
+    const onMainnet = await make("mainnet", kp.secretBase58);
+    expect(onMainnet.status).toBe(409);
+    expect(onMainnet.body.error).toMatch(/already used by a wallet on the other network/);
+    // The other way round.
+    const other = solanaKeypair();
+    expect((await make("mainnet", other.secretBase58)).status).toBe(201);
+    expect((await make("testnet", other.secretBase58)).status).toBe(409);
+    // Same network, same key is still the old duplicate refusal.
+    expect((await make("testnet", kp.secretBase58)).status).toBe(409);
+    const rows = await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
+    expect(rows).toHaveLength(2);
+    // A different key on the other network is fine.
+    expect((await make("mainnet", solanaKeypair().secretBase58)).status).toBe(201);
+  });
+
+  it("refuses a bitcoin key that already backs a wallet on the other network, though its tb1 and bc1 addresses differ", async () => {
+    const { companyId, agentId } = await seed();
+    await enableMainnet(companyId);
+    adapters = { ...adapters, bitcoin: bitcoinAdapter(async () => { throw new CryptoChainError("libs_missing", "not installed"); }) };
+    const owner = boardApp(companyId, "owner");
+    const key = (await adapters.bitcoin.generateKey("testnet")).privateKey;
+    const make = (network: "testnet" | "mainnet") =>
+      owner.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "bitcoin", network, label: "Reuse", mode: "import", privateKey: key });
+    const first = await make("testnet");
+    expect(first.status).toBe(201);
+    expect(first.body.address).toMatch(/^tb1/);
+    const second = await make("mainnet");
+    expect(second.status).toBe(409);
+    expect(second.body.error).toMatch(/already used by a wallet on the other network/);
+    expect(JSON.stringify(second.body)).not.toContain(key);
+    expect(await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId))).toHaveLength(1);
   });
 });
