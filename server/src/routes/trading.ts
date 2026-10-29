@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { createTradingStrategySchema, setTradingStrategyStatusSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { createTradingStrategySchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
@@ -17,13 +17,17 @@ import { tradingService, type TradingServiceDeps } from "../services/trading.js"
  * owner/admin-only, the same bar as company connections
  * (assertCompanyOwnerAdminOrInstanceAdmin); reading is open to any active
  * company member.
+ *
+ * DUR-5002: changing a strategy's rules or limits (PATCH, or POST .../versions)
+ * only ever files a draft version and an approval card; no route here
+ * activates one. Approving happens on the card (routes/approvals.ts).
  */
 
 /** `deps` lets tests inject a fake TradingMarketDataSource (createStrategy's quote fetch) without a real network call; app.ts always calls this with none, i.e. the real Kraken client. */
 export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
-  const trading = tradingService(db, deps);
+  const trading = tradingService(db, { rawDb, ...deps });
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -64,9 +68,48 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     validate(updateTradingStrategySchema),
     writeScope(),
     async (req, res) => {
-      res.json(await trading.updateStrategy(req.params.companyId as string, req.params.strategyId as string, req.body));
+      // writeScope() enforces board-only, so the actor is always a person here.
+      const actor = { actorType: "user" as const, actorId: req.actor.userId ?? "board" };
+      const row = await trading.updateStrategy(req.params.companyId as string, req.params.strategyId as string, req.body, actor);
+      // 202: the request was understood but the rules did NOT change; a draft and an approval card were filed.
+      res.status(row.pendingVersion ? 202 : 200).json(row);
     },
   );
+
+  // ─── Rule-book versions (DUR-5002) ───────────────────────────────────
+
+  router.get("/companies/:companyId/trading/strategies/:strategyId/versions", readScope(), async (req, res) => {
+    res.json(await trading.versions.listVersions(req.params.companyId as string, req.params.strategyId as string));
+  });
+
+  router.get("/companies/:companyId/trading/strategies/:strategyId/versions/:versionId", readScope(), async (req, res) => {
+    res.json(await trading.versions.getVersion(req.params.companyId as string, req.params.strategyId as string, req.params.versionId as string));
+  });
+
+  /**
+   * Propose new rules: stores a draft version and files the approval card for
+   * it. Nothing changes for the running strategy until an owner or admin
+   * approves the card (on the card itself; no route here activates anything).
+   */
+  router.post(
+    "/companies/:companyId/trading/strategies/:strategyId/versions",
+    writeScope(),
+    validate(tradingRuleBookSchema),
+    async (req, res) => {
+      const result = await trading.versions.proposeVersion(
+        req.params.companyId as string,
+        req.params.strategyId as string,
+        req.body,
+        { type: "user", id: req.actor.userId ?? "board" },
+      );
+      res.status(result.outcome === "unchanged" ? 200 : 202).json(result);
+    },
+  );
+
+  /** The rules an approval card stands for, read from the stored version (never the card's own copy). */
+  router.get("/companies/:companyId/trading/approval-cards/:approvalId/source", readScope(), async (req, res) => {
+    res.json(await trading.versions.getCardSource(req.params.companyId as string, req.params.approvalId as string));
+  });
 
   /** The kill switch -- the one route the UI's pause/resume button and the Telegram bridge's command both call. */
   router.post(

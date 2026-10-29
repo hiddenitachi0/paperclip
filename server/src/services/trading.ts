@@ -1,6 +1,6 @@
-import { and, asc, eq, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lt, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvals, tradingOrders, tradingStrategies } from "@paperclipai/db";
+import { approvals, tradingFifoLots, tradingOrders, tradingStrategies } from "@paperclipai/db";
 import {
   TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS,
   TRADING_ENGINE_VERSION,
@@ -9,20 +9,25 @@ import {
   TRADING_TICK_BATCH,
   TRADING_TRADE_APPROVAL_EXPIRY_MS,
   ccxtSymbolFor,
+  computeTradingEntryLevels,
+  deriveTradingRiskConfig,
   describeTradingPauseReason,
-  evaluateTradingRule,
-  tradingRuleVersionLabel,
+  evaluateTradingCatchUp,
+  legacySmaCrossoverSpec,
   tradingEntriesHaltedReason,
   tradingPriceJumpThresholdPct,
-  tradingSignalStillHolds,
-  tradingWarmUpBars,
+  tradingSpecWarmupBars,
+  tradingStrategySpecSchema,
+  tradingTimeframeMs,
   type CreateTradingStrategyInput,
   type TradingDashboardSummary,
   type TradingAsset,
+  type TradingEngineBar,
+  type TradingPositionState,
   type TradingTimeframe,
   type TradingPauseReason,
   type TradingRiskConfig,
-  type TradingRuleConfig,
+  type TradingStrategySpec,
   type TradingStrategyStatus,
   type UpdateTradingStrategyInput,
 } from "@paperclipai/shared";
@@ -33,6 +38,7 @@ import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rate
 import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
 import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
+import { tradingVersionsService, tradingVersionLabel, type ProposeVersionResult, type TradingProposer, type TradingStrategyVersionRow } from "./trading-versions.js";
 
 /**
  * The trading agent (DUR-4153/DUR-4171): CRUD for strategies, the tick loop
@@ -54,6 +60,32 @@ export interface TradingServiceDeps {
   marketData?: TradingMarketDataSource;
   /** The USD/NOK rate source. Default: read-only over the stored daily rates (the server's scheduler passes one that also fetches them). */
   fxRates?: FxRatesService;
+  /** The raw (non request-scoped) db, for the transactions a version change needs. Defaults to the db passed in. */
+  rawDb?: Db;
+}
+
+/** What the open position's protective levels look like in trading_strategies.position_levels. USD, like the bars. */
+export interface TradingPositionLevelsRecord {
+  versionId: string;
+  entryPrice: number;
+  entryAt: string;
+  stopPrice: number | null;
+  targetPrice: number | null;
+  highestPrice: number;
+}
+
+/** The rule-book version a fill is stamped with, and the protective levels a buy starts the position with. */
+interface FillStamp {
+  versionId: string | null;
+  levels: TradingPositionLevelsRecord | null;
+}
+
+/** What a PATCH that changes the rules returns next to the row: the rules were NOT changed, a draft and a card were filed. */
+export interface TradingPendingVersion {
+  outcome: ProposeVersionResult["outcome"];
+  versionId: string;
+  versionNumber: number;
+  approvalId: string | null;
 }
 
 export interface TradingTickResult {
@@ -70,8 +102,8 @@ function utcDay(date: Date): string {
 }
 
 /** Enough closed bars for the slowest indicator to warm up AND for a full catch-up to evaluate each missed bar with its own history, plus the forming bar the exchange appends (which is dropped). */
-function candleLimit(config: TradingRuleConfig): number {
-  return tradingWarmUpBars(config) + TRADING_MAX_CATCH_UP_BARS + 1;
+function candleLimit(spec: TradingStrategySpec): number {
+  return tradingSpecWarmupBars(spec) + TRADING_MAX_CATCH_UP_BARS + 1;
 }
 
 function fxStampOf(fx: FxRateQuote): TradingFxStamp {
@@ -101,6 +133,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
   const fxRates = deps.fxRates ?? fxRatesService(db);
   const ledger = tradingLedgerService(db);
   const approvalsSvc = approvalService(db);
+  const versions = tradingVersionsService(db, { rawDb: deps.rawDb, now: deps.now });
+
+  /** The strategy as the tick must see it: the risk config comes from the active version, never from the cache column. */
+  function readingVersion<T extends TradingStrategyRow>(row: T, spec: TradingStrategySpec): T {
+    return { ...row, riskConfig: deriveTradingRiskConfig(spec) };
+  }
 
   // ─── CRUD ──────────────────────────────────────────────────────────────
 
@@ -136,63 +174,102 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     const startingQuoteUsd = isTradingMarketDataError(quote) ? null : quote.bidUsd;
     const startingQuoteNok = startingQuoteUsd === null ? null : startingQuoteUsd * fx.rate;
     const startingCashUsd = input.startingCashNok / fx.rate;
-    const [row] = await db
-      .insert(tradingStrategies)
-      .values({
+    if (actor.actorType !== "user") throw unprocessable("Only a person can create a trading strategy.");
+    // The owner/admin who creates it approves its first version by creating it:
+    // the rules go in as version 1 and the strategy's cache columns are written
+    // from that version in the same transaction.
+    const book = {
+      spec: legacySmaCrossoverSpec({ name: input.name, asset: input.asset, timeframe: input.timeframe, rule: input.ruleConfig, risk: input.riskConfig }),
+      guidelines: "",
+    };
+    return versions.inTransaction(companyId, async (tx) => {
+      const [created] = await tx
+        .insert(tradingStrategies)
+        .values({
+          companyId,
+          name: input.name,
+          asset: input.asset,
+          mode: "paper",
+          status: "paused",
+          timeframe: input.timeframe,
+          checkEveryMinutes: input.checkEveryMinutes,
+          nextCheckAt: now,
+          ruleConfig: input.ruleConfig,
+          riskConfig: input.riskConfig,
+          startingCashNok: input.startingCashNok,
+          startingQuoteNok,
+          startingQuoteUsd,
+          startingCashUsd,
+          cashNok: input.startingCashNok,
+          cashUsd: startingCashUsd,
+          peakEquityNok: input.startingCashNok,
+          peakEquityUsd: startingCashUsd,
+          createdByUserId: actor.actorId,
+        })
+        .returning();
+      await versions.createInitialVersion(tx, created!, book, actor.actorId);
+      // Born on the daily rate, so the boot-time valuation switch (which resets
+      // the drawdown peak) must never touch it: without this note a restart
+      // would release a drawdown stop on any strategy created after the deploy.
+      await tradingLedgerService(tx).writeLedgerEntry({
         companyId,
-        name: input.name,
-        asset: input.asset,
-        mode: "paper",
-        status: "paused",
-        timeframe: input.timeframe,
-        checkEveryMinutes: input.checkEveryMinutes,
-        nextCheckAt: now,
-        ruleConfig: input.ruleConfig,
-        riskConfig: input.riskConfig,
-        startingCashNok: input.startingCashNok,
-        startingQuoteNok,
-        startingQuoteUsd,
-        startingCashUsd,
-        cashNok: input.startingCashNok,
-        cashUsd: startingCashUsd,
-        peakEquityNok: input.startingCashNok,
-        peakEquityUsd: startingCashUsd,
-        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-      })
-      .returning();
-    // Born on the daily rate, so the boot-time valuation switch (which resets
-    // the drawdown peak) must never touch it: without this note a restart
-    // would release a drawdown stop on any strategy created after the deploy.
-    await ledger.writeLedgerEntry({
-      companyId,
-      strategyId: row!.id,
-      eventType: "reconciliation",
-      detail: {
-        reason: "valuation_switch",
-        note: "strategy created on the daily Norges Bank rate; no valuation switch needed",
-        created: true,
-        rate: fx.rate,
-        rateDate: fx.date,
-        rateSource: fx.source,
-      },
+        strategyId: created!.id,
+        eventType: "reconciliation",
+        detail: {
+          reason: "valuation_switch",
+          note: "strategy created on the daily Norges Bank rate; no valuation switch needed",
+          created: true,
+          rate: fx.rate,
+          rateDate: fx.date,
+          rateSource: fx.source,
+        },
+      });
+      const [row] = await tx.select().from(tradingStrategies).where(eq(tradingStrategies.id, created!.id));
+      return row!;
     });
-    return row!;
   }
 
-  async function updateStrategy(companyId: string, strategyId: string, input: UpdateTradingStrategyInput): Promise<TradingStrategyRow> {
-    await requireStrategy(companyId, strategyId);
-    const [row] = await db
-      .update(tradingStrategies)
-      .set({
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.checkEveryMinutes !== undefined ? { checkEveryMinutes: input.checkEveryMinutes } : {}),
-        ...(input.ruleConfig !== undefined ? { ruleConfig: input.ruleConfig } : {}),
-        ...(input.riskConfig !== undefined ? { riskConfig: input.riskConfig } : {}),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(tradingStrategies.id, strategyId), eq(tradingStrategies.companyId, companyId)))
-      .returning();
-    return row!;
+  /**
+   * Name and check interval are changed directly. A change to the rule or the
+   * risk limits NEVER writes the strategy: it becomes a draft version plus an
+   * approval card (an owner or admin approves it on the card), and the row
+   * comes back unchanged with `pendingVersion` describing the draft. This
+   * closes the bypass through the editor, the CLI or a bare API call.
+   */
+  async function updateStrategy(
+    companyId: string,
+    strategyId: string,
+    input: UpdateTradingStrategyInput,
+    actor: { actorType: "user" | "agent"; actorId: string },
+  ): Promise<TradingStrategyRow & { pendingVersion?: TradingPendingVersion }> {
+    const existing = await requireStrategy(companyId, strategyId);
+    let pendingVersion: TradingPendingVersion | undefined;
+    if (input.ruleConfig !== undefined || input.riskConfig !== undefined) {
+      const { version: active, spec: activeSpec } = await versions.ensureActiveVersion(existing);
+      const risk = input.riskConfig ?? deriveTradingRiskConfig(activeSpec);
+      const spec =
+        input.ruleConfig !== undefined
+          ? legacySmaCrossoverSpec({ name: existing.name, asset: existing.asset as TradingAsset, timeframe: existing.timeframe as TradingTimeframe, rule: input.ruleConfig, risk })
+          : tradingStrategySpecSchema.parse({ ...activeSpec, neverDo: risk });
+      const proposer: TradingProposer = { type: actor.actorType, id: actor.actorId };
+      const result = await versions.proposeVersion(companyId, strategyId, { spec, guidelines: active.guidelines }, proposer);
+      if (result.outcome !== "unchanged") {
+        pendingVersion = { outcome: result.outcome, versionId: result.version.id, versionNumber: result.version.version, approvalId: result.approvalId };
+      }
+    }
+    const direct = {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.checkEveryMinutes !== undefined ? { checkEveryMinutes: input.checkEveryMinutes } : {}),
+    };
+    const [row] =
+      Object.keys(direct).length > 0
+        ? await db
+            .update(tradingStrategies)
+            .set({ ...direct, updatedAt: new Date() })
+            .where(and(eq(tradingStrategies.id, strategyId), eq(tradingStrategies.companyId, companyId)))
+            .returning()
+        : [await requireStrategy(companyId, strategyId)];
+    return pendingVersion ? { ...row!, pendingVersion } : row!;
   }
 
   /** The kill switch, both directions -- UI and Telegram call this same function (see routes/trading.ts). */
@@ -477,14 +554,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return approval!.id;
   }
 
-  async function fillBuy(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
+  async function fillBuy(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, stamp: FillStamp, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
     const priceNok = priceUsd * fx.rate;
     const orderValueUsd = quantity * priceUsd;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
     const feeUsd = tradingFeeNok(orderValueUsd, riskConfig.feeRatePct);
-    const stamp = fxStampOf(fx);
+    const fxStamp = fxStampOf(fx);
     const [order] = await db
       .insert(tradingOrders)
       .values({
@@ -493,16 +570,17 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         side: "buy",
         status: "filled",
         ruleVersion,
+        strategyVersionId: stamp.versionId,
         signalPriceNok,
         requestedQuantity: quantity,
         filledQuantity: quantity,
         filledPriceNok: priceNok,
         feeNok: fee,
-        ...stamp,
+        ...fxStamp,
       })
       .returning();
-    await ledger.addFifoLot({ companyId: row.companyId, strategyId: row.id, sourceOrderId: order!.id, quantity, costNokPerUnit: (orderValueNok + fee) / quantity, acquiredAt: now, fx: stamp });
-    await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "order_filled", nokValue: orderValueNok, feeNok: fee, detail: { side: "buy", quantity, priceNok, priceUsd, ...stamp } });
+    await ledger.addFifoLot({ companyId: row.companyId, strategyId: row.id, sourceOrderId: order!.id, quantity, costNokPerUnit: (orderValueNok + fee) / quantity, acquiredAt: now, fx: fxStamp });
+    await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, strategyVersionId: stamp.versionId, eventType: "order_filled", nokValue: orderValueNok, feeNok: fee, detail: { side: "buy", quantity, priceNok, priceUsd, ...fxStamp } });
     const counters = dayCounters(row, now);
     await ledger.recordDailyStat({ companyId: row.companyId, strategyId: row.id, at: now, feesDeltaNok: fee, ordersDelta: 1 });
     await db
@@ -512,6 +590,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         cashUsd: usdSideOf(row).cashUsd - orderValueUsd - feeUsd,
         positionQuantity: row.positionQuantity + quantity,
         positionCostNok: row.positionCostNok + orderValueNok + fee,
+        // Protective levels of the new position (null when the approval card delayed the fill: the next tick derives them from the active version).
+        positionLevels: stamp.levels,
         ...counters,
         ordersToday: counters.ordersToday + 1,
         lastTickAt: now,
@@ -525,14 +605,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       .where(eq(tradingStrategies.id, row.id));
   }
 
-  async function fillSell(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, evaluatedBarAt?: Date) {
+  async function fillSell(row: TradingStrategyRow, quantity: number, priceUsd: number, fx: FxRateQuote, ruleVersion: string, signalPriceNok: number, now: Date, stamp: FillStamp, evaluatedBarAt?: Date) {
     const riskConfig = row.riskConfig as TradingRiskConfig;
     const priceNok = priceUsd * fx.rate;
     const orderValueUsd = quantity * priceUsd;
     const orderValueNok = quantity * priceNok;
     const fee = tradingFeeNok(orderValueNok, riskConfig.feeRatePct);
     const feeUsd = tradingFeeNok(orderValueUsd, riskConfig.feeRatePct);
-    const stamp = fxStampOf(fx);
+    const fxStamp = fxStampOf(fx);
     const consumed = await ledger.consumeFifoLots({ strategyId: row.id, quantity });
     const proceedsNok = orderValueNok - fee;
     const realizedPnlNok = proceedsNok - consumed.costNokConsumed;
@@ -544,25 +624,27 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         side: "sell",
         status: "filled",
         ruleVersion,
+        strategyVersionId: stamp.versionId,
         signalPriceNok,
         requestedQuantity: quantity,
         filledQuantity: consumed.quantityConsumed,
         filledPriceNok: priceNok,
         feeNok: fee,
         realizedPnlNok,
-        ...stamp,
+        ...fxStamp,
       })
       .returning();
     await ledger.writeLedgerEntry({
       companyId: row.companyId,
       strategyId: row.id,
       orderId: order!.id,
+      strategyVersionId: stamp.versionId,
       eventType: "order_filled",
       nokValue: orderValueNok,
       feeNok: fee,
       fifoCostNok: consumed.costNokConsumed,
       realizedPnlNok,
-      detail: { side: "sell", quantity: consumed.quantityConsumed, priceNok, priceUsd, realizedPnlUsd: orderValueUsd - feeUsd - consumed.costUsdConsumed, ...stamp },
+      detail: { side: "sell", quantity: consumed.quantityConsumed, priceNok, priceUsd, realizedPnlUsd: orderValueUsd - feeUsd - consumed.costUsdConsumed, ...fxStamp },
     });
     const counters = dayCounters(row, now);
     await ledger.recordDailyStat({ companyId: row.companyId, strategyId: row.id, at: now, realizedPnlDeltaNok: realizedPnlNok, feesDeltaNok: fee, ordersDelta: 1 });
@@ -573,6 +655,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         cashUsd: usdSideOf(row).cashUsd + orderValueUsd - feeUsd,
         positionQuantity: Math.max(0, row.positionQuantity - consumed.quantityConsumed),
         positionCostNok: Math.max(0, row.positionCostNok - consumed.costNokConsumed),
+        positionLevels: Math.max(0, row.positionQuantity - consumed.quantityConsumed) > 1e-12 ? row.positionLevels : null,
         ...counters,
         ordersToday: counters.ordersToday + 1,
         realizedPnlTodayNok: counters.realizedPnlTodayNok + realizedPnlNok,
@@ -604,13 +687,76 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       .where(eq(tradingStrategies.id, row.id));
   }
 
-  async function tickOne(row: TradingStrategyRow, now: Date): Promise<"filled" | "blocked" | "approval_requested" | "no_action" | "error" | "halted"> {
+  /**
+   * Where the strategy's open position stands, for the engine. The levels are
+   * kept on the strategy row from the moment the position opened; when they
+   * are missing (a fill delayed by an approval card) or belong to an older
+   * version (a new version went live while the position was open), they are
+   * derived again from the active version, measured from the position's own
+   * entry price, and saved.
+   */
+  async function positionStateFor(row: TradingStrategyRow, version: TradingStrategyVersionRow, spec: TradingStrategySpec, bars: readonly TradingEngineBar[], now: Date): Promise<TradingPositionState> {
+    const timeframeMs = tradingTimeframeMs(row.timeframe as TradingTimeframe);
+    if (row.positionQuantity <= 1e-12) {
+      const cooldown = spec.stayOut.cooldownAfterLosses;
+      if (!cooldown) return { kind: "flat" };
+      const sells = await db
+        .select({ realizedPnlNok: tradingOrders.realizedPnlNok, createdAt: tradingOrders.createdAt })
+        .from(tradingOrders)
+        .where(and(eq(tradingOrders.strategyId, row.id), eq(tradingOrders.side, "sell"), eq(tradingOrders.status, "filled")))
+        .orderBy(desc(tradingOrders.createdAt))
+        .limit(Math.max(20, cooldown.losses));
+      let consecutiveLosses = 0;
+      for (const sell of sells) {
+        if ((sell.realizedPnlNok ?? 0) < 0) consecutiveLosses++;
+        else break;
+      }
+      const lastClose = bars.length > 0 ? bars[bars.length - 1]!.openTime.getTime() + timeframeMs : now.getTime();
+      const barsSinceExit = sells[0] ? Math.max(0, Math.floor((lastClose - sells[0].createdAt.getTime()) / timeframeMs)) : null;
+      return { kind: "flat", consecutiveLosses, barsSinceExit };
+    }
+    const stored = row.positionLevels as TradingPositionLevelsRecord | null;
+    let record: TradingPositionLevelsRecord;
+    if (stored && stored.versionId === version.id) {
+      record = stored;
+    } else {
+      const entryPrice = stored?.entryPrice ?? (await ledger.openPositionCostUsd(row.id)) / row.positionQuantity;
+      let entryAt: Date;
+      if (stored) entryAt = new Date(stored.entryAt);
+      else {
+        const [lot] = await db
+          .select({ acquiredAt: tradingFifoLots.acquiredAt })
+          .from(tradingFifoLots)
+          .where(and(eq(tradingFifoLots.strategyId, row.id), gt(tradingFifoLots.quantityRemaining, 0)))
+          .orderBy(asc(tradingFifoLots.acquiredAt))
+          .limit(1);
+        entryAt = lot?.acquiredAt ?? now;
+      }
+      const levels = bars.length > 0 ? computeTradingEntryLevels(spec, bars, bars.length - 1, entryPrice) : { stopPrice: null, targetPrice: null };
+      record = {
+        versionId: version.id,
+        entryPrice,
+        entryAt: entryAt.toISOString(),
+        stopPrice: levels.stopPrice,
+        targetPrice: levels.targetPrice,
+        highestPrice: Math.max(stored?.highestPrice ?? entryPrice, entryPrice),
+      };
+      await db.update(tradingStrategies).set({ positionLevels: record }).where(eq(tradingStrategies.id, row.id));
+    }
+    return { kind: "long", entryPrice: record.entryPrice, entryAt: new Date(record.entryAt), stopPrice: record.stopPrice, targetPrice: record.targetPrice, highestPrice: record.highestPrice };
+  }
+
+  async function tickOne(claimed: TradingStrategyRow, now: Date): Promise<"filled" | "blocked" | "approval_requested" | "no_action" | "error" | "halted"> {
+    // The tick reads only the active version: its rules, and the risk limits derived from it.
+    const active = await versions.ensureActiveVersion(claimed);
+    const version = active.version;
+    const spec = active.spec;
+    const row = readingVersion(active.strategy, spec);
     const asset = row.asset as Parameters<TradingMarketDataSource["fetchQuote"]>[0];
-    const ruleConfig = row.ruleConfig as TradingRuleConfig;
     const riskConfig = row.riskConfig as TradingRiskConfig;
 
     const timeframe = row.timeframe as TradingTimeframe;
-    const raw = await marketData.fetchCandles(asset, timeframe, candleLimit(ruleConfig), now);
+    const raw = await marketData.fetchCandles(asset, timeframe, candleLimit(spec), now);
     if (isTradingMarketDataError(raw)) {
       await recordTickFailure(row, raw.message, now);
       return raw.kind === "upstream" || raw.kind === "no_data" ? "error" : "halted";
@@ -673,6 +819,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       await ledger.writeLedgerEntry({
         companyId: row.companyId,
         strategyId: row.id,
+        strategyVersionId: version.id,
         eventType: "reconciliation",
         detail: { reason: "catch_up_gap", missedBars: newBarCount, maxCatchUpBars: TRADING_MAX_CATCH_UP_BARS, timeframe, skippedThrough: latestBar.openTime.toISOString() },
       });
@@ -687,28 +834,38 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       entriesHalt = "circuit_breaker";
     }
 
-    // Evaluate every new closed bar in order, each with its own history. An
-    // older bar's entry only acts if its condition still holds on the latest
-    // closed bar; held entries are all the same side, so only the newest one
-    // acts. Everything else is logged, not silently dropped.
-    const events: Array<{ index: number; side: "buy" | "sell" }> = [];
-    for (let i = firstNewIndex; i <= latestIndex; i++) {
-      const signalAtBar = evaluateTradingRule(candles.closes.slice(0, i + 1), ruleConfig);
-      if (signalAtBar !== "hold") events.push({ index: i, side: signalAtBar });
+    // Evaluate every new closed bar in order, each with its own history, with
+    // a virtual position that follows the decisions. An older bar's decision
+    // only acts if what it announced still holds on the latest closed bar;
+    // everything else is logged, not silently dropped.
+    const position = await positionStateFor(row, version, spec, bars, now);
+    const catchUp = evaluateTradingCatchUp(spec, bars, firstNewIndex, position);
+    if (position.kind === "long") {
+      let highest = position.highestPrice;
+      for (let i = firstNewIndex; i <= latestIndex; i++) highest = Math.max(highest, bars[i]!.high);
+      if (highest > position.highestPrice) {
+        const stored = row.positionLevels as TradingPositionLevelsRecord | null;
+        const base = stored ?? { versionId: version.id, entryPrice: position.entryPrice, entryAt: position.entryAt.toISOString(), stopPrice: position.stopPrice, targetPrice: position.targetPrice };
+        await db
+          .update(tradingStrategies)
+          .set({ positionLevels: { ...base, versionId: version.id, highestPrice: highest } })
+          .where(eq(tradingStrategies.id, row.id));
+      }
     }
-    const held = events.filter((e) => e.index === latestIndex || tradingSignalStillHolds(candles.closes, ruleConfig, e.side));
-    const acting = held[held.length - 1] ?? null;
-    for (const e of events) {
-      if (e === acting) continue;
+    const acting = catchUp.acting;
+    for (const d of catchUp.decisions) {
+      if (d === acting) continue;
       await ledger.writeLedgerEntry({
         companyId: row.companyId,
         strategyId: row.id,
+        strategyVersionId: version.id,
         eventType: "signal",
         detail: {
           kind: "missed_while_not_checking",
-          side: e.side,
-          barOpenTime: bars[e.index]!.openTime.toISOString(),
-          reason: held.includes(e) ? "superseded_by_later_signal" : "no_longer_holds",
+          side: d.decision.action === "enter" ? "buy" : "sell",
+          barOpenTime: bars[d.index]!.openTime.toISOString(),
+          reasonCodes: d.decision.reasonCodes,
+          reason: d.stillHolds ? "superseded_by_later_signal" : "no_longer_holds",
         },
       });
     }
@@ -720,31 +877,47 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       await ledger.writeLedgerEntry({
         companyId: row.companyId,
         strategyId: row.id,
+        strategyVersionId: version.id,
         eventType: "signal",
-        detail: { kind: "caught_up_entry", side: acting.side, barOpenTime: bars[acting.index]!.openTime.toISOString(), stillHoldsOn: latestBar.openTime.toISOString() },
+        detail: {
+          kind: "caught_up_entry",
+          side: acting.decision.action === "enter" ? "buy" : "sell",
+          reasonCodes: acting.decision.reasonCodes,
+          barOpenTime: bars[acting.index]!.openTime.toISOString(),
+          stillHoldsOn: latestBar.openTime.toISOString(),
+        },
       });
     }
 
-    const signal = acting.side;
+    const decision = acting.decision;
     const lastCloseNok = latestBar.close * fx.rate;
     const evaluatedBarAt = latestBar.openTime;
 
-    const ruleVersion = tradingRuleVersionLabel(ruleConfig);
-    const side = signal;
+    const ruleVersion = tradingVersionLabel(version, TRADING_ENGINE_VERSION);
+    const side = decision.action === "enter" ? "buy" : "sell";
     const quotePriceNok = side === "buy" ? quoteAskNok : quoteBidNok;
     const quotePriceUsd = side === "buy" ? quote.askUsd : quote.bidUsd;
-    const requestedQuantity = side === "buy" ? (ruleConfig.type === "sma_crossover" ? (ruleConfig.orderSizeFraction * usd.cashUsd) / quotePriceUsd : 0) : row.positionQuantity;
+    // A spec never adds to an open position (the old rule bought again on a second cross-up).
+    const requestedQuantity = side === "buy" ? (row.positionQuantity > 1e-12 ? 0 : ((decision.sizeFractionOfCash ?? 0) * usd.cashUsd) / quotePriceUsd) : row.positionQuantity;
 
     if (requestedQuantity <= 0) {
       await markNoAction(row, now, evaluatedBarAt);
       return "no_action";
     }
 
+    // The spec's own spread rule, checked against the live quote (the bars have no spread).
+    const spreadPct = ((quote.askUsd - quote.bidUsd) / ((quote.askUsd + quote.bidUsd) / 2)) * 100;
+    const spreadBlock =
+      side === "buy" && spec.stayOut.maxSpreadPct !== undefined && spreadPct > spec.stayOut.maxSpreadPct
+        ? { kind: "block" as const, reason: `The spread (${spreadPct.toFixed(2)}%) is wider than this strategy's limit (${spec.stayOut.maxSpreadPct}%).` }
+        : null;
+
     // Sells go through the exit gate: it refuses only impossible input and
     // never applies the price band, order count, loss or drawdown blocks, nor
     // asks for a card an unanswered 5-minute timeout would strand.
     const verdict =
-      side === "sell"
+      spreadBlock ??
+      (side === "sell"
         ? evaluateTradingExitGate({ requestedQuantity, positionQuantity: row.positionQuantity, quotePriceNok })
         : evaluateTradingEntryGate({
             side,
@@ -760,14 +933,14 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
             peakEquity: peakEquityUsd,
             currentEquity: currentEquityUsd,
             entriesHaltedReason: entriesHalt ? describeTradingPauseReason(entriesHalt) : null,
-          });
+          }));
 
     if (verdict.kind === "block") {
       const [order] = await db
         .insert(tradingOrders)
-        .values({ companyId: row.companyId, strategyId: row.id, side, status: "rejected", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, rejectionReason: verdict.reason })
+        .values({ companyId: row.companyId, strategyId: row.id, strategyVersionId: version.id, side, status: "rejected", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, rejectionReason: verdict.reason })
         .returning();
-      await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "risk_block", detail: { side, reason: verdict.reason } });
+      await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, strategyVersionId: version.id, orderId: order!.id, eventType: "risk_block", detail: { side, reason: verdict.reason, reasonCodes: decision.reasonCodes } });
       await markNoAction(row, now, evaluatedBarAt);
       return "blocked";
     }
@@ -776,17 +949,28 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       const expiresAt = new Date(now.getTime() + TRADING_TRADE_APPROVAL_EXPIRY_MS);
       const [order] = await db
         .insert(tradingOrders)
-        .values({ companyId: row.companyId, strategyId: row.id, side, status: "pending_approval", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, approvalExpiresAt: expiresAt, ...fxStampOf(fx) })
+        .values({ companyId: row.companyId, strategyId: row.id, strategyVersionId: version.id, side, status: "pending_approval", ruleVersion, signalPriceNok: lastCloseNok, requestedQuantity, approvalExpiresAt: expiresAt, ...fxStampOf(fx) })
         .returning();
       const approvalId = await createTradeApproval(row, order!.id, verdict.reasonForOperator, expiresAt);
       await db.update(tradingOrders).set({ approvalId }).where(eq(tradingOrders.id, order!.id));
-      await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, orderId: order!.id, eventType: "signal", detail: { side, reason: "needs_approval", approvalId } });
+      await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, strategyVersionId: version.id, orderId: order!.id, eventType: "signal", detail: { side, reason: "needs_approval", approvalId, reasonCodes: decision.reasonCodes } });
       await markNoAction(row, now, evaluatedBarAt);
       return "approval_requested";
     }
 
-    if (side === "buy") await fillBuy(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, evaluatedBarAt);
-    else await fillSell(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, evaluatedBarAt);
+    if (side === "buy") {
+      const levels: TradingPositionLevelsRecord = {
+        versionId: version.id,
+        entryPrice: quotePriceUsd,
+        entryAt: now.toISOString(),
+        stopPrice: decision.levels?.stopPrice ?? null,
+        targetPrice: decision.levels?.targetPrice ?? null,
+        highestPrice: Math.max(quotePriceUsd, decision.highestPrice ?? quotePriceUsd),
+      };
+      await fillBuy(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, { versionId: version.id, levels }, evaluatedBarAt);
+    } else {
+      await fillSell(row, requestedQuantity, quotePriceUsd, fx, ruleVersion, lastCloseNok, now, { versionId: version.id, levels: null }, evaluatedBarAt);
+    }
     return "filled";
   }
 
@@ -831,7 +1015,9 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         }
         const asset = row.asset as Parameters<TradingMarketDataSource["fetchQuote"]>[0];
         const quote = await marketData.fetchQuote(asset, now);
-        const riskConfig = row.riskConfig as TradingRiskConfig;
+        // Risk limits come from the active version, like everywhere else on the order path.
+        const activeForRisk = await versions.ensureActiveVersion(row);
+        const riskConfig = deriveTradingRiskConfig(activeForRisk.spec);
         if (isTradingMarketDataError(quote)) {
           await db.update(tradingOrders).set({ status: "rejected", rejectionReason: quote.message }).where(eq(tradingOrders.id, order.id));
           await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: "quote_unavailable_after_approval" } });
@@ -851,8 +1037,10 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           continue;
         }
         await db.update(tradingOrders).set({ status: "rejected" }).where(eq(tradingOrders.id, order.id)); // superseded by the fresh fill row fillBuy/fillSell inserts
-        if (order.side === "buy") await fillBuy(row, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now);
-        else await fillSell(row, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now);
+        const fillRow = readingVersion(activeForRisk.strategy, activeForRisk.spec);
+        const fillStamp: FillStamp = { versionId: order.strategyVersionId ?? activeForRisk.version.id, levels: null };
+        if (order.side === "buy") await fillBuy(fillRow, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now, fillStamp);
+        else await fillSell(fillRow, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now, fillStamp);
         resolved++;
       }
     }
@@ -883,6 +1071,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     requireStrategy,
     createStrategy,
     updateStrategy,
+    versions,
     setStatus,
     reconcileOnBoot,
     noteEngineVersion,

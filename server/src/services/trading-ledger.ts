@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { tradingDailyStats, tradingFifoLots, tradingLedgerEntries } from "@paperclipai/db";
+import { tradingDailyStats, tradingFifoLots, tradingLedgerEntries, tradingStrategies } from "@paperclipai/db";
 import { TRADING_ESTIMATED_USD_NOK_RATE, type TradingLedgerEventType } from "@paperclipai/shared";
 
 /**
@@ -84,6 +84,8 @@ export function tradingLedgerService(db: Db) {
     companyId: string;
     strategyId: string;
     orderId?: string | null;
+    /** The rule-book version in force. Left out, the entry is stamped with the strategy's active version at insert time. */
+    strategyVersionId?: string | null;
     eventType: TradingLedgerEventType;
     nokValue?: number | null;
     feeNok?: number | null;
@@ -95,6 +97,10 @@ export function tradingLedgerService(db: Db) {
       companyId: params.companyId,
       strategyId: params.strategyId,
       orderId: params.orderId ?? null,
+      strategyVersionId:
+        params.strategyVersionId !== undefined
+          ? params.strategyVersionId
+          : sql<string | null>`(SELECT ${tradingStrategies.activeVersionId} FROM ${tradingStrategies} WHERE ${tradingStrategies.id} = ${params.strategyId})`,
       eventType: params.eventType,
       nokValue: params.nokValue ?? null,
       feeNok: params.feeNok ?? null,

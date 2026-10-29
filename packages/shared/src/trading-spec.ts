@@ -596,8 +596,14 @@ function inBlackout(spec: TradingStrategySpec, closeTime: Date): boolean {
 }
 
 /** Protective levels for an entry made on the close of bars[index]. Pure; the caller stores them with the position. */
-export function computeTradingEntryLevels(spec: TradingStrategySpec, bars: readonly TradingEngineBar[], index: number): TradingPositionLevels & { stopDistance: number | null } {
-  const reference = bars[index]!.close;
+export function computeTradingEntryLevels(
+  spec: TradingStrategySpec,
+  bars: readonly TradingEngineBar[],
+  index: number,
+  /** The price the levels are measured from. Defaults to the close of bars[index]; a position opened earlier passes its own entry price. */
+  referencePrice?: number,
+): TradingPositionLevels & { stopDistance: number | null } {
+  const reference = referencePrice ?? bars[index]!.close;
   let stopPrice: number | null = null;
   const stop = spec.exit.stop;
   if (stop?.kind === "pct") stopPrice = reference * (1 - stop.pct / 100);
@@ -885,6 +891,38 @@ export function legacySmaConfigFromSpec(spec: TradingStrategySpec): SmaCrossover
   } catch {
     return null;
   }
+}
+
+// ─── The approval card and the cache columns ──────────────────────────────────
+
+/** The card-only approval kind that switches a strategy to a new version (services/approvals.ts, isApprovalCardOnlyKind). */
+export const TRADING_STRATEGY_VERSION_APPROVAL_KIND = "trading_strategy_version";
+
+/** What trading_strategies.rule_config holds when the active version is not a plain sma_crossover@1 rule. */
+export interface TradingSpecRuleCache {
+  type: "strategy_spec";
+  specVersion: typeof TRADING_SPEC_VERSION;
+  versionId: string;
+  versionNumber: number;
+  specDigest: string;
+}
+
+/**
+ * The values of the two cache columns for a version: the old sma_crossover@1
+ * config for a legacy rule (so old readers keep working), else a pointer to
+ * the version; and the risk config derived from the spec. Written ONLY inside
+ * the activation transaction; a test asserts the columns always equal this.
+ */
+export function tradingCacheForVersion(input: { spec: TradingStrategySpec; versionId: string; versionNumber: number; specDigest: string }): {
+  ruleConfig: SmaCrossoverConfig | TradingSpecRuleCache;
+  riskConfig: TradingRiskConfig;
+} {
+  return {
+    ruleConfig:
+      legacySmaConfigFromSpec(input.spec) ??
+      ({ type: "strategy_spec", specVersion: TRADING_SPEC_VERSION, versionId: input.versionId, versionNumber: input.versionNumber, specDigest: input.specDigest } satisfies TradingSpecRuleCache),
+    riskConfig: deriveTradingRiskConfig(input.spec),
+  };
 }
 
 // ─── Plain-words read-back (what the approval card shows) ────────────────────

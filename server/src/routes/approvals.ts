@@ -30,7 +30,8 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
-import { isCryptoWalletTxApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import { isCryptoWalletTxApproval, isTradingStrategyVersionApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import { tradingVersionsService } from "../services/trading-versions.js";
 import {
   approvalService,
   accessService,
@@ -1643,6 +1644,7 @@ export function approvalRoutes(
   const personasSvc = personaService(db);
   const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
   const reportScriptsSvc = reportScriptsService(db);
+  const tradingVersionsSvc = tradingVersionsService(db, { rawDb });
   const reportingSettings = instanceSettingsService(rawDb);
 
   /**
@@ -2614,6 +2616,19 @@ export function approvalRoutes(
         assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a crypto wallet payment is sent");
         if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a crypto wallet payment.");
       }
+      // Trading strategy rules: only a person who is this company's owner or
+      // admin (or an instance admin) may switch a strategy to a new version,
+      // and only here, on the card. Activation runs first and activates the
+      // stored draft whose own card this is; approve() below then refuses the
+      // card unless that version is live with the digest the card shows.
+      if (isTradingStrategyVersionApproval(existingForKindCheck)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "a trading strategy's rules");
+        const info = getActorInfo(req);
+        if (info.actorType !== "user") throw forbidden("Only a person can approve a trading strategy's rules.");
+        if (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested") {
+          await tradingVersionsSvc.approveFromCard(existingForKindCheck.companyId, existingForKindCheck.id, info.actorId);
+        }
+      }
       // One-click host actions: only a person who is this company's owner or
       // admin (or an instance admin) may say yes, and only to a card that is
       // still exactly the shape the server stamped.
@@ -2816,6 +2831,10 @@ export function approvalRoutes(
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote, {
       crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
     });
+    if (applied && isTradingStrategyVersionApproval(approval)) {
+      // A rejected rules card closes its draft; the running strategy is untouched.
+      await tradingVersionsSvc.supersedeDraftForCard(approval.companyId, approval.id);
+    }
 
     if (applied) {
       // DUR-29: resolve any request_confirmation linked to this approval too.
