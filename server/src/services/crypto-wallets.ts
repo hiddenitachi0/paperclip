@@ -1639,6 +1639,13 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const network: CryptoNetwork = "testnet";
     const limits = limitColumns(chain, input.limits ?? DEFAULT_TRADING_WALLET_LIMITS[chain]);
     const adapter = adapterFor(chain);
+    // Same rule as an agent's test wallet: the test network is fixed at creation
+    // (the columns are required by CHECK for Bitcoin and Ethereum test wallets).
+    const networkVariant: BitcoinNetworkVariant | null = chain === "bitcoin" ? DEFAULT_BITCOIN_NETWORK_VARIANT : null;
+    const evmChainId: number | null = chain === "ethereum" ? EVM_CHAIN_IDS.testnet : null;
+    if (evmChainId !== null && !isTestEvmChainId(evmChainId)) {
+      throw unprocessable("That Ethereum network is not an allowed test network.");
+    }
 
     let material: { privateKey: string; address: string };
     try {
@@ -1655,7 +1662,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         name: `${info.label} trading wallet key: ${input.label} (${shortAddress}, ${suffix})`,
         key: `crypto_wallet_${chain}_${network}_${suffix}`,
         value: material.privateKey,
-        description: `The secret key of the trading routine's ${info.label} wallet ${material.address} (${cryptoNetworkLabel(chain, network)}). Only the server uses it, to sign trades and sweeps. It cannot be shown or copied out, and no agent can use it.`,
+        description: `The secret key of the trading routine's ${info.label} wallet ${material.address} (${cryptoNetworkLabel(chain, network, { networkVariant, evmChainId })}). Only the server uses it, to sign trades and sweeps. It cannot be shown or copied out, and no agent can use it.`,
         kind: "crypto_wallet_key",
       },
       { userId: actor.userId },
@@ -1671,6 +1678,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         holder: "trading_routine",
         chain,
         network,
+        networkVariant,
+        evmChainId,
         address: material.address,
         secretId: secret.id,
         keyOrigin: "generated",
@@ -1687,7 +1696,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       companyId,
       walletId: row!.id,
       eventType: "wallet_created",
-      detail: { chain, network, address: row!.address, keyOrigin: "generated", holder: "trading_routine", byUserId: actor.userId },
+      detail: { chain, network, networkVariant, evmChainId, address: row!.address, keyOrigin: "generated", holder: "trading_routine", byUserId: actor.userId },
     });
     return toWalletSummary(row!);
   }
