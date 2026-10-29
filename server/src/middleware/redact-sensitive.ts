@@ -45,6 +45,11 @@ const SENSITIVE_KEYS = new Set<string>([
   // purpose -- it is a pagination cursor far more often than a credential --
   // so bodies that carry a real token name the field `authToken` instead.
   "key",
+  // DUR-4304: the board two-factor routes carry a one-time authenticator or
+  // recovery code as `totpCode`, and the sealed enrolment state (which holds
+  // the TOTP secret and recovery codes) as `enrollmentToken`.
+  "totpcode",
+  "enrollmenttoken",
   // DUR-3996: the Telegram bot token travels as `botToken` (it used to be a
   // bare `token`, and a 400/403 on the connect form wrote it to server.log).
   // The CLI sign-in challenge secret travels as `authToken`, already above.

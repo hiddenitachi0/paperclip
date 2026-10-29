@@ -122,6 +122,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "email-settings.ts",
   // Company Jobs on/off switch (DUR-4142) is a new board-only setting not yet in the public OpenAPI document.
   "job-settings.ts",
+  // Board two-factor routes (DUR-4304) are board-only, switched off by default, and not yet in the public OpenAPI document.
+  "two-factor.ts",
   // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
   "payment-notices.ts",
   // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
