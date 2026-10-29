@@ -282,6 +282,8 @@ export const queryKeys = {
   auth: {
     session: ["auth", "session"] as const,
     telegramLink: ["auth", "telegram-link"] as const,
+    twoFactor: ["auth", "two-factor"] as const,
+    twoFactorLogin: ["auth", "two-factor", "login"] as const,
   },
   sidebarPreferences: {
     companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,

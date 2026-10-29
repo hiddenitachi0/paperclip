@@ -10,14 +10,29 @@ import { AuthPage } from "./Auth";
 const getSessionMock = vi.hoisted(() => vi.fn());
 const signInEmailMock = vi.hoisted(() => vi.fn());
 const signUpEmailMock = vi.hoisted(() => vi.fn());
+const signOutMock = vi.hoisted(() => vi.fn());
+const twoFactorStatusMock = vi.hoisted(() => vi.fn());
+const verifyLoginMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/auth", () => ({
   authApi: {
     getSession: () => getSessionMock(),
     signInEmail: (input: unknown) => signInEmailMock(input),
     signUpEmail: (input: unknown) => signUpEmailMock(input),
+    signOut: () => signOutMock(),
   },
 }));
+
+vi.mock("../api/twoFactor", async () => {
+  const actual = await vi.importActual<typeof import("../api/twoFactor")>("../api/twoFactor");
+  return {
+    ...actual,
+    twoFactorApi: {
+      getStatus: () => twoFactorStatusMock(),
+      verifyLogin: (input: unknown) => verifyLoginMock(input),
+    },
+  };
+});
 
 // The ASCII art animation drives a canvas/requestAnimationFrame loop that adds
 // nothing to these assertions, so stub it out.
@@ -88,6 +103,8 @@ describe("AuthPage", () => {
     getSessionMock.mockResolvedValue(null);
     signInEmailMock.mockResolvedValue(undefined);
     signUpEmailMock.mockResolvedValue(undefined);
+    signOutMock.mockResolvedValue(undefined);
+    twoFactorStatusMock.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -212,6 +229,125 @@ describe("AuthPage", () => {
 
     await act(async () => {
       root.unmount();
+    });
+  });
+  describe("two-step sign-in", () => {
+    const pendingStatus = {
+      enabled: true,
+      verificationRequired: true,
+      enabledAt: null,
+      recoveryCodesRemaining: 0,
+    };
+
+    async function typeCode(value: string) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      const input = container.querySelector('input[autocomplete="one-time-code"]') as HTMLInputElement;
+      await act(async () => {
+        setter!.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const form = container.querySelector("form") as HTMLFormElement;
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      await flushReact();
+      await flushReact();
+    }
+
+    it("asks for the code when the password is right but a code is still owed", async () => {
+      twoFactorStatusMock.mockResolvedValue(pendingStatus);
+      const root = await mount();
+
+      expect(container.textContent).toContain("Enter your sign-in code");
+      expect(container.querySelector('input[name="password"]')).toBeNull();
+
+      verifyLoginMock.mockResolvedValue({ verified: true, recoveryCodesRemaining: 8 });
+      await typeCode("123456");
+      expect(verifyLoginMock).toHaveBeenCalledWith({ totpCode: "123456", isRecoveryCode: false });
+
+      await act(async () => {
+        root.unmount();
+      });
+    });
+
+    it("moves to the code screen right after a correct password instead of entering the app", async () => {
+      twoFactorStatusMock.mockResolvedValueOnce(null).mockResolvedValue(pendingStatus);
+      const root = await mount();
+      expect(container.textContent).not.toContain("Enter your sign-in code");
+
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      const email = container.querySelector('input[name="email"]') as HTMLInputElement;
+      const password = container.querySelector('input[name="password"]') as HTMLInputElement;
+      await act(async () => {
+        setter!.call(email, "jane@example.com");
+        email.dispatchEvent(new Event("input", { bubbles: true }));
+        setter!.call(password, "correct horse");
+        password.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        (container.querySelector("form") as HTMLFormElement).dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+      });
+      await flushReact();
+      await flushReact();
+
+      expect(signInEmailMock).toHaveBeenCalled();
+      expect(container.textContent).toContain("Enter your sign-in code");
+
+      await act(async () => {
+        root.unmount();
+      });
+    });
+
+    it("says in plain words when the code is wrong", async () => {
+      twoFactorStatusMock.mockResolvedValue(pendingStatus);
+      const { TwoFactorApiError } = await import("../api/twoFactor");
+      verifyLoginMock.mockRejectedValue(new TwoFactorApiError("Invalid verification code", 401, "two_factor_invalid_code", null));
+      const root = await mount();
+
+      await typeCode("000000");
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "That code did not work. Check the code in your app and try again.",
+      );
+      expect(container.textContent).toContain("Enter your sign-in code");
+
+      await act(async () => {
+        root.unmount();
+      });
+    });
+
+    it("tells the person how long to wait when there were too many tries", async () => {
+      twoFactorStatusMock.mockResolvedValue(pendingStatus);
+      const { TwoFactorApiError } = await import("../api/twoFactor");
+      verifyLoginMock.mockRejectedValue(new TwoFactorApiError("Too many attempts", 429, "two_factor_rate_limited", 42));
+      const root = await mount();
+
+      await typeCode("000000");
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "Too many tries. Please wait 42 seconds and try again.",
+      );
+      expect((container.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
+
+      await act(async () => {
+        root.unmount();
+      });
+    });
+
+    it("goes back to the password screen when the sign-in ran out of time", async () => {
+      twoFactorStatusMock.mockResolvedValue(pendingStatus);
+      const { TwoFactorApiError } = await import("../api/twoFactor");
+      verifyLoginMock.mockRejectedValue(new TwoFactorApiError("expired", 401, "two_factor_pending_expired", null));
+      const root = await mount();
+
+      await typeCode("123456");
+      expect(container.querySelector('input[name="password"]')).not.toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe("That took too long. Please sign in again.");
+      expect(signOutMock).toHaveBeenCalled();
+
+      await act(async () => {
+        root.unmount();
+      });
     });
   });
 });
