@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
@@ -13,6 +13,7 @@ import {
   inspectMigrations,
 } from "./client.js";
 import {
+  type EmbeddedPostgresTestDatabase,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
@@ -21,10 +22,75 @@ const cleanups: Array<() => Promise<void>> = [];
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+// One embedded cluster for the whole file, started in `beforeAll` (outside
+// every test's timeout). Starting it runs the real `applyPendingMigrations`
+// against an empty `paperclip` database, so that database is exactly what
+// each test used to build for itself -- and it is then only ever used as a
+// TEMPLATE, never connected to again.
+//
+// Each test used to start its own cluster and migrate it from scratch inside
+// its 20s budget: initdb (~4s) plus every migration in the repo (~5s and
+// growing with each new migration), ~10s before the test's own work began on
+// an idle machine. With the rest of the db package's embedded-Postgres suites
+// running in parallel on a CI runner that crossed 20s ("Test timed out in
+// 20000ms" on PR #695), and a timed-out body keeps running into the next
+// test's cluster startup, so failures came in runs.
+//
+// `CREATE DATABASE ... TEMPLATE` gives every test its own byte-for-byte copy
+// of that freshly migrated database (schema, data and the drizzle migration
+// journal) in well under a second, so tests still cannot see each other's
+// changes. Only cluster-wide objects (roles) are shared, and none of these
+// tests touches them.
+const TEMPLATE_DATABASE_NAME = "paperclip";
+let sharedCluster: Promise<EmbeddedPostgresTestDatabase> | null = null;
+let tempDatabaseCounter = 0;
+
+function startSharedCluster(): Promise<EmbeddedPostgresTestDatabase> {
+  if (!sharedCluster) {
+    sharedCluster = startEmbeddedPostgresTestDatabase("paperclip-db-client-");
+  }
+  return sharedCluster;
+}
+
+function withDatabaseName(connectionString: string, databaseName: string): string {
+  const url = new URL(connectionString);
+  url.pathname = `/${databaseName}`;
+  return url.toString();
+}
+
+async function withAdminConnection(
+  action: (admin: ReturnType<typeof postgres>) => Promise<void>,
+): Promise<void> {
+  const cluster = await startSharedCluster();
+  const admin = postgres(withDatabaseName(cluster.connectionString, "postgres"), {
+    max: 1,
+    onnotice: () => {},
+  });
+  try {
+    await action(admin);
+  } finally {
+    await admin.end();
+  }
+}
+
 async function createTempDatabase(): Promise<string> {
-  const db = await startEmbeddedPostgresTestDatabase("paperclip-db-client-");
-  cleanups.push(db.cleanup);
-  return db.connectionString;
+  const cluster = await startSharedCluster();
+  tempDatabaseCounter += 1;
+  const databaseName = `client_test_${tempDatabaseCounter}`;
+
+  await withAdminConnection(async (admin) => {
+    await admin.unsafe(
+      `CREATE DATABASE "${databaseName}" TEMPLATE "${TEMPLATE_DATABASE_NAME}"`,
+    );
+  });
+  cleanups.push(() =>
+    withAdminConnection(async (admin) => {
+      // FORCE: a test that failed mid-way may still hold a connection.
+      await admin.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    }),
+  );
+
+  return withDatabaseName(cluster.connectionString, databaseName);
 }
 
 async function migrationHash(migrationFile: string): Promise<string> {
@@ -42,6 +108,13 @@ afterEach(async () => {
   }
 });
 
+afterAll(async () => {
+  if (!sharedCluster) return;
+  const cluster = await sharedCluster.catch(() => null);
+  sharedCluster = null;
+  await cluster?.cleanup();
+});
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres migration tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -49,6 +122,10 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 describeEmbeddedPostgres("applyPendingMigrations", () => {
+  beforeAll(async () => {
+    await startSharedCluster();
+  });
+
   it(
     "applies an inserted earlier migration without replaying later legacy migrations",
     async () => {
@@ -598,6 +675,10 @@ describe("getAppPoolStatementTimeoutMs (DUR-280)", () => {
 });
 
 describeEmbeddedPostgres("createDb connection safeguards", () => {
+  beforeAll(async () => {
+    await startSharedCluster();
+  });
+
   it(
     "aborts a stuck query via statement_timeout instead of hanging indefinitely",
     async () => {
@@ -623,9 +704,10 @@ describeEmbeddedPostgres("createDb connection safeguards", () => {
         await db.$client.end({ timeout: 0 });
       }
     },
-    // Budget covers embedded-Postgres startup plus the 30s statement_timeout
-    // itself — well short of pg_sleep(60)'s full duration, which is the
-    // point: the query must fail on the timeout, not on the sleep completing.
+    // Budget covers cloning the per-test database (the shared cluster starts
+    // in beforeAll) plus the 30s statement_timeout itself — well short of
+    // pg_sleep(60)'s full duration, which is the point: the query must fail
+    // on the timeout, not on the sleep completing.
     60_000,
   );
 });
