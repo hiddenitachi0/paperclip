@@ -59,6 +59,12 @@ export const cryptoWallets = pgTable(
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     chain: text("chain").notNull(),
     network: text("network").notNull().default("testnet"),
+    // Which Bitcoin test network ('testnet4' | 'signet'); set only on Bitcoin
+    // test wallets. Fixed at creation: a trigger refuses any later change.
+    networkVariant: text("network_variant"),
+    // EVM chain the wallet signs on; set only on Ethereum test wallets, from
+    // the code allow-list. Fixed at creation (same trigger).
+    evmChainId: integer("evm_chain_id"),
     address: text("address").notNull(),
     // The only pointer to the key. NO ACTION: the secret row cannot be
     // deleted while a wallet points at it (checked at the end of the
@@ -111,6 +117,14 @@ export const cryptoWallets = pgTable(
     companyAddressUq: uniqueIndex("crypto_wallets_company_chain_network_address_uq").on(table.companyId, table.chain, table.network, table.address),
     chainCheck: check("crypto_wallets_chain_check", sql`${table.chain} IN ('bitcoin', 'ethereum', 'solana', 'hyperliquid')`),
     networkCheck: check("crypto_wallets_network_check", sql`${table.network} IN ('testnet', 'mainnet')`),
+    networkVariantCheck: check(
+      "crypto_wallets_network_variant_check",
+      sql`(${table.chain} = 'bitcoin' AND ${table.network} = 'testnet') = (${table.networkVariant} IS NOT NULL) AND (${table.networkVariant} IS NULL OR ${table.networkVariant} IN ('testnet4', 'signet'))`,
+    ),
+    evmChainIdCheck: check(
+      "crypto_wallets_evm_chain_id_check",
+      sql`(${table.chain} = 'ethereum' AND ${table.network} = 'testnet') = (${table.evmChainId} IS NOT NULL) AND (${table.evmChainId} IS NULL OR ${table.evmChainId} > 0)`,
+    ),
     statusCheck: check("crypto_wallets_status_check", sql`${table.status} IN ('active', 'frozen', 'archived')`),
     keyOriginCheck: check("crypto_wallets_key_origin_check", sql`${table.keyOrigin} IN ('generated', 'imported')`),
     leverageCheck: check("crypto_wallets_max_leverage_check", sql`${table.maxLeverage} >= 1 AND ${table.maxLeverage} <= 5`),

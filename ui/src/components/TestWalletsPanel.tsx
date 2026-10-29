@@ -32,7 +32,7 @@ function TestWalletRow({ wallet, companyId, agent }: { wallet: CryptoWalletSumma
     queryFn: () => cryptoWalletsApi.balance(companyId, wallet.id),
     enabled: false,
   });
-  const paymentLink = cryptoPaymentLink(wallet.chain, wallet.network, wallet.address);
+  const paymentLink = cryptoPaymentLink(wallet.chain, wallet.network, wallet.address, wallet.evmChainId);
   const balanceText = balanceQuery.data ? balanceQuery.data.balanceDisplay : formatChainAmount(wallet.chain, wallet.lastBalance);
 
   return (
@@ -59,7 +59,7 @@ function TestWalletRow({ wallet, companyId, agent }: { wallet: CryptoWalletSumma
           "Not linked to an agent"
         )}
         {" · "}
-        {cryptoNetworkLabel(wallet.chain, wallet.network)}
+        {cryptoNetworkLabel(wallet.chain, wallet.network, wallet)}
       </p>
 
       <div className="space-y-1">
