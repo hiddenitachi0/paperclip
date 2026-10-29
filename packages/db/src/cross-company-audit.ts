@@ -96,6 +96,11 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // saves each finished file into its own job's company; every job and file
   // is recorded in code_render_jobs and the activity log.
   "heartbeat-scheduler:codeRenders",
+  // Starts the candle-store worker when a cycle is due (public market data in
+  // tables with no company_id; it reads and writes no company's rows). Fires
+  // every tick; every error and source stop is recorded in
+  // trading_candle_ingest_events.
+  "heartbeat-scheduler:candleStore",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
