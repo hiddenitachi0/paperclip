@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const companyId = "99999999-9999-4999-8999-999999999999";
@@ -200,6 +200,17 @@ function makeComment(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+// The first import of routes/issues.js (and middleware/index.js) pulls in the route, service
+// and db-schema graph and transforms it cold. That took 5-7 s, so whichever test ran first
+// ("cancels a queued comment from its author...") blew the default 5 s test timeout on CI.
+// Pay that cost once here, with a 60 s hook timeout (the same budget vitest.config.ts gives
+// hooks). The per-test vi.resetModules() below keeps the transform cache, so each test then
+// only re-evaluates already-transformed modules (a few hundred ms).
+beforeAll(async () => {
+  registerModuleMocks();
+  await installActor(createApp());
+}, 60_000);
 
 describe.sequential("issue comment cancel routes", () => {
   beforeEach(() => {

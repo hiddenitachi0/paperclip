@@ -277,6 +277,10 @@ DECLARE
     'feedback_exports',
     'feedback_votes',
     'finance_events',
+    -- DUR-5001. Created (and granted on) in 0262_trading_fx_rates.sql;
+    -- instance-wide market data (no company_id), so it is in this list only,
+    -- not in the company-scoped one below.
+    'fx_rates',
     'goals',
     'heartbeat_run_events',
     'heartbeat_run_watchdog_decisions',
@@ -485,7 +489,7 @@ DECLARE
     -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
-    -- DUR-5026. Created, granted on and policed in 0262_trading_routine_wallets.sql;
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
     'trading_daily_stats',
@@ -860,7 +864,7 @@ DECLARE
     'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
-    -- DUR-5026. Created, granted on and policed in 0262_trading_routine_wallets.sql;
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
     'trading_daily_stats',

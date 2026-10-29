@@ -7,7 +7,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * Migration 0262_trading_routine_wallets (DUR-5026) applies on the
+ * Migration 0263_trading_routine_wallets (DUR-5026) applies on the
  * embedded-Postgres path (every migration, in journal order), leaves an
  * existing agent wallet exactly as it was (holder 'agent', every new column
  * empty), makes the database itself refuse a code-held wallet on a main
@@ -18,10 +18,10 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {
-  console.warn(`Skipping migration 0262 test: ${support.reason ?? "unsupported environment"}`);
+  console.warn(`Skipping migration 0263 test: ${support.reason ?? "unsupported environment"}`);
 }
 
-const MIGRATION_TAG = "0262_trading_routine_wallets";
+const MIGRATION_TAG = "0263_trading_routine_wallets";
 const MIGRATION_PATH = fileURLToPath(new URL(`./migrations/${MIGRATION_TAG}.sql`, import.meta.url));
 
 type Row = Record<string, unknown>;
@@ -41,7 +41,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
   let secretId = "";
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0262-trading-wallets-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0263-trading-wallets-");
     db = createDb(tempDb.connectionString);
     companyId = randomUUID();
     agentId = randomUUID();

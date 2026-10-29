@@ -1,5 +1,5 @@
 {
-  "id": "491550cb-b3cf-404b-9d98-265424d79dad",
+  "id": "0424c04d-4f13-4114-a386-2338ed24d61d",
   "prevId": "559f2475-ae79-4743-bded-2c1709acf35a",
   "version": "7",
   "dialect": "postgresql",
@@ -12731,12 +12731,6 @@
           "notNull": true,
           "default": "'{}'::jsonb"
         },
-        "trader_agent_id": {
-          "name": "trader_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -12765,19 +12759,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "company_crypto_settings_trader_agent_id_agents_id_fk": {
-          "name": "company_crypto_settings_trader_agent_id_agents_id_fk",
-          "tableFrom": "company_crypto_settings",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "trader_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -13125,12 +13106,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "routine_action": {
-          "name": "routine_action",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "status": {
           "name": "status",
           "type": "text",
@@ -13318,11 +13293,7 @@
       "checkConstraints": {
         "crypto_wallet_transactions_initiated_by_check": {
           "name": "crypto_wallet_transactions_initiated_by_check",
-          "value": "\"crypto_wallet_transactions\".\"initiated_by\" IN ('agent', 'owner', 'routine')"
-        },
-        "crypto_wallet_transactions_routine_action_check": {
-          "name": "crypto_wallet_transactions_routine_action_check",
-          "value": "\"crypto_wallet_transactions\".\"routine_action\" IS NULL OR \"crypto_wallet_transactions\".\"routine_action\" IN ('sweep', 'trade')"
+          "value": "\"crypto_wallet_transactions\".\"initiated_by\" IN ('agent', 'owner')"
         },
         "crypto_wallet_transactions_kind_check": {
           "name": "crypto_wallet_transactions_kind_check",
@@ -13458,85 +13429,6 @@
         "last_balance_at": {
           "name": "last_balance_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "holder": {
-          "name": "holder",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'agent'"
-        },
-        "max_balance": {
-          "name": "max_balance",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "daily_loss_stop": {
-          "name": "daily_loss_stop",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sweep_threshold": {
-          "name": "sweep_threshold",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "top_up_floor": {
-          "name": "top_up_floor",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "top_up_target": {
-          "name": "top_up_target",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sweep_address": {
-          "name": "sweep_address",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sweep_address_approved_at": {
-          "name": "sweep_address_approved_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pending_sweep_address": {
-          "name": "pending_sweep_address",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pending_sweep_approval_id": {
-          "name": "pending_sweep_approval_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "top_up_approval_id": {
-          "name": "top_up_approval_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "loss_day": {
-          "name": "loss_day",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "loss_day_peak": {
-          "name": "loss_day_peak",
-          "type": "numeric(78, 0)",
           "primaryKey": false,
           "notNull": false
         },
@@ -13685,148 +13577,6 @@
         "crypto_wallets_limits_check": {
           "name": "crypto_wallets_limits_check",
           "value": "\"crypto_wallets\".\"per_transaction_limit\" >= 0 AND \"crypto_wallets\".\"daily_limit\" >= 0 AND \"crypto_wallets\".\"total_limit\" >= 0 AND (\"crypto_wallets\".\"approval_above\" IS NULL OR \"crypto_wallets\".\"approval_above\" >= 0)"
-        },
-        "crypto_wallets_holder_check": {
-          "name": "crypto_wallets_holder_check",
-          "value": "\"crypto_wallets\".\"holder\" IN ('agent', 'trading_routine')"
-        },
-        "crypto_wallets_routine_shape_check": {
-          "name": "crypto_wallets_routine_shape_check",
-          "value": "\"crypto_wallets\".\"holder\" = 'agent' OR (\"crypto_wallets\".\"agent_id\" IS NULL AND \"crypto_wallets\".\"network\" = 'testnet' AND \"crypto_wallets\".\"max_balance\" IS NOT NULL AND \"crypto_wallets\".\"daily_loss_stop\" IS NOT NULL)"
-        },
-        "crypto_wallets_routine_amounts_check": {
-          "name": "crypto_wallets_routine_amounts_check",
-          "value": "(\"crypto_wallets\".\"max_balance\" IS NULL OR \"crypto_wallets\".\"max_balance\" >= 0) AND (\"crypto_wallets\".\"daily_loss_stop\" IS NULL OR \"crypto_wallets\".\"daily_loss_stop\" >= 0) AND (\"crypto_wallets\".\"sweep_threshold\" IS NULL OR \"crypto_wallets\".\"sweep_threshold\" >= 0) AND (\"crypto_wallets\".\"top_up_floor\" IS NULL OR \"crypto_wallets\".\"top_up_floor\" >= 0) AND (\"crypto_wallets\".\"top_up_target\" IS NULL OR \"crypto_wallets\".\"top_up_target\" >= 0)"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.trading_alerts": {
-      "name": "trading_alerts",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "wallet_id": {
-          "name": "wallet_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'ready'"
-        },
-        "text": {
-          "name": "text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "note": {
-          "name": "note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "delivered_at": {
-          "name": "delivered_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "trading_alerts_company_status_idx": {
-          "name": "trading_alerts_company_status_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "trading_alerts_company_id_companies_id_fk": {
-          "name": "trading_alerts_company_id_companies_id_fk",
-          "tableFrom": "trading_alerts",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "trading_alerts_wallet_id_crypto_wallets_id_fk": {
-          "name": "trading_alerts_wallet_id_crypto_wallets_id_fk",
-          "tableFrom": "trading_alerts",
-          "tableTo": "crypto_wallets",
-          "columnsFrom": [
-            "wallet_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_alerts_status_check": {
-          "name": "trading_alerts_status_check",
-          "value": "\"trading_alerts\".\"status\" IN ('ready', 'delivered', 'failed', 'expired')"
         }
       },
       "isRLSEnabled": false
@@ -19648,6 +19398,64 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.fx_rates": {
+      "name": "fx_rates",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "rate_date": {
+          "name": "rate_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rate": {
+          "name": "rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "published_at": {
+          "name": "published_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "fx_rates_rate_date_unique": {
+          "name": "fx_rates_rate_date_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "rate_date"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "fx_rates_rate_check": {
+          "name": "fx_rates_rate_check",
+          "value": "\"fx_rates\".\"rate\" > 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.goals": {
@@ -42998,6 +42806,24 @@
           "primaryKey": false,
           "notNull": true
         },
+        "fx_rate": {
+          "name": "fx_rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_date": {
+          "name": "fx_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_source": {
+          "name": "fx_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "acquired_at": {
           "name": "acquired_at",
           "type": "timestamp with time zone",
@@ -43380,6 +43206,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "fx_rate": {
+          "name": "fx_rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_date": {
+          "name": "fx_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_source": {
+          "name": "fx_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "rejection_reason": {
           "name": "rejection_reason",
           "type": "text",
@@ -43618,6 +43462,30 @@
         },
         "starting_quote_nok": {
           "name": "starting_quote_nok",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starting_quote_usd": {
+          "name": "starting_quote_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starting_cash_usd": {
+          "name": "starting_cash_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cash_usd": {
+          "name": "cash_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "peak_equity_usd": {
+          "name": "peak_equity_usd",
           "type": "double precision",
           "primaryKey": false,
           "notNull": false
