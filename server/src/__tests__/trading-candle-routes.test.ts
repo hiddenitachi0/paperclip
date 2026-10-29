@@ -81,7 +81,8 @@ describeDb("candle store routes (DUR-5007)", () => {
     await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(40)]);
     const gaps = await request(app(companyId)).get(`/api/companies/${companyId}/trading/candle-store/gaps?source=kraken&timeframe=1h`);
     expect(gaps.status).toBe(200);
-    expect(gaps.body.gaps[0]).toMatchObject({ missingBars: 39, explanation: null });
+    expect(gaps.body.gaps[0]).toMatchObject({ missingBars: 39 });
+    expect(gaps.body.gaps[0].explanation).toMatch(/Early, thin market/);
     const overlap = await request(app(companyId)).get(`/api/companies/${companyId}/trading/candle-store/overlap?asset=BTC`);
     expect(overlap.status).toBe(200);
     expect(overlap.body.rows).toEqual([]);

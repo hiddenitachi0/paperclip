@@ -57,7 +57,7 @@ until then, also across restarts. The other sources carry on.
 ## Reports (board-only, company-scoped, read-only)
 
 - `GET /api/companies/:id/trading/candle-store`: runner status, storage size, per-coin coverage (first bar, last bar, bars, expected bars; market-weather regimes covered stays `null` until DUR-5013), stops, licence note.
-- `.../candle-store/gaps`: gap detection per stream. Short runs are explained as "no trade in that interval" (Kraken omits empty bars); noted seams carry their reason; anything else is listed as unexplained.
+- `.../candle-store/gaps`: gap detection per stream. A gap is explained when it is a short run (Kraken omits bars for intervals with no trades), a noted seam (carries its reason), inside the first five years of that coin on the exchange (thin early market), or a stretch in which no other coin on the exchange traded either (outage or maintenance). Anything else is listed first as unexplained.
 - `.../candle-store/overlap`: Kraken (USD) against Binance (USDT) on the same bars: mean and 95th-percentile close difference, return correlation, volume-rank correlation.
 - `.../candle-store/candles`: raw bars, **Kraken only** (Binance history is never served as a price).
 

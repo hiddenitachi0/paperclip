@@ -248,6 +248,9 @@ export async function coverageReport(db: Db, filter: StreamFilter = {}): Promise
   return out;
 }
 
+/** A coin's first years on an exchange are thin; gaps there are no-trade stretches, not lost data. */
+const THIN_MARKET_YEARS = 5;
+
 /** Longest run of missing bars that is still just "nothing traded in that interval". */
 const QUIET_INTERVAL_MAX_MISSING: Record<TradingCandleTimeframe, number> = { "5m": 12, "1h": 6, "4h": 3, "1d": 1 };
 
@@ -275,6 +278,15 @@ export async function gapReport(
     .where(eq(tradingCandleIngestEvents.kind, "gap_note"));
   const noteFor = new Map(notes.flatMap((note) => (note.openTime ? [[`${note.source}|${note.market}|${note.timeframe}|${note.openTime.toISOString()}`, String(note.detail.reason ?? "noted")] as const] : [])));
 
+  const firstBars = new Map<string, number>();
+  const marketsOfStream = new Map<string, string[]>();
+  for (const row of (await db.execute(sql`SELECT source, market, timeframe, min(open_time) AS first_bar FROM trading_candles GROUP BY 1, 2, 3`)) as unknown as Array<Record<string, unknown>>) {
+    firstBars.set(`${row.source}|${row.market}|${row.timeframe}`, new Date(row.first_bar as string).getTime());
+    const list = marketsOfStream.get(`${row.source}|${row.timeframe}`) ?? [];
+    list.push(String(row.market));
+    marketsOfStream.set(`${row.source}|${row.timeframe}`, list);
+  }
+
   const streams = new Map<string, { source: TradingCandleSource; market: string; timeframe: TradingCandleTimeframe; gaps: number; missingBars: number; unexplained: number }>();
   const all: TradingCandleGap[] = [];
   for (const row of gapRows) {
@@ -284,10 +296,27 @@ export async function gapReport(
     const market = String(row.market);
     const missingBars = Number(row.missing);
     const afterBar = iso(row.after_bar);
-    const explanation =
+    const beforeBar = iso(row.before_bar);
+    let explanation =
       noteFor.get(`${source}|${market}|${timeframe}|${afterBar}`) ??
       (missingBars <= QUIET_INTERVAL_MAX_MISSING[timeframe] ? "The exchange publishes no bar for an interval in which nothing traded." : null);
-    all.push({ source, market, timeframe, afterBar, beforeBar: iso(row.before_bar), missingBars, explanation });
+    if (!explanation && new Date(afterBar).getTime() < (firstBars.get(`${source}|${market}|${timeframe}`) ?? 0) + THIN_MARKET_YEARS * 365 * 86_400_000) {
+      explanation = `Early, thin market (first ${THIN_MARKET_YEARS} years of this coin on the exchange): no trades in the interval.`;
+    }
+    if (!explanation) {
+      // Every other coin that already traded on this exchange was silent too: an outage or maintenance, not missing data.
+      const others = (marketsOfStream.get(`${source}|${timeframe}`) ?? []).filter(
+        (other) => other !== market && (firstBars.get(`${source}|${other}|${timeframe}`) ?? Infinity) < new Date(afterBar).getTime(),
+      );
+      if (others.length >= 2) {
+        const [active] = (await db.execute(sql`
+          SELECT count(*)::int AS n FROM trading_candles
+          WHERE source = ${source} AND timeframe = ${timeframe} AND market IN (${sql.join(others.map((other) => sql`${other}`), sql`, `)})
+            AND open_time > ${afterBar}::timestamptz AND open_time < ${beforeBar}::timestamptz`)) as unknown as Array<{ n: number }>;
+        if (active?.n === 0) explanation = "No coin traded on this exchange in the interval (outage or maintenance).";
+      }
+    }
+    all.push({ source, market, timeframe, afterBar, beforeBar, missingBars, explanation });
     const key = `${source}|${market}|${timeframe}`;
     const stream = streams.get(key) ?? { source, market, timeframe, gaps: 0, missingBars: 0, unexplained: 0 };
     stream.gaps += 1;

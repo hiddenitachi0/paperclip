@@ -102,18 +102,46 @@ describeDb("trading candle store (DUR-5007)", () => {
     ]);
   });
 
-  it("finds gaps, explains short quiet ones and a noted one, and leaves the rest unexplained", async () => {
-    // 0,1 | gap of 2 (quiet) | 4,5 | gap of 20 (noted) | 26 | gap of 30 (unexplained) | 57
-    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(1), bar(4), bar(5), bar(26), bar(57)]);
+  it("finds gaps, explains short quiet ones, noted ones and early thin ones, and leaves the rest unexplained", async () => {
+    const EARLY = -60_000; // about 6.8 years before T0, so everything after it is outside the "early, thin market" window
+    // anchor | huge gap | 0,1 | gap of 2 (quiet) | 4,5 | gap of 20 (noted) | 26 | gap of 30 (unexplained) | 57
+    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(EARLY, 100), bar(0), bar(1), bar(4), bar(5), bar(26), bar(57)]);
     await recordCandleEvent(db, { kind: "gap_note", source: "kraken", market: "BTC/USD", timeframe: "1h", openTime: new Date(T0 + 5 * HOUR), detail: { reason: "awaiting next archive" } });
     const report = await gapReport(db);
-    expect(report.streams).toEqual([{ source: "kraken", market: "BTC/USD", timeframe: "1h", gaps: 3, missingBars: 2 + 20 + 30, unexplained: 1 }]);
+    expect(report.streams).toEqual([{ source: "kraken", market: "BTC/USD", timeframe: "1h", gaps: 4, missingBars: 59_999 + 2 + 20 + 30, unexplained: 1 }]);
     expect(report.gaps.map((g) => [g.missingBars, g.explanation])).toEqual([
       [30, null],
+      [59_999, expect.stringMatching(/Early, thin market/)],
       [20, "awaiting next archive"],
       [2, "The exchange publishes no bar for an interval in which nothing traded."],
     ]);
     expect(report.gaps[0]).toMatchObject({ afterBar: new Date(T0 + 26 * HOUR).toISOString(), beforeBar: new Date(T0 + 57 * HOUR).toISOString() });
+  });
+
+  it("explains a long gap in a coin's first years as an early, thin market", async () => {
+    await insertCandles(db, "kraken", "LTC/USD", "1h", [bar(0), bar(100)]);
+    const report = await gapReport(db);
+    expect(report.gaps[0]!.explanation).toMatch(/Early, thin market/);
+    expect(report.streams[0]!.unexplained).toBe(0);
+  });
+
+  it("explains a long gap as an outage when every other coin on the exchange was silent too, but not when one traded", async () => {
+    const EARLY = -60_000;
+    const inGap = (market: string, afterHour: number, gaps: Awaited<ReturnType<typeof gapReport>>["gaps"]) =>
+      gaps.find((g) => g.market === market && g.afterBar === new Date(T0 + afterHour * HOUR).toISOString())!;
+
+    // Nobody traded between hour 0 and hour 100.
+    for (const market of ["BTC/USD", "ETH/USD", "SOL/USD"]) await insertCandles(db, "kraken", market, "1h", [bar(EARLY, 100), bar(0), bar(100)]);
+    let report = await gapReport(db, { minMissingBars: 20 });
+    expect(inGap("ETH/USD", 0, report.gaps).explanation).toMatch(/No coin traded/);
+
+    // BTC traded at hour 10: that stretch is no longer an outage for ETH, but is still one for BTC's own two halves.
+    await db.execute(sql`TRUNCATE trading_candles`);
+    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(EARLY, 100), bar(0), bar(10), bar(100)]);
+    for (const market of ["ETH/USD", "SOL/USD"]) await insertCandles(db, "kraken", market, "1h", [bar(EARLY, 100), bar(0), bar(100)]);
+    report = await gapReport(db, { minMissingBars: 20 });
+    expect(inGap("ETH/USD", 0, report.gaps).explanation).toBeNull();
+    expect(inGap("BTC/USD", 10, report.gaps).explanation).toMatch(/No coin traded/);
   });
 
   it("reports no gaps for a clean run", async () => {
