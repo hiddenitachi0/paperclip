@@ -31,6 +31,30 @@ export type CryptoChain = (typeof CRYPTO_CHAINS)[number];
 export const CRYPTO_NETWORKS = ["testnet", "mainnet"] as const;
 export type CryptoNetwork = (typeof CRYPTO_NETWORKS)[number];
 
+/**
+ * Bitcoin has two free test networks. A Bitcoin test wallet is on exactly one
+ * of them from creation on (crypto_wallets.network_variant, never changed).
+ * New wallets default to signet (stable); testnet4 stays available, and every
+ * wallet that existed before signet was added is testnet4.
+ */
+export const BITCOIN_NETWORK_VARIANTS = ["testnet4", "signet"] as const;
+export type BitcoinNetworkVariant = (typeof BITCOIN_NETWORK_VARIANTS)[number];
+export const DEFAULT_BITCOIN_NETWORK_VARIANT: BitcoinNetworkVariant = "signet";
+
+/**
+ * Where a company's own network address for a wallet is stored: one slot per
+ * chain x network x variant, so signet and testnet4 never share one. The
+ * 'testnet' slot of Bitcoin keeps meaning testnet4 (what it meant before
+ * signet existed); 'signet' is a Bitcoin-only slot.
+ */
+export const CRYPTO_ENDPOINT_SLOTS = ["testnet", "mainnet", "signet"] as const;
+export type CryptoEndpointSlot = (typeof CRYPTO_ENDPOINT_SLOTS)[number];
+
+export function cryptoEndpointSlot(chain: CryptoChain, network: CryptoNetwork, networkVariant?: BitcoinNetworkVariant | null): CryptoEndpointSlot {
+  if (network === "mainnet") return "mainnet";
+  return chain === "bitcoin" && networkVariant === "signet" ? "signet" : "testnet";
+}
+
 export interface CryptoChainInfo {
   chain: CryptoChain;
   label: string;
@@ -114,10 +138,11 @@ export const CRYPTO_CHAIN_INFO: Record<CryptoChain, CryptoChainInfo> = {
  * Sepolia); Bitcoin test links carry a visible "TEST NETWORK ONLY" label.
  * null where no standard link exists (Solana, Hyperliquid).
  */
-export function cryptoPaymentLink(chain: CryptoChain, network: CryptoNetwork, address: string): string | null {
+export function cryptoPaymentLink(chain: CryptoChain, network: CryptoNetwork, address: string, evmChainId?: number | null): string | null {
   switch (chain) {
     case "ethereum":
-      return `ethereum:${address}@${EVM_CHAIN_IDS[network]}`;
+      // A test wallet names its own stored chain; the default only covers a caller that has none to give.
+      return `ethereum:${address}@${network === "mainnet" ? EVM_CHAIN_IDS.mainnet : (evmChainId ?? EVM_CHAIN_IDS.testnet)}`;
     case "bitcoin":
       return network === "mainnet"
         ? `bitcoin:${address}`
@@ -132,8 +157,23 @@ export function cryptoPaymentLink(chain: CryptoChain, network: CryptoNetwork, ad
   }
 }
 
-export function cryptoNetworkLabel(chain: CryptoChain, network: CryptoNetwork): string {
-  return network === "mainnet" ? `${CRYPTO_CHAIN_INFO[chain].label} main network (real money)` : CRYPTO_CHAIN_INFO[chain].testnetLabel;
+export const BITCOIN_SIGNET_LABEL = "Bitcoin test network (signet)";
+export const BITCOIN_SIGNET_FAUCET_HINT =
+  "Get free test bitcoin from a signet faucet, such as alt.signetfaucet.com. Signet coins are confirmed within about ten minutes.";
+
+/** Plain names of the allowed Ethereum test networks, by chain ID. */
+export const EVM_TEST_CHAIN_NAMES: Record<number, string> = { 11155111: "Sepolia", 560048: "Hoodi" };
+
+export function cryptoNetworkLabel(
+  chain: CryptoChain,
+  network: CryptoNetwork,
+  wallet?: { networkVariant?: string | null; evmChainId?: number | null },
+): string {
+  if (network === "mainnet") return `${CRYPTO_CHAIN_INFO[chain].label} main network (real money)`;
+  if (chain === "bitcoin" && wallet?.networkVariant === "signet") return BITCOIN_SIGNET_LABEL;
+  const evmName = chain === "ethereum" && wallet?.evmChainId != null ? EVM_TEST_CHAIN_NAMES[wallet.evmChainId] : undefined;
+  if (evmName) return `Ethereum test network (${evmName})`;
+  return CRYPTO_CHAIN_INFO[chain].testnetLabel;
 }
 
 /**
@@ -149,6 +189,20 @@ export const DEFAULT_CRYPTO_RPC_ENDPOINTS: Record<CryptoChain, Record<CryptoNetw
   hyperliquid: { testnet: "https://api.hyperliquid-testnet.xyz", mainnet: "https://api.hyperliquid.xyz" },
 };
 
+/** Signet has no slot in the table above (it is Bitcoin-only); see cryptoEndpointSlot. */
+export const DEFAULT_BITCOIN_SIGNET_RPC_ENDPOINT = "https://mempool.space/signet/api";
+
+/** The built-in network address for a slot, or undefined where the chain has none (signet outside Bitcoin). */
+export function defaultCryptoRpcEndpoint(chain: CryptoChain, slot: CryptoEndpointSlot): string | undefined {
+  if (slot === "signet") return chain === "bitcoin" ? DEFAULT_BITCOIN_SIGNET_RPC_ENDPOINT : undefined;
+  return DEFAULT_CRYPTO_RPC_ENDPOINTS[chain][slot];
+}
+
+/**
+ * The chain ID a NEW Ethereum test wallet gets when none is chosen. It is
+ * written onto the wallet at creation; signing reads the wallet's own stored
+ * chain ID, never this, so changing it later moves no existing wallet.
+ */
 export const EVM_CHAIN_IDS: Record<CryptoNetwork, number> = { testnet: 11155111, mainnet: 1 };
 
 /**
@@ -368,6 +422,10 @@ export interface CryptoWalletSummary {
   agentId: string | null;
   chain: CryptoChain;
   network: CryptoNetwork;
+  /** Bitcoin test wallets only (null otherwise). Fixed at creation. */
+  networkVariant: BitcoinNetworkVariant | null;
+  /** Ethereum test wallets only (null otherwise). Fixed at creation. */
+  evmChainId: number | null;
   address: string;
   label: string;
   keyOrigin: "generated" | "imported";
@@ -433,7 +491,7 @@ export interface CompanyCryptoSettings {
   allWalletsFrozen: boolean;
   frozenReason: string | null;
   /** Only the endpoints the company changed; anything missing uses DEFAULT_CRYPTO_RPC_ENDPOINTS. */
-  rpcEndpoints: Partial<Record<CryptoChain, Partial<Record<CryptoNetwork, string>>>>;
+  rpcEndpoints: Partial<Record<CryptoChain, Partial<Record<CryptoEndpointSlot, string>>>>;
   /** The one AI Trader agent: may ask for top-ups of trading wallets, can never hold a wallet. null = none named. */
   traderAgentId: string | null;
   /** Only on the answer to turning real money on: how many agents' dollar limits went back to the defaults. */
@@ -483,6 +541,10 @@ export const createCryptoWalletSchema = z
     agentId: z.string().uuid(),
     chain: z.enum(CRYPTO_CHAINS),
     network: z.enum(CRYPTO_NETWORKS).default("testnet"),
+    /** Bitcoin test wallets only; fixed at creation. Left out = DEFAULT_BITCOIN_NETWORK_VARIANT. */
+    networkVariant: z.enum(BITCOIN_NETWORK_VARIANTS).optional(),
+    /** Ethereum test wallets only, from TEST_EVM_CHAIN_IDS; fixed at creation. Left out = EVM_CHAIN_IDS.testnet. */
+    evmChainId: z.number().int().positive().optional(),
     label: z.string().trim().min(1, "Give the wallet a name.").max(120),
     /** "generate": the server makes a brand-new key. "import": paste an existing private key. */
     mode: z.enum(["generate", "import"]),
@@ -491,6 +553,14 @@ export const createCryptoWalletSchema = z
     limits: cryptoWalletLimitsSchema.optional(),
   })
   .strict()
+  .refine((v) => v.networkVariant === undefined || (v.chain === "bitcoin" && v.network === "testnet"), {
+    message: "Only a Bitcoin test wallet has a test network to choose.",
+    path: ["networkVariant"],
+  })
+  .refine((v) => v.evmChainId === undefined || (v.chain === "ethereum" && v.network === "testnet" && isTestEvmChainId(v.evmChainId)), {
+    message: "Pick one of the allowed Ethereum test networks for an Ethereum test wallet.",
+    path: ["evmChainId"],
+  })
   .refine((v) => v.mode === "generate" || (typeof v.privateKey === "string" && v.privateKey.length > 0), {
     message: "Paste the private key to import.",
     path: ["privateKey"],
@@ -545,7 +615,7 @@ export const updateCompanyCryptoSettingsSchema = z
     /** Owner-only. The agent named here can never hold a wallet; an agent that holds one cannot be named. */
     traderAgentId: z.string().uuid().nullable().optional(),
     rpcEndpoints: z
-      .record(z.enum(CRYPTO_CHAINS), z.record(z.enum(CRYPTO_NETWORKS), httpsUrl.nullable()))
+      .record(z.enum(CRYPTO_CHAINS), z.record(z.enum(CRYPTO_ENDPOINT_SLOTS), httpsUrl.nullable()))
       .optional(),
   })
   .strict();

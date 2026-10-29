@@ -4,7 +4,13 @@ import {
   DEFAULT_CRYPTO_AGENT_LIMITS,
   DEFAULT_CRYPTO_WALLET_LIMITS,
   CRYPTO_CHAIN_INFO,
+  BITCOIN_SIGNET_LABEL,
   CRYPTO_FAUCET_HINTS_AS_OF,
+  DEFAULT_BITCOIN_NETWORK_VARIANT,
+  DEFAULT_BITCOIN_SIGNET_RPC_ENDPOINT,
+  cryptoEndpointSlot,
+  cryptoNetworkLabel,
+  defaultCryptoRpcEndpoint,
   createCryptoWalletSchema,
   cryptoPaymentLink,
   cryptoAgentLimitsSchema,
@@ -102,5 +108,48 @@ describe("test-network funding hints and payment links", () => {
     expect(cryptoPaymentLink("bitcoin", "mainnet", "bc1qabc")).toBe("bitcoin:bc1qabc");
     expect(cryptoPaymentLink("solana", "testnet", "x")).toBeNull();
     expect(cryptoPaymentLink("hyperliquid", "testnet", eth)).toBeNull();
+  });
+});
+
+describe("test network per wallet: bitcoin variant and Ethereum chain ID (DUR-5024)", () => {
+  const base = { agentId: "11111111-1111-4111-8111-111111111111", label: "W", mode: "generate" as const };
+
+  it("makes signet the default for new bitcoin test wallets", () => {
+    expect(DEFAULT_BITCOIN_NETWORK_VARIANT).toBe("signet");
+    expect(DEFAULT_BITCOIN_SIGNET_RPC_ENDPOINT).toBe("https://mempool.space/signet/api");
+  });
+
+  it("gives signet and testnet4 separate network-address slots, keeping the old testnet slot for testnet4", () => {
+    expect(cryptoEndpointSlot("bitcoin", "testnet", "signet")).toBe("signet");
+    expect(cryptoEndpointSlot("bitcoin", "testnet", "testnet4")).toBe("testnet");
+    expect(cryptoEndpointSlot("bitcoin", "testnet", null)).toBe("testnet");
+    expect(cryptoEndpointSlot("bitcoin", "mainnet", "signet")).toBe("mainnet");
+    expect(cryptoEndpointSlot("ethereum", "testnet")).toBe("testnet");
+    expect(defaultCryptoRpcEndpoint("bitcoin", "signet")).toBe("https://mempool.space/signet/api");
+    expect(defaultCryptoRpcEndpoint("bitcoin", "testnet")).toBe("https://mempool.space/testnet4/api");
+    expect(defaultCryptoRpcEndpoint("solana", "signet")).toBeUndefined();
+    expect(updateCompanyCryptoSettingsSchema.safeParse({ rpcEndpoints: { bitcoin: { signet: "https://example.org/api" } } }).success).toBe(true);
+  });
+
+  it("only accepts a variant on a bitcoin test wallet and a chain ID on an Ethereum test wallet from the allow-list", () => {
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "bitcoin", networkVariant: "signet" }).success).toBe(true);
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "bitcoin", networkVariant: "testnet3" }).success).toBe(false);
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "solana", networkVariant: "signet" }).success).toBe(false);
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "bitcoin", network: "mainnet", networkVariant: "signet" }).success).toBe(false);
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "ethereum", evmChainId: 560048 }).success).toBe(true);
+    for (const evmChainId of [1, 8453, 42161, 0, -1]) {
+      expect(createCryptoWalletSchema.safeParse({ ...base, chain: "ethereum", evmChainId }).success).toBe(false);
+    }
+    expect(createCryptoWalletSchema.safeParse({ ...base, chain: "ethereum", network: "mainnet", evmChainId: 11155111 }).success).toBe(false);
+  });
+
+  it("labels and links a wallet by its own stored network", () => {
+    expect(cryptoNetworkLabel("bitcoin", "testnet", { networkVariant: "signet" })).toBe(BITCOIN_SIGNET_LABEL);
+    expect(cryptoNetworkLabel("bitcoin", "testnet", { networkVariant: "testnet4" })).toBe(CRYPTO_CHAIN_INFO.bitcoin.testnetLabel);
+    expect(cryptoNetworkLabel("bitcoin", "testnet")).toBe(CRYPTO_CHAIN_INFO.bitcoin.testnetLabel);
+    expect(cryptoNetworkLabel("ethereum", "testnet", { evmChainId: 560048 })).toBe("Ethereum test network (Hoodi)");
+    const eth = "0x1111111111111111111111111111111111111111";
+    expect(cryptoPaymentLink("ethereum", "testnet", eth, 560048)).toBe(`ethereum:${eth}@560048`);
+    expect(cryptoPaymentLink("ethereum", "mainnet", eth, 560048)).toBe(`ethereum:${eth}@1`);
   });
 });

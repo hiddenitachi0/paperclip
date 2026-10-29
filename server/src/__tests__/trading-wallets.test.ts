@@ -417,6 +417,23 @@ d("trading wallets held by code", () => {
     expect((await owner.post(`/api/companies/${companyId}/crypto/trading-wallets`, { chain: "solana", label: "Too big", limits: solLimits({ maxBalance: "50" }) })).status).toBe(422);
   });
 
+  it("fixes the test network of a Bitcoin and an Ethereum trading wallet at creation, as the database requires (DUR-5024)", async () => {
+    const { companyId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    // The inert Bitcoin / Ethereum adapters refuse everything; these two can make a key.
+    adapters.bitcoin = { ...inertAdapter("bitcoin"), generateKey: async () => ({ privateKey: "btc-test-key", address: "tb1qtradingwalletbitcoin0000000000000000" }) } as CryptoChainAdapter;
+    adapters.ethereum = { ...inertAdapter("ethereum"), generateKey: async () => ({ privateKey: "0xeth-test-key", address: "0x00000000000000000000000000000000000000aa" }) } as CryptoChainAdapter;
+    const btc = await owner.post(`/api/companies/${companyId}/crypto/trading-wallets`, { chain: "bitcoin", label: "BTC trader" });
+    expect(btc.status, JSON.stringify(btc.body)).toBe(201);
+    const eth = await owner.post(`/api/companies/${companyId}/crypto/trading-wallets`, { chain: "ethereum", label: "ETH trader" });
+    expect(eth.status).toBe(201);
+    const sol = await owner.post(`/api/companies/${companyId}/crypto/trading-wallets`, { chain: "solana", label: "SOL trader" });
+    expect(sol.status).toBe(201);
+    expect(await walletRow(btc.body.id)).toMatchObject({ network: "testnet", networkVariant: "signet", evmChainId: null });
+    expect(await walletRow(eth.body.id)).toMatchObject({ network: "testnet", networkVariant: null, evmChainId: 11155111 });
+    expect(await walletRow(sol.body.id)).toMatchObject({ network: "testnet", networkVariant: null, evmChainId: null });
+  });
+
   it("keeps the key out of every response, log line, ledger row, activity row, approval card, alert and transaction", async () => {
     const { companyId } = await seed();
     const owner = boardApp(companyId, "owner");
