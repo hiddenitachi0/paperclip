@@ -75,7 +75,7 @@ uses only the first two files and is **not** how prod is deployed; see step 2.)
      sets. `DATABASE_URL` is needed in `server.env` even if `.env` does not set
      it: the prod compose file then falls back to the default login
      (`postgres://paperclip:paperclip@db:5432/paperclip`), so copy that default
-     into `server.env` in that case. Add any missing line in an editor as root,
+     into `server.env` in that case (the check below compares against it). Add any missing line in an editor as root,
      copying the value from `.env` in the editor.
    - **Check it without printing any value.** This prints only the names and
      `ok` / `MISSING` / `DIFFERENT`; it never prints a value. Run it as root
@@ -83,9 +83,11 @@ uses only the first two files and is **not** how prod is deployed; see step 2.)
 
      ```sh
      SRV=/root/paperclip-secrets/server.env
+     [ -f .env ] && [ -f "$SRV" ] || echo "STOP: run this from the repo root, as root"
      for n in BETTER_AUTH_SECRET PAPERCLIP_AGENT_JWT_SECRET DATABASE_URL \
               DATABASE_BYPASS_URL DATABASE_MIGRATION_URL PAPERCLIP_SERVER_ANTHROPIC_API_KEY; do
        s=$(grep -m1 "^$n=" "$SRV"); e=$(grep -m1 "^$n=" .env)
+       [ "$n" = DATABASE_URL ] && [ -z "$e" ] && e="DATABASE_URL=postgres://paperclip:paperclip@db:5432/paperclip"
        case $n in BETTER_AUTH_SECRET|PAPERCLIP_AGENT_JWT_SECRET|DATABASE_URL) must=1;; *) must=;; esac
        if [ -z "${s#"$n="}" ]; then
          if [ -n "$must" ] || [ -n "${e#"$n="}" ]; then r=MISSING; else r="not set (fine, .env does not set it)"; fi
