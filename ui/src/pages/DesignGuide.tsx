@@ -128,6 +128,9 @@ import { IssueReferencePill } from "@/components/IssueReferencePill";
 import { MembershipAction } from "@/components/MembershipAction";
 import { IssueOutputSection } from "@/components/issue-output/IssueOutputSection";
 import { EnvironmentVariablesEditor } from "@/components/environment-variables-editor";
+import { QrCode } from "@/components/QrCode";
+import { BackupCodesPanel } from "@/components/BackupCodesPanel";
+import { TwoFactorCodeField } from "@/components/TwoFactorCodeField";
 import type { CompanySecret, EnvBinding } from "@paperclipai/shared";
 import {
   EnvInputsList,
@@ -1783,6 +1786,26 @@ export function DesignGuide() {
           for all 10 states.
         </p>
         <EnvironmentVariablesEditorShowcase />
+      </Section>
+
+      <Section title="Two-step sign-in pieces">
+        <p className="text-sm text-muted-foreground">
+          Building blocks of the two-step sign-in screens: a QR picture (always dark on white so phone cameras
+          can read it), a one-time list of backup codes, and the code box with its backup-code switch.
+        </p>
+        <SubSection title="QR code">
+          <QrCode value="otpauth://totp/Paperclip:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Paperclip" label="Example QR code" />
+        </SubSection>
+        <SubSection title="Backup codes">
+          <div className="max-w-sm">
+            <BackupCodesPanel codes={["K7QF-2M9X-AB12", "P4TD-8WZ3-CD34", "R2HN-5VJ6-EF56", "X9LB-3QY7-GH78"]} />
+          </div>
+        </SubSection>
+        <SubSection title="Code field">
+          <div className="max-w-sm">
+            <TwoFactorCodeField value="" onChange={() => undefined} useBackupCode={false} onToggleBackupCode={() => undefined} />
+          </div>
+        </SubSection>
       </Section>
     </div>
   );
