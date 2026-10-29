@@ -202,6 +202,8 @@ export function mustBeDecidedOnApprovalCard(approval: Pick<NamedApproval, "type"
     || kind === "operator_action"
     // Approving runs the calculation's saved examples first (owner/admin only).
     || kind === "report_script_version"
+    // Approving switches a trading strategy to exactly the stored draft (owner/admin, signed in on the card).
+    || kind === "trading_strategy_version"
     || isUnsupportedDeployLikeKind(kind);
 }
 
@@ -213,6 +215,7 @@ export function describeApprovalForAgent(approval: Pick<NamedApproval, "type" | 
     if (kind === "cross_company_instruction") return "a cross-company instruction approval";
     if (kind === "operator_action") return "a host action approval";
     if (kind === "report_script_version") return "a report calculation approval";
+    if (kind === "trading_strategy_version") return "a trading strategy rule-book approval";
   }
   return `a ${approval.type.replace(/_/g, " ")} approval`;
 }

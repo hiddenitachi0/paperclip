@@ -88,7 +88,7 @@ export function buildStrategyVersionCardPayload(row: TradingStrategyVersionRow):
     kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND,
     title: `Approve trading strategy "${spec.meta.name}", version ${row.version}`,
     summary,
-    plainSummary: `${summary} Approving switches the strategy to exactly the rules written below (paper money only). Read them first.`,
+    plainSummary: `${summary} Approving switches the strategy to exactly the rules written below (paper money only). Read them first.\n\n${cardText}`,
     recommendedAction: "Read the rules and the limits below. The first line of each section is what the strategy will do.",
     nextActionOnApproval: "This version becomes the strategy's active rule book, replacing the current one. A running strategy picks it up on its next check.",
     risks: ["Paper money only. Real money stays locked server-wide."],
