@@ -73,13 +73,30 @@ describe("evaluateDailyLoss", () => {
     const state = evaluateDailyLoss({ balance: 100n, outflowsToday: 50n, today, lossDay: today, lossDayPeak: 150n, previousBalance: 150n });
     expect(state).toMatchObject({ adjusted: 150n, loss: 0n });
   });
-  it("does not let a deposit hide an earlier loss: the deposit raises the bar", () => {
+  it("does not let a deposit hide an earlier loss: the deposit lifts the bar but the loss stays", () => {
     const afterLoss = evaluateDailyLoss({ balance: 80n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
     expect(afterLoss.loss).toBe(20n);
     const afterDeposit = evaluateDailyLoss({ balance: 180n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: afterLoss.peak, previousBalance: 80n });
-    expect(afterDeposit).toMatchObject({ peak: 180n, loss: 0n });
-    // ...and a further drop is measured from the higher bar.
-    expect(evaluateDailyLoss({ balance: 150n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: afterDeposit.peak, previousBalance: 180n }).loss).toBe(30n);
+    expect(afterDeposit).toMatchObject({ peak: 200n, loss: 20n });
+    // ...and a further drop adds to it.
+    expect(evaluateDailyLoss({ balance: 150n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: afterDeposit.peak, previousBalance: 180n }).loss).toBe(50n);
+  });
+  it("keeps the loss taken before a mid-day top-up, so the stop still trips (DUR-5087 N3)", () => {
+    const stop = 10n * USDC;
+    // 25 -> 19: a loss of 6.
+    const down = evaluateDailyLoss({ balance: 19n * USDC, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 25n * USDC, previousBalance: 25n * USDC });
+    expect(down.loss).toBe(6n * USDC);
+    // Top up to 100: the loss of 6 is still counted.
+    const topUp = evaluateDailyLoss({ balance: 100n * USDC, outflowsToday: 0n, today, lossDay: today, lossDayPeak: down.peak, previousBalance: 19n * USDC });
+    expect(topUp.loss).toBe(6n * USDC);
+    // Lose 9.9 more: 15.9 in total, over the stop of 10.
+    const lost = evaluateDailyLoss({ balance: 90_100_000n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: topUp.peak, previousBalance: 100n * USDC });
+    expect(lost.loss).toBe(15_900_000n);
+    expect(lost.loss >= stop).toBe(true);
+  });
+  it("still lets a gain raise the bar when nothing is owed, so given-back profit counts", () => {
+    const up = evaluateDailyLoss({ balance: 130n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
+    expect(up).toMatchObject({ peak: 130n, loss: 0n });
   });
   it("carries last night's balance into a new day so an overnight drop is not forgotten", () => {
     expect(evaluateDailyLoss({ balance: 70n, outflowsToday: 0n, today, lossDay: "2026-10-28", lossDayPeak: 120n, previousBalance: 100n })).toMatchObject({ peak: 100n, loss: 30n });

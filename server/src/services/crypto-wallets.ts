@@ -50,7 +50,7 @@ import {
   type UpdateCompanyCryptoSettingsInput,
   type UpdateCryptoWalletInput,
 } from "@paperclipai/shared";
-import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { assertCryptoKeyImportAllowed, assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
@@ -571,6 +571,18 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     }
   }
 
+  /**
+   * A code-held trading wallet's money paths (who it can send to, owner send,
+   * leverage) are the owner's alone, on any network (DUR-5087 N1): a company
+   * admin who could add their own address and send the balance would bypass
+   * the sweep-to-cold-wallet design with no approval card.
+   */
+  function assertOwnerForRoutineWallet(wallet: CryptoWalletRow, actor: { isOwner: boolean }, what: string) {
+    if (wallet.holder === "trading_routine" && !actor.isOwner) {
+      throw forbidden(`Only the company's owner can ${what} on a trading wallet.`);
+    }
+  }
+
   async function updateWallet(companyId: string, walletId: string, input: UpdateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     const row = await requireWalletRow(companyId, walletId);
     if (row.holder === "trading_routine") {
@@ -580,6 +592,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         throw unprocessable("A trading wallet is held by Paperclip's trading code and can never be given to an agent.");
       }
       if (input.limits !== undefined) throw unprocessable("Change a trading wallet's limits on its trading limits screen.");
+      if (input.maxLeverage !== undefined) assertOwnerForRoutineWallet(row, actor, "change leverage");
     }
     if (input.limits !== undefined || input.maxLeverage !== undefined || input.agentId !== undefined) {
       assertOwnerForRealMoney(row, actor, "change limits, leverage or which agent uses it");
@@ -701,6 +714,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   ): Promise<CryptoWalletDestination> {
     const wallet = await requireWalletRow(companyId, walletId);
     assertOwnerForRealMoney(wallet, actor, "add an allowed address");
+    assertOwnerForRoutineWallet(wallet, actor, "add an allowed address");
     const chain = wallet.chain as CryptoChain;
     let normalized: string | null;
     try {
@@ -725,8 +739,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return { id: row!.id, walletId, address: row!.address, label: row!.label, createdAt: row!.createdAt.toISOString() };
   }
 
-  async function removeDestination(companyId: string, walletId: string, destinationId: string, actor: { userId: string }): Promise<void> {
-    await requireWalletRow(companyId, walletId);
+  async function removeDestination(companyId: string, walletId: string, destinationId: string, actor: { userId: string; isOwner: boolean }): Promise<void> {
+    const wallet = await requireWalletRow(companyId, walletId);
+    assertOwnerForRoutineWallet(wallet, actor, "remove an allowed address");
     const [removed] = await db
       .delete(cryptoWalletDestinations)
       .where(and(eq(cryptoWalletDestinations.id, destinationId), eq(cryptoWalletDestinations.walletId, walletId), eq(cryptoWalletDestinations.companyId, companyId)))
@@ -784,7 +799,23 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
   // ─── Balance and reconciliation ────────────────────────────────────────
 
+  /**
+   * Reads a wallet's balance from the network and reconciles it. A trading
+   * wallet is always read through watchTradingWallet, so no caller (the
+   * owner's balance screen, the Trader's top-up request) can refresh the
+   * reading without the daily-loss and max-balance stops being applied to
+   * it: a refresh stamps lastBalanceAt, and the scheduler skips a wallet it
+   * saw recently (DUR-5087 N2).
+   */
   async function refreshBalance(companyId: string, walletId: string): Promise<CryptoWalletBalance> {
+    const wallet = await requireWalletRow(companyId, walletId);
+    if (wallet.holder === "trading_routine" && wallet.status !== "archived") {
+      return (await watchTradingWallet(wallet, nowOf())).fresh;
+    }
+    return readBalance(companyId, walletId);
+  }
+
+  async function readBalance(companyId: string, walletId: string): Promise<CryptoWalletBalance> {
     const wallet = await requireWalletRow(companyId, walletId);
     const chain = wallet.chain as CryptoChain;
     const ctx = await chainContext(companyId, chain, wallet.network as CryptoNetwork);
@@ -835,6 +866,10 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
             .set({ status: "frozen", frozenReason: note, frozenAt: now, updatedAt: now })
             .where(eq(cryptoWallets.id, walletId));
           await writeLedger({ companyId, walletId, eventType: "wallet_kill_switch", detail: { scope: "wallet", action: "freeze", reason: "unexplained_outflow", by: { actorType: "system", actorId: "reconciliation" } } });
+          // The owner is told at the moment of the freeze, whoever asked for this reading.
+          if (wallet.holder === "trading_routine") {
+            await queueAlert(wallet, "wallet_paused", `Safety stop: the trading wallet "${wallet.label}" was paused. ${note}`);
+          }
         }
         logger.warn({ companyId, walletId, chain }, "crypto wallet: unexplained outflow, wallet frozen");
       }
@@ -1511,6 +1546,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   async function ownerSend(companyId: string, walletId: string, input: CryptoSendRequest, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletTransactionSummary> {
     const wallet = await requireWalletRow(companyId, walletId);
     assertOwnerForRealMoney(wallet, actor, "send funds");
+    assertOwnerForRoutineWallet(wallet, actor, "send funds");
     const prepared = await prepareSend(wallet, input);
     return processSpend({
       wallet,
@@ -1810,6 +1846,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     effectiveBalance: bigint;
     /** Hyperliquid only: what the exchange lets the wallet withdraw right now. */
     withdrawable: bigint | null;
+    /** The reading this look was based on. */
+    fresh: CryptoWalletBalance;
   }
 
   /**
@@ -1821,15 +1859,12 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   async function watchTradingWallet(wallet: CryptoWalletRow, now: Date): Promise<WatchResult> {
     assertRoutineWallet(wallet);
     const previousBalance = bigOrNull(wallet.lastBalance);
-    const fresh = await refreshBalance(wallet.companyId, wallet.id);
+    // readBalance, not refreshBalance: the latter comes back here. It freezes the wallet and queues the alert itself when coins left that Paperclip did not send.
+    const fresh = await readBalance(wallet.companyId, wallet.id);
     const balance = BigInt(fresh.balance);
     const row = await requireWalletRow(wallet.companyId, wallet.id);
-    if (!fresh.reconciliation.ok) {
-      // refreshBalance froze it (coins left that Paperclip did not send); the owner needs to know.
-      await queueAlert(row, "wallet_paused", `Safety stop: the trading wallet "${row.label}" was paused. ${fresh.reconciliation.note ?? ""}`.trim());
-    }
     const withdrawable = fresh.withdrawable === null || fresh.withdrawable === undefined ? null : BigInt(fresh.withdrawable);
-    if (row.status !== "active") return { wallet: row, balance, paused: true, effectiveBalance: balance, withdrawable };
+    if (row.status !== "active") return { wallet: row, balance, paused: true, effectiveBalance: balance, withdrawable, fresh };
 
     const totals = await sentTotals(row.id, utcDayStart(now));
     const today = utcDayKey(now);
@@ -1852,9 +1887,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     });
     if (breach.kind !== "ok") {
       await pauseTradingWallet(row, breach.kind, breach.reason, now);
-      return { wallet: await requireWalletRow(row.companyId, row.id), balance, paused: true, effectiveBalance, withdrawable };
+      return { wallet: await requireWalletRow(row.companyId, row.id), balance, paused: true, effectiveBalance, withdrawable, fresh };
     }
-    return { wallet: row, balance, paused: false, effectiveBalance, withdrawable };
+    return { wallet: row, balance, paused: false, effectiveBalance, withdrawable, fresh };
   }
 
   /**
@@ -2067,15 +2102,38 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return rows.filter((r) => r.status !== "archived").map(toWalletSummary);
   }
 
-  /** The Trader asks the owner for funds. Only possible while the balance, read fresh from the network, is below the floor. */
+  /** One top-up request per wallet per watch interval: the Trader cannot use this endpoint to make the network read the wallet over and over. */
+  const lastTopUpRequestAt = new Map<string, number>();
+
+  /**
+   * The Trader asks the owner for funds. Only possible while the balance is
+   * below the floor. The floor is checked against the stored reading first,
+   * so a request made while the wallet is above it never touches the network;
+   * otherwise the wallet gets a proper watch (balance read plus the hard
+   * stops), never a bare refresh -- a bare refresh would stamp lastBalanceAt
+   * and make the scheduler skip the stops for the next few minutes (DUR-5087 N2).
+   */
   async function traderRequestTopUp(companyId: string, agentId: string, walletId: string, reason: string): Promise<{ approvalId: string; created: boolean }> {
     await requireTraderAgent(companyId, agentId);
     const wallet = await requireRoutineWallet(companyId, walletId);
     if (wallet.status === "archived") throw unprocessable("This wallet is archived.");
     if (wallet.topUpFloor === null || wallet.topUpTarget === null) throw unprocessable("This wallet has no top-up floor set, so a top-up cannot be requested.");
-    const fresh = await refreshBalance(companyId, walletId);
-    const filed = await fileTopUpCard(await requireWalletRow(companyId, walletId), BigInt(fresh.balance), reason, agentId, nowOf());
-    if (!filed) throw unprocessable("The balance is not below the floor (or a request was answered less than a day ago), so no top-up card was filed.");
+    const now = nowOf();
+    const last = lastTopUpRequestAt.get(walletId);
+    if (last !== undefined && now.getTime() - last < tradingWatchIntervalMs) {
+      throw tooManyRequests("A top-up was asked for on this wallet a moment ago. Try again in a few minutes.");
+    }
+    lastTopUpRequestAt.set(walletId, now.getTime());
+    const notBelowFloor = () =>
+      unprocessable("The balance is not below the floor (or a request was answered less than a day ago), so no top-up card was filed.");
+    const stored = bigOrNull(wallet.lastBalance);
+    const floor = { floor: BigInt(wallet.topUpFloor), target: BigInt(wallet.topUpTarget) };
+    if (stored !== null && topUpNeeded({ balance: stored, ...floor }) === null) throw notBelowFloor();
+    // A reading the scheduler or a trade took within the last interval already went through the hard stops: use it.
+    const recent = wallet.lastBalanceAt !== null && stored !== null && now.getTime() - wallet.lastBalanceAt.getTime() < tradingWatchIntervalMs;
+    const watched = recent ? { wallet, balance: stored } : await watchTradingWallet(wallet, now);
+    const filed = await fileTopUpCard(watched.wallet, watched.balance, reason, agentId, now);
+    if (!filed) throw notBelowFloor();
     return filed;
   }
 
