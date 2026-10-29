@@ -1,4 +1,7 @@
+import { CRYPTO_REAL_MONEY_ENV } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
+
+export { CRYPTO_REAL_MONEY_ENV };
 
 /**
  * Server-wide lock on real-money ("mainnet") crypto.
@@ -12,8 +15,6 @@ import { forbidden } from "../errors.js";
  * go stale, and it can never be lifted by anything stored in the database
  * (company settings, wallet rows), which only matter once this allows it.
  */
-export const CRYPTO_REAL_MONEY_ENV = "PAPERCLIP_CRYPTO_REAL_MONEY";
-
 export const CRYPTO_REAL_MONEY_LOCK_MESSAGE =
   "Real money is switched off on this server (administrator setting). Only test-network wallets can be used.";
 
