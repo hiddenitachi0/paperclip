@@ -1835,6 +1835,13 @@
       "when": 1793291681623,
       "tag": "0262_trading_fx_rates",
       "breakpoints": true
+    },
+    {
+      "idx": 263,
+      "version": "7",
+      "when": 1793298024458,
+      "tag": "0263_trading_strategy_versions",
+      "breakpoints": true
     }
   ]
 }
