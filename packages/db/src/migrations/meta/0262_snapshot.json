@@ -1,5 +1,5 @@
 {
-  "id": "beb57961-8244-4f70-bf0d-b4b1993f0a41",
+  "id": "0424c04d-4f13-4114-a386-2338ed24d61d",
   "prevId": "559f2475-ae79-4743-bded-2c1709acf35a",
   "version": "7",
   "dialect": "postgresql",
@@ -13346,18 +13346,6 @@
           "notNull": true,
           "default": "'testnet'"
         },
-        "network_variant": {
-          "name": "network_variant",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "evm_chain_id": {
-          "name": "evm_chain_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "address": {
           "name": "address",
           "type": "text",
@@ -13573,14 +13561,6 @@
         "crypto_wallets_network_check": {
           "name": "crypto_wallets_network_check",
           "value": "\"crypto_wallets\".\"network\" IN ('testnet', 'mainnet')"
-        },
-        "crypto_wallets_network_variant_check": {
-          "name": "crypto_wallets_network_variant_check",
-          "value": "(\"crypto_wallets\".\"chain\" = 'bitcoin' AND \"crypto_wallets\".\"network\" = 'testnet') = (\"crypto_wallets\".\"network_variant\" IS NOT NULL) AND (\"crypto_wallets\".\"network_variant\" IS NULL OR \"crypto_wallets\".\"network_variant\" IN ('testnet4', 'signet'))"
-        },
-        "crypto_wallets_evm_chain_id_check": {
-          "name": "crypto_wallets_evm_chain_id_check",
-          "value": "(\"crypto_wallets\".\"chain\" = 'ethereum' AND \"crypto_wallets\".\"network\" = 'testnet') = (\"crypto_wallets\".\"evm_chain_id\" IS NOT NULL) AND (\"crypto_wallets\".\"evm_chain_id\" IS NULL OR \"crypto_wallets\".\"evm_chain_id\" > 0)"
         },
         "crypto_wallets_status_check": {
           "name": "crypto_wallets_status_check",
@@ -19418,6 +19398,64 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.fx_rates": {
+      "name": "fx_rates",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "rate_date": {
+          "name": "rate_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rate": {
+          "name": "rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "published_at": {
+          "name": "published_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "fx_rates_rate_date_unique": {
+          "name": "fx_rates_rate_date_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "rate_date"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "fx_rates_rate_check": {
+          "name": "fx_rates_rate_check",
+          "value": "\"fx_rates\".\"rate\" > 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.goals": {
@@ -42768,6 +42806,24 @@
           "primaryKey": false,
           "notNull": true
         },
+        "fx_rate": {
+          "name": "fx_rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_date": {
+          "name": "fx_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_source": {
+          "name": "fx_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "acquired_at": {
           "name": "acquired_at",
           "type": "timestamp with time zone",
@@ -43150,6 +43206,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "fx_rate": {
+          "name": "fx_rate",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_date": {
+          "name": "fx_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_source": {
+          "name": "fx_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "rejection_reason": {
           "name": "rejection_reason",
           "type": "text",
@@ -43388,6 +43462,30 @@
         },
         "starting_quote_nok": {
           "name": "starting_quote_nok",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starting_quote_usd": {
+          "name": "starting_quote_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starting_cash_usd": {
+          "name": "starting_cash_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cash_usd": {
+          "name": "cash_usd",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "peak_equity_usd": {
+          "name": "peak_equity_usd",
           "type": "double precision",
           "primaryKey": false,
           "notNull": false

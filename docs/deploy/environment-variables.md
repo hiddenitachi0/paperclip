@@ -40,6 +40,7 @@ Before first deploying a version with this lock, check that no main-network wall
 |----------|---------|-------------|
 | `PAPERCLIP_SECRETS_MASTER_KEY` | (from file) | 32-byte encryption key (base64/hex/raw) |
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | `~/.paperclip/.../secrets/master.key` | Path to key file |
+| `PAPERCLIP_SECRETS_REQUIRE_ENV_KEY` | `false` | Set to `true` or `1` to make the `local_encrypted` provider use only `PAPERCLIP_SECRETS_MASTER_KEY`. It never reads, chmods or creates a key file, and fails with a clear error when the key is missing |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | `false` | Require secret refs for sensitive env vars |
 
 ## Agent Runtime (Injected into agent processes)

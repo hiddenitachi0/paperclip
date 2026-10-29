@@ -1832,8 +1832,15 @@
     {
       "idx": 262,
       "version": "7",
-      "when": 1793290677339,
-      "tag": "0262_crypto_wallet_network_variant",
+      "when": 1793291681623,
+      "tag": "0262_trading_fx_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 263,
+      "version": "7",
+      "when": 1793300877682,
+      "tag": "0263_crypto_wallet_network_variant",
       "breakpoints": true
     }
   ]

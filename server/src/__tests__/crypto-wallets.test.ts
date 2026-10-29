@@ -1395,7 +1395,7 @@ d("crypto wallets for agents", () => {
     const btcMain = await make({ chain: "bitcoin", network: "mainnet" });
     const before = await db.select().from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
 
-    const migration = readFileSync(path.join(import.meta.dirname, "../../../packages/db/src/migrations/0262_crypto_wallet_network_variant.sql"), "utf8");
+    const migration = readFileSync(path.join(import.meta.dirname, "../../../packages/db/src/migrations/0263_crypto_wallet_network_variant.sql"), "utf8");
     const statements = migration.split("--> statement-breakpoint").map((part) => part.trim()).filter((part) => part.replace(/^--.*$/gm, "").trim() !== "");
     const run = async () => { for (const statement of statements) await db.execute(sql.raw(statement)); };
     // Roll back to the shape before the migration (the documented rollback), then apply it.

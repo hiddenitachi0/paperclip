@@ -1,3 +1,4 @@
+import type { DeploymentMode } from "@paperclipai/shared";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
@@ -39,7 +40,7 @@ async function assertHuggingFaceTokenAccepted(value: string | null | undefined, 
 
 export function secretRoutes(
   rawDb: Db,
-  deps: { secretTests?: SecretTestService; huggingFaceFetch?: HuggingFaceFetch } = {},
+  deps: { secretTests?: SecretTestService; huggingFaceFetch?: HuggingFaceFetch; deploymentMode?: DeploymentMode } = {},
 ) {
   const router = Router();
   // DUR-348 (DUR-277 Wave 2): this file's own request-scoped instance; the
@@ -89,7 +90,7 @@ export function secretRoutes(
       assertCompanyAccess(req, companyId);
     }),
     async (req, res) => {
-      const checks = await svc.checkProviders();
+      const checks = await svc.checkProviders({ deploymentMode: deps.deploymentMode });
       res.json({ providers: checks });
     },
   );
