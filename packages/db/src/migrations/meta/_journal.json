@@ -1828,6 +1828,13 @@
       "when": 1793221026301,
       "tag": "0261_trading_candle_timeframe",
       "breakpoints": true
+    },
+    {
+      "idx": 262,
+      "version": "7",
+      "when": 1793260000000,
+      "tag": "0262_trading_routine_wallets",
+      "breakpoints": true
     }
   ]
 }

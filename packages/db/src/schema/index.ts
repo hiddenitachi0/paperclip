@@ -177,7 +177,7 @@ export { videoStorylineWriterMessages } from "./video_storyline_writer_messages.
 export { mediaLoras, mediaModelSetups, mediaProjectDefaults } from "./media_model_setups.js";
 export { mediaModelSetupTrials } from "./media_model_setup_trials.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
-export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions } from "./crypto_wallets.js";
+export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions, tradingAlerts } from "./crypto_wallets.js";
 export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms, contractSettings } from "./contracts.js";
 export { crmOrganizations } from "./crm_organizations.js";
 export { crmContacts } from "./crm_contacts.js";
