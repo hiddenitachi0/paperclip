@@ -91,6 +91,7 @@ written to `operator-action-runner.log`):
   to it (no `..`). `recreate_container` is only allowed for compose services.
 - `envFiles.*.path` is absolute and must already exist (the runner never
   creates files). `keys` are upper-case setting names.
+  `PAPERCLIP_CRYPTO_REAL_MONEY` (the real-money lock) is refused even if listed.
 - `envFiles.*.secrets` (optional, recommended): for each key, the names of the
   company secrets that may be written into it. When it is present, a key with
   no entry here cannot be set at all, and any other secret is refused — both

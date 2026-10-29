@@ -47,6 +47,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
   CryptoChainError,
   defaultCryptoChainAdapters,
@@ -276,8 +277,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const row = await settingsRow(companyId);
     return {
       companyId,
+      // The stored value, untouched: lifting the server lock later restores
+      // exactly what the owner had chosen. realMoneyLocked is what decides.
       mainnetEnabled: row?.mainnetEnabled ?? false,
       mainnetEnabledAt: row?.mainnetEnabledAt?.toISOString() ?? null,
+      realMoneyLocked: !isCryptoRealMoneyAllowed(),
       allWalletsFrozen: row?.allWalletsFrozen ?? false,
       frozenReason: row?.frozenReason ?? null,
       rpcEndpoints: (row?.rpcEndpoints as CompanyCryptoSettings["rpcEndpoints"]) ?? {},
@@ -295,6 +299,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     let turningMainnetOn = false;
 
     if (input.mainnetEnabled === true && !current.mainnetEnabled) {
+      // The server lock comes first: not even an owner who types the phrase gets past it.
+      assertCryptoRealMoneyAllowed();
       if (!actor.isOwner) throw forbidden("Only the company's owner can turn on real money for crypto wallets.");
       if ((input.confirmPhrase ?? "").trim() !== CRYPTO_MAINNET_CONFIRM_PHRASE) {
         throw unprocessable(`To turn on real money, type ${CRYPTO_MAINNET_CONFIRM_PHRASE} to confirm.`);
@@ -403,6 +409,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   }
 
   async function createWallet(companyId: string, input: CreateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
+    if (input.network === "mainnet") assertCryptoRealMoneyAllowed();
     const agent = await requireAgent(companyId, input.agentId);
     const settings = await getSettings(companyId);
     if (input.network === "mainnet" && !settings.mainnetEnabled) {
@@ -751,6 +758,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   // ─── Gate checks shared by every money-moving path ─────────────────────
 
   async function assertSwitchesAllow(wallet: CryptoWalletRow): Promise<string | null> {
+    // Checked on every request and never written to the wallet row: lifting
+    // the server lock needs no clean-up, because nothing was changed.
+    if (wallet.network === "mainnet" && !isCryptoRealMoneyAllowed()) return CRYPTO_REAL_MONEY_LOCK_MESSAGE;
     const settings = await getSettings(wallet.companyId);
     if (settings.allWalletsFrozen) return `All crypto wallets in this company are frozen${settings.frozenReason ? `: ${settings.frozenReason}` : "."}`;
     if (wallet.status === "frozen") return `This wallet is frozen${wallet.frozenReason ? `: ${wallet.frozenReason}` : "."}`;
@@ -1034,6 +1044,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   /** Records the attempt, runs the gate under a lock, and either blocks, files a card, or sends. */
   async function processSpend(req: SpendRequest): Promise<CryptoWalletTransactionSummary> {
     const { wallet } = req;
+    if (wallet.network === "mainnet") assertCryptoRealMoneyAllowed();
     const chain = wallet.chain as CryptoChain;
     const now = nowOf();
     const base = {
@@ -1145,6 +1156,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   }
 
   async function prepareSend(wallet: CryptoWalletRow, input: CryptoSendRequest) {
+    if (wallet.network === "mainnet") assertCryptoRealMoneyAllowed();
     const chain = wallet.chain as CryptoChain;
     const decimals = CRYPTO_CHAIN_INFO[chain].decimals;
     const amount = parseCryptoAmount(input.amount, decimals);
@@ -1221,6 +1233,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   async function agentHyperliquidOrder(companyId: string, agentId: string, walletId: string, input: HyperliquidOrderRequest): Promise<CryptoWalletTransactionSummary> {
     const wallet = await requireAgentWallet(companyId, agentId, walletId);
     if (wallet.chain !== "hyperliquid") throw unprocessable("Trading orders are only possible on a Hyperliquid wallet.");
+    if (wallet.network === "mainnet") assertCryptoRealMoneyAllowed();
     const size = Number(input.size);
     const price = Number(input.limitPrice);
     if (!(size > 0) || !(price > 0)) throw unprocessable("Size and price must be more than zero.");
@@ -1490,7 +1503,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     // answer is only looked up (by its own order id) until it is found or
     // can no longer be accepted. Withdrawals carry no leverage and are
     // re-sent as the same signed bytes (same nonce, so at most once).
-    if (row.kind !== "order" && row.signedRaw && now.getTime() - lastSend >= REBROADCAST_INTERVAL_MS) {
+    // Not on a main network while real money is locked off: sending is real money moving.
+    if (row.kind !== "order" && row.signedRaw && now.getTime() - lastSend >= REBROADCAST_INTERVAL_MS && !(row.network === "mainnet" && !isCryptoRealMoneyAllowed())) {
       const signed: SignedTransfer = {
         raw: row.signedRaw,
         txHash: row.txHash!,

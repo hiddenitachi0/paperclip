@@ -2,12 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRADING_RISK_CONFIG,
   TRADING_HARD_CEILING,
+  TRADING_MODES,
   createTradingStrategySchema,
   evaluateSmaCrossover,
   evaluateTradingRule,
   simpleMovingAverage,
   tradingRiskConfigSchema,
 } from "./trading.js";
+
+describe("TRADING_MODES", () => {
+  it("stays paper-only: no strategy can run in a real-money mode", () => {
+    expect([...TRADING_MODES]).toEqual(["paper"]);
+  });
+});
 
 describe("TRADING_HARD_CEILING", () => {
   // Pinned on purpose: this snapshot is the "protected config" guard from

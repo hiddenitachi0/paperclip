@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
+import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
 import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
@@ -2354,6 +2355,7 @@ export async function startServer(): Promise<StartedServer> {
     server.listen(listenPort, config.host, () => {
       server.off("error", onError);
       logger.info(`Server listening on ${config.host}:${listenPort}`);
+      logger.warn(describeCryptoRealMoneyLockForBoot());
       if (process.env.PAPERCLIP_OPEN_ON_LISTEN === "true") {
         const openHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
         const url = `http://${openHost}:${listenPort}`;

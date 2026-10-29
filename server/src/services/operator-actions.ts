@@ -10,6 +10,7 @@ import {
   type OperatorActionType,
 } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
+import { CRYPTO_REAL_MONEY_ENV } from "./crypto-real-money-lock.js";
 
 /**
  * One-click privileged host actions ("operator actions").
@@ -173,6 +174,12 @@ export function buildOperatorActionCard(input: {
       );
     }
     const envKey = request.envKey!;
+    if (envKey === CRYPTO_REAL_MONEY_ENV) {
+      throw unprocessable(
+        `${envKey} cannot be changed with a host action. It is the real-money lock and is set in the server's deploy settings by the operator only.`,
+        { code: "operator_action_key_not_allowed" },
+      );
+    }
     if (!envFile.keys.includes(envKey)) {
       throw unprocessable(
         `${envKey} is not one of the settings that may be changed in ${envFile.label}. Allowed: ${envFile.keys.join(", ") || "(none)"}.`,
