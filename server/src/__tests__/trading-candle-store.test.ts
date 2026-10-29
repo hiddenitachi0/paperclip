@@ -215,22 +215,22 @@ describeDb("trading candle store (DUR-5007)", () => {
     expect(stops.map((s) => s.source)).toEqual(["binance"]);
   });
 
-  it("migration 0262 can be run again without error and without touching stored bars (idempotent)", async () => {
+  it("migration 0263 can be run again without error and without touching stored bars (idempotent)", async () => {
     await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0)]);
-    const file = new URL("../../../packages/db/src/migrations/0262_trading_candle_store.sql", import.meta.url);
+    const file = new URL("../../../packages/db/src/migrations/0263_trading_candle_store.sql", import.meta.url);
     const statements = readFileSync(file, "utf8").split("--> statement-breakpoint").map((part) => part.trim()).filter(Boolean);
     expect(statements.length).toBeGreaterThan(5);
     for (const statement of statements) await db.execute(sql.raw(statement));
     expect(await latestOpenTime(db, "kraken", "BTC/USD", "1h")).toEqual(bar(0).openTime);
   });
 
-  it("migration 0262 rolls back with the documented statements", async () => {
+  it("migration 0263 rolls back with the documented statements", async () => {
     await db.execute(sql`DROP TABLE trading_candle_ingest_events, trading_candles`);
     await db.execute(sql`DROP FUNCTION trading_candles_refuse_update()`);
     const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name IN ('trading_candles', 'trading_candle_ingest_events')`)) as unknown as Array<{ n: number }>;
     expect(rows[0]!.n).toBe(0);
     // Put it back for any test that follows.
-    const file = new URL("../../../packages/db/src/migrations/0262_trading_candle_store.sql", import.meta.url);
+    const file = new URL("../../../packages/db/src/migrations/0263_trading_candle_store.sql", import.meta.url);
     for (const statement of readFileSync(file, "utf8").split("--> statement-breakpoint").map((part) => part.trim()).filter(Boolean)) await db.execute(sql.raw(statement));
   });
 });

@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { bigserial, check, doublePrecision, index, jsonb, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 /**
- * The candle store (DUR-5007, migration 0262): years of closed candles for
+ * The candle store (DUR-5007, migration 0263): years of closed candles for
  * past-data tests, one row per exchange, market, bar size and bar start.
  *
  * Instance-wide public market data only. There is no company_id: nothing in

@@ -35,6 +35,11 @@ import { fakeTradingMarketData } from "../services/trading-market-data.ts";
  */
 
 const support = await getEmbeddedPostgresTestSupport();
+/** Drop the "created on the daily rate" valuation_switch note every new strategy gets (DUR-5001); these tests assert on trading events only. */
+function withoutCreationNote<T extends { detail: unknown }>(entries: Promise<T[]>) {
+  return entries.then((rows) => rows.filter((e) => (e.detail as { reason?: string } | null)?.reason !== "valuation_switch"));
+}
+
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {
   console.warn(`Skipping trading service tests: ${support.reason ?? "unsupported environment"}`);
@@ -144,7 +149,7 @@ d("tradingService", () => {
     expect(orders[0]).toMatchObject({ side: "buy", status: "filled" });
     expect(orders[0]!.ruleVersion).toBe(`sma_crossover@1 · engine ${TRADING_ENGINE_VERSION}`);
 
-    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    const ledgerEntries = await withoutCreationNote(trading.listLedgerEntries(companyId, strategy.id));
     expect(ledgerEntries.map((e) => e.eventType)).toEqual(["order_filled", "kill_switch"]); // newest first: the fill, then the earlier resume-to-running.
     expect(ledgerEntries[0]!.feeNok).toBeCloseTo(2.5, 6);
 
@@ -190,7 +195,7 @@ d("tradingService", () => {
     expect(sellOrder.realizedPnlNok).toBeCloseTo(expectedPnl, 6);
     expect(afterSell.cashNok).toBeCloseTo(afterBuy.cashNok + proceedsNok, 6);
 
-    const ledgerEntries = await sellTrading.listLedgerEntries(companyId, strategy.id);
+    const ledgerEntries = await withoutCreationNote(sellTrading.listLedgerEntries(companyId, strategy.id));
     const sellEntry = ledgerEntries.find((e) => e.orderId === sellOrder.id)!;
     expect(sellEntry.realizedPnlNok).toBeCloseTo(expectedPnl, 6);
     expect(sellEntry.fifoCostNok).toBeCloseTo(costBasis, 6);
@@ -223,7 +228,7 @@ d("tradingService", () => {
     const orders = await trading.listOrders(companyId, strategy.id);
     expect(orders[0]).toMatchObject({ status: "rejected" });
 
-    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    const ledgerEntries = await withoutCreationNote(trading.listLedgerEntries(companyId, strategy.id));
     expect(ledgerEntries.map((e) => e.eventType)).toEqual(["risk_block", "kill_switch"]);
 
     await trading.setStatus(companyId, strategy.id, "paused");
@@ -254,7 +259,7 @@ d("tradingService", () => {
     expect(orders).toHaveLength(1);
     expect(orders[0]).toMatchObject({ side: "buy", status: "rejected", rejectionReason: expect.stringContaining("halted") });
 
-    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    const ledgerEntries = await withoutCreationNote(trading.listLedgerEntries(companyId, strategy.id));
     const alert = ledgerEntries.find((e) => e.eventType === "circuit_breaker")!;
     expect(alert.detail).toMatchObject({ alert: "entries_halted", cause: "circuit_breaker", reason: "single_tick_price_jump", timeframe: "15m", jumpThresholdPct: 15 });
     expect(ledgerEntries.filter((e) => e.eventType === "circuit_breaker")).toHaveLength(1);
@@ -430,7 +435,7 @@ d("tradingService", () => {
     expect(paused.status).toBe("paused");
     expect(paused.pauseReason).toBe("manual");
 
-    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    const ledgerEntries = await withoutCreationNote(trading.listLedgerEntries(companyId, strategy.id));
     expect(ledgerEntries.map((e) => e.eventType)).toEqual(["kill_switch", "kill_switch"]);
     expect(ledgerEntries.map((e) => e.detail)).toEqual([
       { action: "pause", fromStatus: "running" },
@@ -688,7 +693,7 @@ d("tradingService", () => {
   it("sells at the drawdown limit", async () => {
     const companyId = await seedCompany();
     const { strategy } = await openPosition(companyId, TRADE_START, "15m");
-    await db.update(tradingStrategies).set({ peakEquityNok: 1_000_000 }).where(eq(tradingStrategies.id, strategy.id));
+    await db.update(tradingStrategies).set({ peakEquityNok: 1_000_000, peakEquityUsd: 1_000_000 / 11.5 }).where(eq(tradingStrategies.id, strategy.id));
 
     const sellAt = new Date(TRADE_START.getTime() + 15 * 60_000);
     const trading = sellTick(sellAt, "15m", 3);

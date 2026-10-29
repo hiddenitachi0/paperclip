@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
+import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
@@ -1103,7 +1104,10 @@ export async function startServer(): Promise<StartedServer> {
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
     const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
     const videoStorylineClips = videoStorylineClipsService(schedulerDb as any);
-    const tradingAgent = tradingService(schedulerDb as any);
+    // The scheduler's trading service is the one that fetches Norges Bank's daily
+    // USD/NOK rate (DUR-5001); request-time services only read what it stored.
+    const tradingFxRates = fxRatesService(schedulerDb as any, norgesBankFetcher());
+    const tradingAgent = tradingService(schedulerDb as any, { fxRates: tradingFxRates });
     // DUR-5007: the candle store's backfill and top-up. Runs in a worker thread
     // with its own database connection, on its own chain, never in the trading tick.
     const candleStore = tradingCandleRunner({
@@ -1228,6 +1232,12 @@ export async function startServer(): Promise<StartedServer> {
       // may stop boot.
       await tradingAgent.noteEngineVersion().catch((err) => {
         logger.error({ err }, "startup trading-agent engine-version note failed");
+      });
+      // DUR-5001: fetch today's rate, then do the one-time valuation switch
+      // (peak equity reset + ledger note). Neither may stop boot.
+      await tradingFxRates.refresh();
+      await tradingAgent.applyValuationSwitch().catch((err) => {
+        logger.error({ err }, "startup trading-agent valuation switch failed");
       });
       await tradingAgent.verifyMarketsOnBoot().catch((err) => {
         logger.error({ err }, "startup trading-agent market check failed");

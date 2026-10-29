@@ -277,6 +277,10 @@ DECLARE
     'feedback_exports',
     'feedback_votes',
     'finance_events',
+    -- DUR-5001. Created (and granted on) in 0262_trading_fx_rates.sql;
+    -- instance-wide market data (no company_id), so it is in this list only,
+    -- not in the company-scoped one below.
+    'fx_rates',
     'goals',
     'heartbeat_run_events',
     'heartbeat_run_watchdog_decisions',
@@ -486,7 +490,7 @@ DECLARE
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     -- DUR-5007 candle store. Created (and granted on) in
-    -- 0262_trading_candle_store.sql; instance-wide public market data with no
+    -- 0263_trading_candle_store.sql; instance-wide public market data with no
     -- company_id, so these two are in the login-role list ONLY.
     'trading_candle_ingest_events',
     'trading_candles',

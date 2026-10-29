@@ -1832,8 +1832,15 @@
     {
       "idx": 262,
       "version": "7",
-      "when": 1793288805793,
-      "tag": "0262_trading_candle_store",
+      "when": 1793291681623,
+      "tag": "0262_trading_fx_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 263,
+      "version": "7",
+      "when": 1793299965414,
+      "tag": "0263_trading_candle_store",
       "breakpoints": true
     }
   ]

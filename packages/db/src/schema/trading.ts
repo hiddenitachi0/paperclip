@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, date, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { cryptoWallets, cryptoWalletTransactions } from "./crypto_wallets.js";
 
@@ -91,6 +91,15 @@ export const tradingStrategies = pgTable(
     // buy-and-hold benchmark. Null if the initial quote fetch failed -- the
     // benchmark degrades to null in that case rather than blocking creation.
     startingQuoteNok: doublePrecision("starting_quote_nok"),
+    // DUR-5001 (migration 0262): strategies are scored in USD, the market's own
+    // currency, so the NOK rate creates no fake gains or losses. These four are
+    // the USD side of the same accounting; the *_nok columns stay as the NOK
+    // ledger/display. Nullable only so a row written by pre-0262 code during a
+    // deploy overlap is read back at the old fixed 11.5 (see the service).
+    startingQuoteUsd: doublePrecision("starting_quote_usd"),
+    startingCashUsd: doublePrecision("starting_cash_usd"),
+    cashUsd: doublePrecision("cash_usd"),
+    peakEquityUsd: doublePrecision("peak_equity_usd"),
     cashNok: doublePrecision("cash_nok").notNull(),
     positionQuantity: doublePrecision("position_quantity").notNull().default(0),
     positionCostNok: doublePrecision("position_cost_nok").notNull().default(0),
@@ -142,6 +151,13 @@ export const tradingOrders = pgTable(
     filledPriceNok: doublePrecision("filled_price_nok"),
     feeNok: doublePrecision("fee_nok"),
     realizedPnlNok: doublePrecision("realized_pnl_nok"),
+    // DUR-5001: the NOK-per-USD rate this fill's *_nok figures were converted
+    // at, the date that rate was published for and where it came from
+    // ('norges_bank', 'estimated' = no rate stored at all, or
+    // 'fixed_estimate_11.5' = every fill made before the daily rate).
+    fxRate: doublePrecision("fx_rate"),
+    fxDate: date("fx_date", { mode: "string" }),
+    fxSource: text("fx_source"),
     rejectionReason: text("rejection_reason"),
     // Set when riskConfig.approvalAboveNok is crossed -- the "trade cards
     // must expire in minutes" requirement; resolved through the generic
@@ -172,6 +188,11 @@ export const tradingFifoLots = pgTable(
     sourceOrderId: uuid("source_order_id").notNull().references(() => tradingOrders.id, { onDelete: "cascade" }),
     quantityRemaining: doublePrecision("quantity_remaining").notNull(),
     costNokPerUnit: doublePrecision("cost_nok_per_unit").notNull(),
+    // DUR-5001: the rate costNokPerUnit was converted at (same meaning as the
+    // fx_* columns on trading_orders); cost in USD = costNokPerUnit / fxRate.
+    fxRate: doublePrecision("fx_rate"),
+    fxDate: date("fx_date", { mode: "string" }),
+    fxSource: text("fx_source"),
     acquiredAt: timestamp("acquired_at", { withTimezone: true }).notNull(),
   },
   (table) => ({

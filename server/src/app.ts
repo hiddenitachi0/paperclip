@@ -436,7 +436,7 @@ export async function createApp(
   }));
   api.use(crossCompanyInstructionRoutes(db));
   api.use(deployRunnerRoutes(db));
-  api.use(secretRoutes(db));
+  api.use(secretRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(goalAdoptionRoutes(db));
   api.use(activityRoutes(db));
