@@ -151,6 +151,19 @@ export const DEFAULT_CRYPTO_RPC_ENDPOINTS: Record<CryptoChain, Record<CryptoNetw
 
 export const EVM_CHAIN_IDS: Record<CryptoNetwork, number> = { testnet: 11155111, mainnet: 1 };
 
+/**
+ * The only EVM chains a test-network wallet may ever sign on: Sepolia and
+ * Hoodi. This is code, not a setting, on purpose: with a per-company chain
+ * ID an owner could point a "test" wallet at chain 1, 8453 or 42161 through
+ * a mainnet RPC address and the real-money lock would never see it. A
+ * successor to Sepolia is added here by a release, never by a setting.
+ */
+export const TEST_EVM_CHAIN_IDS: readonly number[] = [11155111, 560048];
+
+export function isTestEvmChainId(chainId: number | bigint): boolean {
+  return TEST_EVM_CHAIN_IDS.some((id) => BigInt(id) === BigInt(chainId));
+}
+
 // ─── Amounts (always integer base units on the server) ─────────────────────
 
 const DECIMAL_RE = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;

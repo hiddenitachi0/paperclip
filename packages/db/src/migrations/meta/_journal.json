@@ -1821,6 +1821,13 @@
       "when": 1793193193903,
       "tag": "0260_code_render_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 261,
+      "version": "7",
+      "when": 1793221026301,
+      "tag": "0261_trading_candle_timeframe",
+      "breakpoints": true
     }
   ]
 }

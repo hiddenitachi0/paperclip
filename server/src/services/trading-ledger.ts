@@ -98,6 +98,25 @@ export function tradingLedgerService(db: Db) {
       .limit(params.limit);
   }
 
+  /** The engine version of the newest "engine_version" note for this strategy, or null if it has none (DUR-4999). */
+  async function latestEngineVersionNote(params: { companyId: string; strategyId: string }): Promise<number | null> {
+    const [row] = await db
+      .select({ detail: tradingLedgerEntries.detail })
+      .from(tradingLedgerEntries)
+      .where(
+        and(
+          eq(tradingLedgerEntries.companyId, params.companyId),
+          eq(tradingLedgerEntries.strategyId, params.strategyId),
+          eq(tradingLedgerEntries.eventType, "reconciliation"),
+          sql`${tradingLedgerEntries.detail}->>'reason' = 'engine_version'`,
+        ),
+      )
+      .orderBy(sql`${tradingLedgerEntries.createdAt} DESC`)
+      .limit(1);
+    const version = (row?.detail as { engineVersion?: unknown } | null | undefined)?.engineVersion;
+    return typeof version === "number" ? version : null;
+  }
+
   /** UTC calendar date key, "YYYY-MM-DD" -- matches watchers.ts's utcDay() convention. */
   function statDateOf(date: Date): string {
     return date.toISOString().slice(0, 10);
@@ -145,5 +164,5 @@ export function tradingLedgerService(db: Db) {
       .limit(params.limit);
   }
 
-  return { addFifoLot, consumeFifoLots, writeLedgerEntry, listLedgerEntries, recordDailyStat, listDailyStats, statDateOf };
+  return { addFifoLot, consumeFifoLots, writeLedgerEntry, listLedgerEntries, latestEngineVersionNote, recordDailyStat, listDailyStats, statDateOf };
 }
