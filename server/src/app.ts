@@ -1,3 +1,4 @@
+import { pendingSessionAuthGuard } from "./auth/two-factor-gate.js";
 import { instanceDiskHealthRoutes } from "./routes/instance-disk-health.js";
 import { createDiskHealthService } from "./services/disk-health.js";
 import { resolveDefaultBackupDir } from "./home-paths.js";
@@ -317,7 +318,11 @@ export async function createApp(
   app.use("/api/auth/2fa", twoFactorRoutes(db, { enabled: opts.twoFactorEnabled === true }));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
-    app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
+    app.all(
+      "/api/auth/{*authPath}",
+      pendingSessionAuthGuard({ enabled: opts.twoFactorEnabled === true, resolveSession: opts.resolveSession }),
+      opts.betterAuthHandler,
+    );
   }
   app.use(llmRoutes(db));
 

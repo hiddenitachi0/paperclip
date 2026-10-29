@@ -1,4 +1,4 @@
-import type { Request } from "express";
+import type { NextFunction, Request, Response } from "express";
 import type { Db } from "@paperclipai/db";
 import type { BetterAuthSessionResult } from "./better-auth.js";
 import { totpService } from "../services/totp-2fa.js";
@@ -81,5 +81,40 @@ export function twoFactorGate(db: Db, opts: { enabled: boolean }) {
         }
       };
     },
+  };
+}
+
+/**
+ * better-auth's own account endpoints (list-sessions, change-password,
+ * revoke-sessions, update-user, ...) read the session cookie themselves and
+ * never go through the resolvers above, so a password-only session would be a
+ * valid session there. In front of better-auth, a signed-in session that has
+ * not passed its second factor may only reach sign-in/up, sign-out and the
+ * read-only session/health probes; everything else is refused.
+ */
+const PENDING_ALLOWED_AUTH_PATHS = [/^\/sign-in(\/|$)/, /^\/sign-up(\/|$)/, /^\/sign-out$/, /^\/get-session$/, /^\/ok$/, /^\/error$/];
+
+export function pendingSessionAuthGuard(opts: {
+  enabled: boolean;
+  /** The gate-wrapped resolver: resolving populates `getPendingTwoFactor`. */
+  resolveSession?: RequestResolver;
+}) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    if (!opts.enabled || !opts.resolveSession) return next();
+    // Registered with app.all("/api/auth/{*authPath}"), so req.path is the full path.
+    const path = req.path.replace(/^\/api\/auth(?=\/|$)/, "").replace(/\/+$/, "") || "/";
+    if (PENDING_ALLOWED_AUTH_PATHS.some((re) => re.test(path))) return next();
+    try {
+      // Resolve here rather than trusting an earlier pass: actorMiddleware skips
+      // session resolution when an Authorization header is present, and better-auth
+      // still honours the cookie.
+      await opts.resolveSession(req);
+    } catch {
+      return res.status(403).json({ error: "Two-factor verification required" });
+    }
+    if (getPendingTwoFactor(req)) {
+      return res.status(403).json({ error: "Two-factor verification required" });
+    }
+    next();
   };
 }
