@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { companies, createDb, tradingStrategies } from "@paperclipai/db";
+import { approvals, companies, createDb, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
 import { DEFAULT_TRADING_RISK_CONFIG, DEFAULT_TRADING_RULE_CONFIG } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { fakeTradingMarketData } from "../services/trading-market-data.js";
@@ -52,7 +52,8 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
   }, 30_000);
 
   afterEach(async () => {
-    await db.delete(tradingStrategies);
+    await db.delete(tradingStrategies); // its versions go with it
+    await db.delete(approvals);
     await db.delete(companies);
   });
 
@@ -168,5 +169,112 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     const outsiderApp = createApp(otherCompanyId, "owner"); // owner of otherCompanyId, not companyId
     const res = await request(outsiderApp).get(`/api/companies/${companyId}/trading/strategies`);
     expect(res.status).toBe(403);
+  });
+
+  // ─── DUR-5002: rules change only as a draft plus a card ──────────────────
+
+  const specBody = {
+    spec: {
+      specVersion: 2,
+      meta: { name: "Test strategy", family: "trend", thesis: "A crossover with a stop." },
+      universe: { assets: ["BTC"], decisionTimeframe: "4h" },
+      indicators: { fast: { kind: "sma", period: 5 }, slow: { kind: "sma", period: 20 } },
+      entry: { conditions: { match: "all", conditions: [{ left: { ref: "fast" }, op: "crosses_above", right: { ref: "slow" } }] } },
+      exit: { stop: { kind: "pct", pct: 4 } },
+      sizing: { kind: "fraction_of_cash", fraction: 0.1 },
+      neverDo: { maxPositionNok: 500 },
+      prediction: { horizonBars: 6, kind: "direction", flatBandPct: 0.25, rUnit: "stop_distance" },
+    },
+    guidelines: "Stay calm.",
+  };
+
+  async function createStrategyAs(companyId: string) {
+    const created = await request(createApp(companyId, "owner")).post(`/api/companies/${companyId}/trading/strategies`).send({ ...strategyBody, timeframe: "4h" });
+    expect(created.status).toBe(201);
+    return created.body as { id: string; ruleConfig: unknown; riskConfig: unknown; activeVersionId: string };
+  }
+
+  it.each(["owner", "admin"] as const)("an %s's PATCH with a rule change files a draft and a card (202) and changes nothing live", async (membershipRole) => {
+    const companyId = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const app = createApp(companyId, membershipRole);
+
+    const res = await request(app)
+      .patch(`/api/companies/${companyId}/trading/strategies/${strategy.id}`)
+      .send({ name: "Renamed", ruleConfig: { ...DEFAULT_TRADING_RULE_CONFIG, fastPeriod: 4, slowPeriod: 12 } });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({ name: "Renamed", activeVersionId: strategy.activeVersionId, pendingVersion: { outcome: "drafted", versionNumber: 2 } });
+    expect(res.body.ruleConfig).toEqual(strategy.ruleConfig);
+    expect(res.body.riskConfig).toEqual(strategy.riskConfig);
+    const [row] = await db.select().from(tradingStrategies).where(eq(tradingStrategies.id, strategy.id));
+    expect(row!.ruleConfig).toEqual(DEFAULT_TRADING_RULE_CONFIG);
+    const [card] = await db.select().from(approvals).where(eq(approvals.id, res.body.pendingVersion.approvalId));
+    expect(card).toMatchObject({ status: "pending", companyId });
+    expect(card!.payload).toMatchObject({ kind: "trading_strategy_version" });
+  });
+
+  it("a PATCH that only renames is still direct (200)", async () => {
+    const companyId = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const res = await request(createApp(companyId, "owner")).patch(`/api/companies/${companyId}/trading/strategies/${strategy.id}`).send({ name: "Just a name", checkEveryMinutes: 30 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ name: "Just a name", checkEveryMinutes: 30 });
+    expect(res.body.pendingVersion).toBeUndefined();
+    expect(await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.strategyId, strategy.id))).toHaveLength(1);
+  });
+
+  it.each(["operator", "viewer"] as const)("refuses a %s changing the rules (PATCH or a new version) with 403 and stores nothing", async (membershipRole) => {
+    const companyId = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const app = createApp(companyId, membershipRole);
+    const patch = await request(app).patch(`/api/companies/${companyId}/trading/strategies/${strategy.id}`).send({ riskConfig: { ...DEFAULT_TRADING_RISK_CONFIG, maxPositionNok: 100 } });
+    const post = await request(app).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`).send(specBody);
+    expect(patch.status).toBe(403);
+    expect(post.status).toBe(403);
+    expect(await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.strategyId, strategy.id))).toHaveLength(1);
+    expect(await db.select().from(approvals).where(eq(approvals.companyId, companyId))).toHaveLength(0);
+  });
+
+  it("an owner proposes a rule book (202); every member can read the versions and the stored source of the card", async () => {
+    const companyId = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const proposed = await request(createApp(companyId, "owner")).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`).send(specBody);
+    expect(proposed.status).toBe(202);
+    expect(proposed.body).toMatchObject({ outcome: "drafted", version: { version: 2, status: "draft", proposedByType: "user" } });
+
+    const viewer = createApp(companyId, "viewer");
+    const list = await request(viewer).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`);
+    expect(list.status).toBe(200);
+    expect(list.body.map((v: { version: number; status: string }) => [v.version, v.status])).toEqual([[2, "draft"], [1, "approved"]]);
+    const one = await request(viewer).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions/${proposed.body.version.id}`);
+    expect(one.status).toBe(200);
+    expect(one.body.guidelines).toBe("Stay calm.");
+    const source = await request(viewer).get(`/api/companies/${companyId}/trading/approval-cards/${proposed.body.approvalId}/source`);
+    expect(source.status).toBe(200);
+    expect(source.body).toMatchObject({ matchesCard: true, storedRulesMatchDigest: true, versionNumber: 2 });
+
+    // the same rules again are not a new draft
+    const again = await request(createApp(companyId, "owner")).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`).send(specBody);
+    expect(again.body.outcome).toBe("already_pending");
+  });
+
+  it("refuses unknown fields and rules that are not valid with 400, and another company's strategy with 403/404", async () => {
+    const companyId = await seedCompany();
+    const other = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const app = createApp(companyId, "owner");
+    const unknown = await request(app).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`).send({ ...specBody, secret: 1 });
+    const loose = await request(app)
+      .post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`)
+      .send({ ...specBody, spec: { ...specBody.spec, neverDo: { maxPositionNok: 999_999 } } });
+    expect(unknown.status).toBe(400);
+    expect(loose.status).toBe(400);
+    const outsider = await request(createApp(other, "owner")).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/versions`).send(specBody);
+    expect(outsider.status).toBe(403);
+    // an owner of the other company asking under their own company id cannot reach it either
+    const crossed = await request(createApp(other, "owner")).post(`/api/companies/${other}/trading/strategies/${strategy.id}/versions`).send(specBody);
+    expect(crossed.status).toBe(404);
+    expect(await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.strategyId, strategy.id))).toHaveLength(1);
   });
 });
