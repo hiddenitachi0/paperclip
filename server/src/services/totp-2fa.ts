@@ -347,6 +347,9 @@ export function totpService(db: Db) {
 
     // Clear TOTP verified timestamp
     await db.update(authUsers).set({ totpVerifiedAt: null }).where(eq(authUsers.id, userId));
+    // Forget which sessions passed the old factor, so a later re-enrolment with a
+    // new factor does not inherit them.
+    await db.delete(totpSessionTokens).where(eq(totpSessionTokens.userId, userId));
     return { disabled: true };
   }
 

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import express from "express";
 import request from "supertest";
 import * as speakeasy from "speakeasy";
@@ -16,7 +18,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
-import { twoFactorGate, TWO_FACTOR_PENDING_TTL_MS } from "../auth/two-factor-gate.js";
+import { pendingSessionAuthGuard, twoFactorGate, TWO_FACTOR_PENDING_TTL_MS } from "../auth/two-factor-gate.js";
 import { createCodeAttemptLimiter, twoFactorRoutes } from "../routes/two-factor.js";
 import { sealTotpEnrollment, openTotpEnrollment } from "../services/totp-enrollment-token.js";
 
@@ -141,8 +143,14 @@ d("board two-factor routes (embedded Postgres)", () => {
     };
     const app = express();
     app.use(express.json());
-    app.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: gate.wrapRequestResolver(base) }));
+    const resolveSession = gate.wrapRequestResolver(base);
+    app.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession }));
     app.use("/api/auth/2fa", twoFactorRoutes(db, { enabled }));
+    // Stand-in for better-auth's own endpoints (list-sessions, change-password, ...),
+    // which read the cookie themselves: reachable for any request that gets past the guard.
+    app.all("/api/auth/{*authPath}", pendingSessionAuthGuard({ enabled, resolveSession }), (_req, res) => {
+      res.json({ reached: true });
+    });
     // A stand-in board route: reachable only as a full board session.
     app.get("/api/board-only", (req, res) => {
       if (req.actor.type !== "board") {
@@ -284,6 +292,96 @@ d("board two-factor routes (embedded Postgres)", () => {
     expect((await get(app, "/api/board-only", second)).status).toBe(401);
   });
 
+  it("login: a pending session cannot use better-auth's own account endpoints, even with an Authorization header", async () => {
+    const app = buildApp(true);
+    const userId = await newUser("pending-betterauth");
+    const { sessionId: verified, secret } = await enrol(app, userId);
+    const pending = await newSession(userId);
+
+    for (const path of ["/api/auth/list-sessions", "/api/auth/change-password", "/api/auth/revoke-sessions", "/api/auth/revoke-session", "/api/auth/update-user"]) {
+      expect((await post(app, path, pending, {})).status, path).toBe(403);
+      // actorMiddleware skips session resolution when a Bearer header is present; the guard must not.
+      const withBearer = await post(app, path, pending, {}).set("Authorization", "Bearer junk");
+      expect(withBearer.status, `${path} with bearer`).toBe(403);
+      expect((await post(app, path, verified, {})).status, `${path} verified`).toBe(200);
+    }
+    // Sign-in, sign-out and the session probe still work for a pending session.
+    expect((await post(app, "/api/auth/sign-out", pending, {})).status).toBe(200);
+    expect((await post(app, "/api/auth/sign-in/email", pending, {})).status).toBe(200);
+    expect((await get(app, "/api/auth/get-session", pending)).status).toBe(200);
+    // And a request with no session at all is untouched (sign-in is how you get one).
+    expect((await post(app, "/api/auth/sign-in/email", null, {})).status).toBe(200);
+
+    // Once the second factor passes, the same session reaches them.
+    expect((await post(app, "/api/auth/2fa/login/verify", pending, { totpCode: codeAt(secret, -1) })).status).toBe(200);
+    expect((await post(app, "/api/auth/list-sessions", pending, {})).status).toBe(200);
+  });
+
+  it("login: a dot-segment path cannot walk a pending session out of the sign-in allowlist", async () => {
+    const app = buildApp(true);
+    const userId = await newUser("pending-dotseg");
+    const { sessionId: verified } = await enrol(app, userId);
+    const pending = await newSession(userId);
+
+    // supertest normalises the path, so send it exactly as written over a raw socket.
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const raw = (method: string, path: string, sessionId: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port, method, path, headers: { "x-test-session": sessionId, origin: ORIGIN, "content-length": 0 } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    try {
+      const paths = [
+        "/api/auth/sign-in/%2e%2e/list-sessions",
+        "/api/auth/sign-in/%2E%2E/change-password",
+        "/api/auth/sign-in/../list-sessions",
+        "/api/auth/sign-up/%2E%2E/revoke-sessions",
+        "/api/auth/sign-up/../update-user",
+        "/api/auth/sign-in/email/../../change-password",
+        "/api/auth/sign-in%2f..%2flist-sessions",
+        "/api/auth/sign-in\\..\\list-sessions",
+        "/api/auth/sign-in/email/extra",
+        "/api/auth/sign-in/anything-else",
+      ];
+      for (const path of paths) {
+        expect(await raw("POST", path, pending), `pending ${path}`).toBe(403);
+      }
+      // The same walk-out is not blocked for a session that passed its second factor, and the real paths still work.
+      expect(await raw("POST", "/api/auth/sign-in/email", pending)).toBe(200);
+      expect(await raw("POST", "/api/auth/sign-out?x=1", pending)).toBe(200);
+      expect(await raw("POST", "/api/auth/sign-in/%2e%2e/list-sessions", verified)).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("login: a session the gate cannot classify is refused at better-auth's endpoints too", async () => {
+    // A db that throws on every query stands in for "the database hiccuped at the wrong moment".
+    const brokenGate = twoFactorGate({} as never, { enabled: true });
+    const resolveSession = brokenGate.wrapRequestResolver(async () => ({
+      session: { id: "s1", userId: "u1" },
+      user: { id: "u1", email: "u@example.test", name: "U" },
+    }) as never);
+    const app = express();
+    app.all("/api/auth/{*authPath}", pendingSessionAuthGuard({ enabled: true, resolveSession }), (_req, res) => {
+      res.json({ reached: true });
+    });
+    expect((await request(app).post("/api/auth/list-sessions")).status).toBe(403);
+    expect((await request(app).post("/api/auth/change-password")).status).toBe(403);
+    // The allowlisted paths stay reachable so the person can still sign in and out.
+    expect((await request(app).post("/api/auth/sign-in/email")).status).toBe(200);
+    expect((await request(app).post("/api/auth/sign-out")).status).toBe(200);
+  });
+
   it("login: no session at all gets 401, and the response for a wrong code never says what was wrong", async () => {
     const app = buildApp(true);
     expect((await post(app, "/api/auth/2fa/login/verify", null, { totpCode: "123456" })).status).toBe(401);
@@ -362,8 +460,21 @@ d("board two-factor routes (embedded Postgres)", () => {
     expect((await get(app, "/api/auth/2fa/status", sessionId)).body.enabled).toBe(false);
     // With 2FA off a brand-new session is a normal board session again.
     expect((await get(app, "/api/board-only", await newSession(userId))).status).toBe(200);
+
     // And disabling again reports "not enabled".
     expect((await post(app, "/api/auth/2fa/disable", sessionId, { totpCode: codeAt(secret, 1) })).status).toBe(404);
+  });
+
+  it("disabling forgets verified sessions, so a later re-enrolment does not inherit them", async () => {
+    const app = buildApp(true);
+    const userId = await newUser("reenrol");
+    const first = await enrol(app, userId);
+    expect((await post(app, "/api/auth/2fa/disable", first.sessionId, { totpCode: codeAt(first.secret, 0) })).status).toBe(200);
+    const second = await enrol(app, userId);
+    expect(second.secret).not.toBe(first.secret);
+    // The session that passed the old factor is pending again under the new one.
+    expect((await get(app, "/api/board-only", first.sessionId)).status).toBe(401);
+    expect((await get(app, "/api/board-only", second.sessionId)).status).toBe(200);
   });
 
   it("a user can only act on their own 2FA record", async () => {

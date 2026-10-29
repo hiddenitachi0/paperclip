@@ -1,4 +1,4 @@
-import type { Request } from "express";
+import type { NextFunction, Request, Response } from "express";
 import type { Db } from "@paperclipai/db";
 import type { BetterAuthSessionResult } from "./better-auth.js";
 import { totpService } from "../services/totp-2fa.js";
@@ -25,6 +25,8 @@ export interface PendingTwoFactor {
 }
 
 const pendingByRequest = new WeakMap<object, PendingTwoFactor>();
+/** Requests whose session we could not classify (e.g. a DB error): treated as pending by the guard. */
+const unclassifiedRequests = new WeakSet<object>();
 
 /** The session behind this request, if it is signed in but has not passed its second factor. */
 export function getPendingTwoFactor(req: Request): PendingTwoFactor | null {
@@ -64,6 +66,7 @@ export function twoFactorGate(db: Db, opts: { enabled: boolean }) {
         } catch (err) {
           // Fail closed: if we cannot tell, the session does not act as board.
           logger.warn({ err }, "two-factor gate could not classify session; denying");
+          unclassifiedRequests.add(req);
           return null;
         }
       };
@@ -81,5 +84,60 @@ export function twoFactorGate(db: Db, opts: { enabled: boolean }) {
         }
       };
     },
+  };
+}
+
+/**
+ * better-auth's own account endpoints (list-sessions, change-password,
+ * revoke-sessions, update-user, ...) read the session cookie themselves and
+ * never go through the resolvers above, so a password-only session would be a
+ * valid session there. In front of better-auth, a signed-in session that has
+ * not passed its second factor may only reach sign-in/up, sign-out and the
+ * read-only session/health probes; everything else is refused.
+ */
+const PENDING_ALLOWED_AUTH_PATHS = new Set(["/sign-in/email", "/sign-up/email", "/sign-out", "/get-session", "/ok", "/error"]);
+
+/** Anything that could make better-auth route on a different path than the one we read. */
+const AMBIGUOUS_PATH = /(^|\/)\.\.?(\/|$)|%2e|%2f|%5c|\\/i;
+
+/**
+ * The path better-auth will route on. It builds `new Request(base + req.url)` and
+ * routes on `new URL(...).pathname`, which resolves `..` and `%2e%2e` dot
+ * segments; req.path does not, so a prefix match on it can be walked out of.
+ * Returns null for a path we will not vouch for.
+ */
+function authRoutePath(req: Request): string | null {
+  const rawPath = req.originalUrl.split("?")[0] ?? "";
+  if (AMBIGUOUS_PATH.test(rawPath)) return null;
+  let pathname: string;
+  try {
+    pathname = new URL(rawPath, "http://localhost").pathname;
+  } catch {
+    return null;
+  }
+  return pathname.replace(/^\/api\/auth(?=\/|$)/, "").replace(/\/+$/, "") || "/";
+}
+
+export function pendingSessionAuthGuard(opts: {
+  enabled: boolean;
+  /** The gate-wrapped resolver: resolving populates `getPendingTwoFactor`. */
+  resolveSession?: RequestResolver;
+}) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    if (!opts.enabled || !opts.resolveSession) return next();
+    const path = authRoutePath(req);
+    if (path !== null && PENDING_ALLOWED_AUTH_PATHS.has(path)) return next();
+    try {
+      // Resolve here rather than trusting an earlier pass: actorMiddleware skips
+      // session resolution when an Authorization header is present, and better-auth
+      // still honours the cookie.
+      await opts.resolveSession(req);
+    } catch {
+      return res.status(403).json({ error: "Two-factor verification required" });
+    }
+    if (getPendingTwoFactor(req) || unclassifiedRequests.has(req)) {
+      return res.status(403).json({ error: "Two-factor verification required" });
+    }
+    next();
   };
 }
