@@ -108,21 +108,51 @@ describeDb("trading candle store (DUR-5007)", () => {
     await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(EARLY, 100), bar(0), bar(1), bar(4), bar(5), bar(26), bar(57)]);
     await recordCandleEvent(db, { kind: "gap_note", source: "kraken", market: "BTC/USD", timeframe: "1h", openTime: new Date(T0 + 5 * HOUR), detail: { reason: "awaiting next archive" } });
     const report = await gapReport(db);
-    expect(report.streams).toEqual([{ source: "kraken", market: "BTC/USD", timeframe: "1h", gaps: 4, missingBars: 59_999 + 2 + 20 + 30, unexplained: 1 }]);
+    // The first bar is the coin's start, so the early window is its first five years: the stretch after it is outside it,
+    // and the 59,999-bar hole right after the anchor is far too long for "no trades" to explain.
+    expect(report.streams).toEqual([{ source: "kraken", market: "BTC/USD", timeframe: "1h", gaps: 4, missingBars: 59_999 + 2 + 20 + 30, unexplained: 2 }]);
     expect(report.gaps.map((g) => [g.missingBars, g.explanation])).toEqual([
+      [59_999, null],
       [30, null],
-      [59_999, expect.stringMatching(/Early, thin market/)],
       [20, "awaiting next archive"],
       [2, "The exchange publishes no bar for an interval in which nothing traded."],
     ]);
-    expect(report.gaps[0]).toMatchObject({ afterBar: new Date(T0 + 26 * HOUR).toISOString(), beforeBar: new Date(T0 + 57 * HOUR).toISOString() });
+    expect(report.gaps[1]).toMatchObject({ afterBar: new Date(T0 + 26 * HOUR).toISOString(), beforeBar: new Date(T0 + 57 * HOUR).toISOString() });
   });
 
   it("explains a long gap in a coin's first years as an early, thin market", async () => {
-    await insertCandles(db, "kraken", "LTC/USD", "1h", [bar(0), bar(100)]);
+    await insertCandles(db, "kraken", "LTC/USD", "1h", [bar(0), bar(20)]);
     const report = await gapReport(db);
     expect(report.gaps[0]!.explanation).toMatch(/Early, thin market/);
     expect(report.streams[0]!.unexplained).toBe(0);
+  });
+
+  it("does not let the early-thin-market rule explain a day or more of missing bars, even in a coin's first years", async () => {
+    await insertCandles(db, "kraken", "LTC/USD", "1h", [bar(0), bar(26)]); // 25 missing hours
+    const report = await gapReport(db);
+    expect(report.gaps[0]!.explanation).toBeNull();
+    expect(report.streams[0]!.unexplained).toBe(1);
+  });
+
+  it("anchors the early-thin-market window to the coin's first bar on the source, not to the 5m stream's own first bar", async () => {
+    const DAY = 24 * HOUR;
+    const MIN5 = 300_000;
+    const dayBar = (i: number) => ({ ...bar(0), openTime: new Date(T0 + i * DAY) });
+    const fiveBar = (i: number) => ({ ...bar(0), openTime: new Date(T0 + i * MIN5) });
+    // The coin has traded here for years (1d history starts ~6.8 years before the 5m stream's capped history).
+    await insertCandles(db, "kraken", "BTC/USD", "1d", [{ ...dayBar(0), openTime: new Date(T0 - 2500 * DAY) }, dayBar(0)]);
+    // The 5m stream lost three days (864 bars) in the middle.
+    await insertCandles(db, "kraken", "BTC/USD", "5m", [fiveBar(0), fiveBar(1), fiveBar(1 + 865), fiveBar(1 + 866)]);
+    const report = await gapReport(db, { source: "kraken", timeframe: "5m" });
+    expect(report.gaps).toHaveLength(1);
+    expect(report.gaps[0]).toMatchObject({ missingBars: 864, explanation: null });
+    expect(report.streams[0]).toMatchObject({ unexplained: 1 });
+
+    // Even a short-enough hole is not "early" when the coin's first bar on the source is more than five years back.
+    await db.execute(sql`TRUNCATE trading_candles`);
+    await insertCandles(db, "kraken", "BTC/USD", "1d", [{ ...dayBar(0), openTime: new Date(T0 - 2500 * DAY) }, dayBar(0)]);
+    await insertCandles(db, "kraken", "BTC/USD", "5m", [fiveBar(0), fiveBar(1 + 200)]); // 199 bars, under a day
+    expect((await gapReport(db, { source: "kraken", timeframe: "5m" })).gaps[0]!.explanation).toBeNull();
   });
 
   it("explains a long gap as an outage when every other coin on the exchange was silent too, but not when one traded", async () => {

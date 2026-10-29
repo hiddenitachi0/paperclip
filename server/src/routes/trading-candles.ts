@@ -11,15 +11,17 @@ import {
 } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoardOrgAccess, assertCompanyAccess } from "./authz.js";
+import { assertCompanyAccess, assertInstanceAdmin } from "./authz.js";
 import { activeSourceStops, coverageReport, gapReport, listCandles, overlapReport, storageReport } from "../services/trading-candle-store.js";
 import { getCandleRunnerStatus } from "../services/trading-candle-runner.js";
 
 /**
  * Read-only routes over the candle store (DUR-5007). The tables hold public
- * market data and no company data, but they are read through the same
- * company-scoped, board-only door as the rest of trading. Nothing here writes:
- * the only writer is the candle scheduler chain.
+ * market data and no company data, so they are not company-scoped: they are one
+ * instance-wide store. Until the data-licence terms review is done (see
+ * TRADING_CANDLE_LICENCE_NOTE) they are limited to instance admins, and the
+ * report scans are expensive enough that no other board user should be able to
+ * trigger them. Nothing here writes: the only writer is the candle scheduler chain.
  *
  * Raw bars are only served for sources that may be shown as a live price (not
  * Binance, whose history is for internal past-data tests). The reports show
@@ -73,7 +75,7 @@ export function tradingCandleRoutes(rawDb: Db) {
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
+      assertInstanceAdmin(req);
       assertCompanyAccess(req, companyId);
     });
   }

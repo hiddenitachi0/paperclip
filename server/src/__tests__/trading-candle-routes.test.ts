@@ -44,12 +44,13 @@ describeDb("candle store routes (DUR-5007)", () => {
     await tempDb?.cleanup();
   });
 
-  function app(companyId: string, actor: Record<string, unknown> | "board" = "board") {
+  // Default is an instance admin: the routes are admin-only until the data-licence terms review is done.
+  function app(companyId: string, actor: Record<string, unknown> | "admin" | "member" = "admin") {
     const server = express();
     server.use((req, _res, next) => {
       (req as any).actor =
-        actor === "board"
-          ? { type: "board", source: "session", userId: randomUUID(), isInstanceAdmin: false, companyIds: [companyId], memberships: [{ companyId, membershipRole: "viewer", status: "active" }] }
+        actor === "admin" || actor === "member"
+          ? { type: "board", source: "session", userId: randomUUID(), isInstanceAdmin: actor === "admin", companyIds: [companyId], memberships: [{ companyId, membershipRole: actor === "admin" ? "owner" : "viewer", status: "active" }] }
           : actor;
       next();
     });
@@ -64,7 +65,7 @@ describeDb("candle store routes (DUR-5007)", () => {
     return companyId;
   }
 
-  it("lets an active company member read the summary, with storage size, coverage and the licence note", async () => {
+  it("lets an instance admin read the summary, with storage size, coverage and the licence note", async () => {
     const companyId = await seedCompany();
     await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(1), bar(2)]);
     const res = await request(app(companyId)).get(`/api/companies/${companyId}/trading/candle-store`);
@@ -78,10 +79,10 @@ describeDb("candle store routes (DUR-5007)", () => {
 
   it("serves gap and overlap reports", async () => {
     const companyId = await seedCompany();
-    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(40)]);
+    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(20)]);
     const gaps = await request(app(companyId)).get(`/api/companies/${companyId}/trading/candle-store/gaps?source=kraken&timeframe=1h`);
     expect(gaps.status).toBe(200);
-    expect(gaps.body.gaps[0]).toMatchObject({ missingBars: 39 });
+    expect(gaps.body.gaps[0]).toMatchObject({ missingBars: 19 });
     expect(gaps.body.gaps[0].explanation).toMatch(/Early, thin market/);
     const overlap = await request(app(companyId)).get(`/api/companies/${companyId}/trading/candle-store/overlap?asset=BTC`);
     expect(overlap.status).toBe(200);
@@ -107,13 +108,26 @@ describeDb("candle store routes (DUR-5007)", () => {
     expect(limit.status).toBe(400);
   });
 
-  it("is board-only: an agent gets 403, and a board user from another company gets 403", async () => {
+  it("is instance-admin-only: a plain company member, an agent and another company's board user all get 403 on every route", async () => {
     const companyId = await seedCompany();
     const otherCompanyId = await seedCompany();
-    const agent = await request(app(companyId, { type: "agent", agentId: randomUUID(), companyId, source: "agent_key" })).get(`/api/companies/${companyId}/trading/candle-store`);
-    expect(agent.status).toBe(403);
-    const outsider = await request(app(otherCompanyId)).get(`/api/companies/${companyId}/trading/candle-store`);
-    expect(outsider.status).toBe(403);
+    await insertCandles(db, "kraken", "BTC/USD", "1h", [bar(0), bar(1)]);
+    const base = `/api/companies/${companyId}/trading/candle-store`;
+    const paths = [base, `${base}/gaps`, `${base}/overlap?asset=BTC`, `${base}/candles?source=kraken&market=BTC/USD&timeframe=1h`];
+    const callers = [
+      app(companyId, "member"),
+      app(companyId, { type: "agent", agentId: randomUUID(), companyId, source: "agent_key" }),
+      app(otherCompanyId, "member"),
+    ];
+    for (const caller of callers) {
+      for (const path of paths) {
+        const res = await request(caller).get(path);
+        expect(res.status, path).toBe(403);
+        expect(res.body.bars).toBeUndefined();
+      }
+    }
+    // The same paths answer for an instance admin.
+    for (const path of paths) expect((await request(app(companyId)).get(path)).status, path).toBe(200);
   });
 
   it("has no route that writes", async () => {

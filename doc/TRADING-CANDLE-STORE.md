@@ -54,10 +54,12 @@ A 418 or 451 stops that source: it is logged as an error with `alert: true`,
 recorded as a `source_stopped` event with the time to wait, and left alone
 until then, also across restarts. The other sources carry on.
 
-## Reports (board-only, company-scoped, read-only)
+## Reports (instance-admin-only, read-only)
+
+All four routes need an instance admin until the licence terms review (below) is done. The tables hold no company data, so they are not company-scoped, and the report scans are heavy; the route path still carries a company id for the access check.
 
 - `GET /api/companies/:id/trading/candle-store`: runner status, storage size, per-coin coverage (first bar, last bar, bars, expected bars; market-weather regimes covered stays `null` until DUR-5013), stops, licence note.
-- `.../candle-store/gaps`: gap detection per stream. A gap is explained when it is a short run (Kraken omits bars for intervals with no trades), a noted seam (carries its reason), inside the first five years of that coin on the exchange (thin early market), or a stretch in which no other coin on the exchange traded either (outage or maintenance). Anything else is listed first as unexplained.
+- `.../candle-store/gaps`: gap detection per stream. A gap is explained when it is a short run (Kraken omits bars for intervals with no trades), a noted seam (carries its reason), a gap of at most one day inside the first five years of that coin on the exchange, counted from the coin's first bar on that source across all bar sizes (thin early market; anything longer is never explained this way), or a stretch in which no other coin on the exchange traded either (outage or maintenance). Anything else is listed first as unexplained.
 - `.../candle-store/overlap`: Kraken (USD) against Binance (USDT) on the same bars: mean and 95th-percentile close difference, return correlation, volume-rank correlation.
 - `.../candle-store/candles`: raw bars, **Kraken only** (Binance history is never served as a price).
 

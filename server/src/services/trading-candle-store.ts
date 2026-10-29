@@ -251,6 +251,12 @@ export async function coverageReport(db: Db, filter: StreamFilter = {}): Promise
 /** A coin's first years on an exchange are thin; gaps there are no-trade stretches, not lost data. */
 const THIN_MARKET_YEARS = 5;
 
+/**
+ * Longest gap the early-thin-market rule may explain. A multi-day hole in a
+ * coin's history is never "no trades", even in its first years.
+ */
+const THIN_MARKET_MAX_GAP_MS = 86_400_000;
+
 /** Longest run of missing bars that is still just "nothing traded in that interval". */
 const QUIET_INTERVAL_MAX_MISSING: Record<TradingCandleTimeframe, number> = { "5m": 12, "1h": 6, "4h": 3, "1d": 1 };
 
@@ -279,9 +285,15 @@ export async function gapReport(
   const noteFor = new Map(notes.flatMap((note) => (note.openTime ? [[`${note.source}|${note.market}|${note.timeframe}|${note.openTime.toISOString()}`, String(note.detail.reason ?? "noted")] as const] : [])));
 
   const firstBars = new Map<string, number>();
+  // When the coin first traded on this source, across bar sizes. A stream's own first bar is no anchor: 5m history is
+  // capped at two years and live-only streams start recently, so every gap in them would count as "early".
+  const coinFirstBars = new Map<string, number>();
   const marketsOfStream = new Map<string, string[]>();
   for (const row of (await db.execute(sql`SELECT source, market, timeframe, min(open_time) AS first_bar FROM trading_candles GROUP BY 1, 2, 3`)) as unknown as Array<Record<string, unknown>>) {
-    firstBars.set(`${row.source}|${row.market}|${row.timeframe}`, new Date(row.first_bar as string).getTime());
+    const firstBar = new Date(row.first_bar as string).getTime();
+    firstBars.set(`${row.source}|${row.market}|${row.timeframe}`, firstBar);
+    const coinKey = `${row.source}|${row.market}`;
+    coinFirstBars.set(coinKey, Math.min(coinFirstBars.get(coinKey) ?? Infinity, firstBar));
     const list = marketsOfStream.get(`${row.source}|${row.timeframe}`) ?? [];
     list.push(String(row.market));
     marketsOfStream.set(`${row.source}|${row.timeframe}`, list);
@@ -300,7 +312,11 @@ export async function gapReport(
     let explanation =
       noteFor.get(`${source}|${market}|${timeframe}|${afterBar}`) ??
       (missingBars <= QUIET_INTERVAL_MAX_MISSING[timeframe] ? "The exchange publishes no bar for an interval in which nothing traded." : null);
-    if (!explanation && new Date(afterBar).getTime() < (firstBars.get(`${source}|${market}|${timeframe}`) ?? 0) + THIN_MARKET_YEARS * 365 * 86_400_000) {
+    if (
+      !explanation &&
+      missingBars * tradingCandleTimeframeMs(timeframe) <= THIN_MARKET_MAX_GAP_MS &&
+      new Date(afterBar).getTime() < (coinFirstBars.get(`${source}|${market}`) ?? 0) + THIN_MARKET_YEARS * 365 * 86_400_000
+    ) {
       explanation = `Early, thin market (first ${THIN_MARKET_YEARS} years of this coin on the exchange): no trades in the interval.`;
     }
     if (!explanation) {
