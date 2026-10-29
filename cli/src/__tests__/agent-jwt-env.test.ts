@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ensureAgentJwtSecret,
+  loadPaperclipEnvFile,
   mergePaperclipEnvEntries,
   readAgentJwtSecretFromEnv,
   readPaperclipEnvEntries,
@@ -75,5 +76,47 @@ describe("agent jwt env helpers", () => {
     const contents = fs.readFileSync(envPath, "utf-8");
     expect(contents).toContain('PAPERCLIP_WORKTREE_COLOR="#439edb"');
     expect(readPaperclipEnvEntries(envPath).PAPERCLIP_WORKTREE_COLOR).toBe("#439edb");
+  });
+});
+
+describe("env file refused names (DUR-5042)", () => {
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    delete process.env.PAPERCLIP_CRYPTO_REAL_MONEY;
+    delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  it("does not load PAPERCLIP_CRYPTO_REAL_MONEY from the instance .env", () => {
+    const configPath = tempConfigPath();
+    fs.writeFileSync(
+      resolveAgentJwtEnvFile(configPath),
+      "PAPERCLIP_CRYPTO_REAL_MONEY=allowed\nPAPERCLIP_AGENT_JWT_SECRET=kept-secret\n",
+      { mode: 0o600 },
+    );
+
+    loadPaperclipEnvFile(configPath);
+
+    expect(process.env.PAPERCLIP_CRYPTO_REAL_MONEY).toBeUndefined();
+    expect(process.env.PAPERCLIP_AGENT_JWT_SECRET).toBe("kept-secret");
+  });
+
+  it("keeps a real process env value over the .env file", () => {
+    const configPath = tempConfigPath();
+    fs.writeFileSync(
+      resolveAgentJwtEnvFile(configPath),
+      "PAPERCLIP_CRYPTO_REAL_MONEY=allowed\nPAPERCLIP_AGENT_JWT_SECRET=from-file\n",
+      { mode: 0o600 },
+    );
+    process.env.PAPERCLIP_CRYPTO_REAL_MONEY = "locked";
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "from-env";
+
+    loadPaperclipEnvFile(configPath);
+
+    expect(process.env.PAPERCLIP_CRYPTO_REAL_MONEY).toBe("locked");
+    expect(process.env.PAPERCLIP_AGENT_JWT_SECRET).toBe("from-env");
   });
 });

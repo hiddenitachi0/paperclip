@@ -1,14 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseDotenv } from "dotenv";
-import { CRYPTO_REAL_MONEY_ENV } from "./services/crypto-real-money-lock.js";
+import { ENV_FILE_REFUSED_NAMES } from "@paperclipai/shared";
 import { adoptServerSecretsFromEnvFile } from "./server-secrets.js";
-
-/**
- * Names a .env file may never put into process.env. Agents can write these
- * files, so a setting that unlocks something dangerous must come from the real
- * environment (the deploy settings) only. DUR-4996: the real-money lock.
- */
-const ENV_FILE_REFUSED_NAMES: readonly string[] = [CRYPTO_REAL_MONEY_ENV];
 
 function warn(message: string): void {
   // The logger is not loaded yet at boot (and must not be: it reads config).

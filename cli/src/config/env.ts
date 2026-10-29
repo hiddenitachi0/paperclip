@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { config as loadDotenv, parse as parseEnvFileContents } from "dotenv";
+import { parse as parseEnvFileContents } from "dotenv";
+import { ENV_FILE_REFUSED_NAMES } from "@paperclipai/shared";
 import { resolveConfigPath } from "./store.js";
 
 const JWT_SECRET_ENV_KEY = "PAPERCLIP_AGENT_JWT_SECRET";
@@ -56,7 +57,19 @@ export function loadAgentJwtEnvFile(filePath = resolveEnvFilePath()): void {
 
   if (!fs.existsSync(filePath)) return;
   loadedEnvFiles.add(filePath);
-  loadDotenv({ path: filePath, override: false, quiet: true });
+  // Parse and filter ourselves instead of dotenv.config: names in
+  // ENV_FILE_REFUSED_NAMES (the real-money lock) must come from the real
+  // environment only, since agents can write this file (DUR-5042).
+  const entries = parseEnvFile(fs.readFileSync(filePath, "utf-8"));
+  for (const [name, value] of Object.entries(entries)) {
+    if (ENV_FILE_REFUSED_NAMES.includes(name)) {
+      process.stderr.write(
+        `[env-file] ignored ${name} in ${filePath}: this setting is only read from the server's deploy settings\n`,
+      );
+      continue;
+    }
+    if (process.env[name] === undefined) process.env[name] = value;
+  }
 }
 
 export function readAgentJwtSecretFromEnv(configPath?: string): string | null {
