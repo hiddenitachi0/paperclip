@@ -1839,8 +1839,15 @@
     {
       "idx": 263,
       "version": "7",
-      "when": 1793300877682,
-      "tag": "0263_crypto_wallet_network_variant",
+      "when": 1793299848328,
+      "tag": "0263_trading_routine_wallets",
+      "breakpoints": true
+    },
+    {
+      "idx": 264,
+      "version": "7",
+      "when": 1793302560903,
+      "tag": "0264_crypto_wallet_network_variant",
       "breakpoints": true
     }
   ]
