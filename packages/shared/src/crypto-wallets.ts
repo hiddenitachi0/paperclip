@@ -377,6 +377,10 @@ export interface CryptoWalletSummary {
   maxLeverage: number;
   lastBalance: string | null;
   lastBalanceAt: string | null;
+  /** 'agent': an agent's tools use it. 'trading_routine': held by Paperclip's trading code, no agent can use it. */
+  holder: "agent" | "trading_routine";
+  /** Hard limits, sweep and top-up settings; set only on a trading-routine wallet. */
+  trading: import("./trading-wallets.js").TradingWalletSettings | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -393,7 +397,9 @@ export interface CryptoWalletTransactionSummary {
   id: string;
   walletId: string;
   agentId: string | null;
-  initiatedBy: "agent" | "owner";
+  initiatedBy: "agent" | "owner" | "routine";
+  /** For the trading routine's own transactions: a profit sweep or a trade. */
+  routineAction?: "sweep" | "trade" | null;
   kind: CryptoTxKind;
   chain: CryptoChain;
   network: CryptoNetwork;
@@ -428,6 +434,8 @@ export interface CompanyCryptoSettings {
   frozenReason: string | null;
   /** Only the endpoints the company changed; anything missing uses DEFAULT_CRYPTO_RPC_ENDPOINTS. */
   rpcEndpoints: Partial<Record<CryptoChain, Partial<Record<CryptoNetwork, string>>>>;
+  /** The one AI Trader agent: may ask for top-ups of trading wallets, can never hold a wallet. null = none named. */
+  traderAgentId: string | null;
   /** Only on the answer to turning real money on: how many agents' dollar limits went back to the defaults. */
   agentLimitsReset?: number;
 }
@@ -534,6 +542,8 @@ export const updateCompanyCryptoSettingsSchema = z
     confirmPhrase: z.string().optional(),
     allWalletsFrozen: z.boolean().optional(),
     frozenReason: z.string().trim().max(500).optional(),
+    /** Owner-only. The agent named here can never hold a wallet; an agent that holds one cannot be named. */
+    traderAgentId: z.string().uuid().nullable().optional(),
     rpcEndpoints: z
       .record(z.enum(CRYPTO_CHAINS), z.record(z.enum(CRYPTO_NETWORKS), httpsUrl.nullable()))
       .optional(),

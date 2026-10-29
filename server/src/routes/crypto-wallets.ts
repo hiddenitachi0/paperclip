@@ -2,22 +2,30 @@ import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  ackTradingAlertOutboxSchema,
   addCryptoWalletDestinationSchema,
   createCryptoWalletSchema,
+  createTradingWalletSchema,
   cryptoAgentLimitsSchema,
   cryptoQuoteRequestSchema,
   cryptoSendRequestSchema,
   hyperliquidOrderRequestSchema,
+  proposeSweepAddressSchema,
+  requestTradingTopUpSchema,
   setCryptoWalletFrozenSchema,
   updateCompanyCryptoSettingsSchema,
   updateCryptoWalletSchema,
+  updateTradingWalletLimitsSchema,
 } from "@paperclipai/shared";
-import { forbidden } from "../errors.js";
+import { forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { logActivity } from "../services/activity-log.js";
-import { assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
 import { cryptoWalletService, type CryptoWalletServiceDeps } from "../services/crypto-wallets.js";
+import { tradingAlertsService } from "../services/trading-alerts.js";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Crypto wallets for agents. Two surfaces:
@@ -33,6 +41,11 @@ import { cryptoWalletService, type CryptoWalletServiceDeps } from "../services/c
  *   /agent-wallets/...  -- what an agent's tools call. Agent actor only,
  *     identity and company from the agent's own run token, never from the
  *     request; an agent only ever sees and uses wallets assigned to it.
+ *
+ *   Trading wallets (held by Paperclip's trading code, DUR-5026) have their own
+ *   owner routes below (/crypto/trading-wallets/...) and NO agent route that
+ *   can spend: the Trader agent may only list them and ask for a top-up.
+ *   There is no route that places a trade; only server code does.
  *
  * No route returns key material. Wallet responses never include the secret
  * id either. The import route's body carries a private key: the field is
@@ -61,6 +74,18 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = cryptoWalletService(db, rawDb, deps);
+  const alerts = tradingAlertsService(db);
+
+  /** Board access to the company, like the other Telegram bridge outboxes. */
+  function memberScope() {
+    return companyScope(rawDb, (req) => {
+      assertBoard(req);
+      const companyId = req.params.companyId;
+      if (typeof companyId !== "string") return undefined;
+      assertCompanyAccess(req, companyId);
+      return companyId;
+    });
+  }
 
   function ownerAdminScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -198,6 +223,65 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
     res.status(201).json(tx);
   });
 
+  // ─── Trading wallets (held by code) ─────────────────────────────────
+
+  router.post("/companies/:companyId/crypto/trading-wallets", validate(createTradingWalletSchema), ownerAdminScope(), async (req, res) => {
+    const companyId = companyIdOf(req);
+    const wallet = await svc.createTradingWallet(companyId, req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyId) });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userIdOf(req),
+      action: "crypto.trading_wallet_created",
+      entityType: "company",
+      entityId: companyId,
+      details: { walletId: wallet.id, chain: wallet.chain, network: wallet.network, address: wallet.address },
+    });
+    res.status(201).json(wallet);
+  });
+
+  router.put("/companies/:companyId/crypto/trading-wallets/:walletId/limits", validate(updateTradingWalletLimitsSchema), ownerAdminScope(), async (req, res) => {
+    const companyId = companyIdOf(req);
+    const wallet = await svc.updateTradingLimits(companyId, walletIdOf(req), req.body.limits, { userId: userIdOf(req), isOwner: isOwner(req, companyId) });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userIdOf(req),
+      action: "crypto.trading_wallet_limits_changed",
+      entityType: "company",
+      entityId: companyId,
+      details: { walletId: wallet.id, limits: req.body.limits },
+    });
+    res.json(wallet);
+  });
+
+  /** Proposes the cold-wallet address. Takes effect only when the owner approves the card this files. */
+  router.post("/companies/:companyId/crypto/trading-wallets/:walletId/sweep-address", validate(proposeSweepAddressSchema), ownerAdminScope(), async (req, res) => {
+    const companyId = companyIdOf(req);
+    const wallet = await svc.proposeSweepAddress(companyId, walletIdOf(req), req.body.address, { userId: userIdOf(req), isOwner: isOwner(req, companyId) });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userIdOf(req),
+      action: "crypto.sweep_address_proposed",
+      entityType: "company",
+      entityId: companyId,
+      details: { walletId: wallet.id, address: wallet.trading?.pendingSweepAddress ?? null },
+    });
+    res.status(202).json(wallet);
+  });
+
+  // The Telegram bridge's outbox of trading alerts (board access, like the other outboxes).
+  router.get("/companies/:companyId/trading-alerts-outbox", memberScope(), async (req, res) => {
+    res.json({ alerts: await alerts.outbox(companyIdOf(req)) });
+  });
+
+  router.post("/companies/:companyId/trading-alerts-outbox/:alertId/ack", validate(ackTradingAlertOutboxSchema), memberScope(), async (req, res) => {
+    const alertId = req.params.alertId as string;
+    if (!UUID_RE.test(alertId)) throw notFound("That alert was not found.");
+    res.json(await alerts.ack(companyIdOf(req), alertId, req.body));
+  });
+
   router.get("/companies/:companyId/crypto/agents/:agentId/limits", ownerAdminScope(), async (req, res) => {
     res.json(await svc.getAgentLimits(companyIdOf(req), req.params.agentId as string));
   });
@@ -258,6 +342,28 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
       details: { walletId: tx.walletId, transactionId: tx.id, status: tx.status, order: tx.orderDetail },
     });
     res.status(202).json(tx);
+  });
+
+  // The Trader agent's only dealings with trading wallets: look, and ask for a top-up. It cannot spend, sweep, trade or see a key.
+  router.get("/agent-wallets/trading", agentScope(), async (req, res) => {
+    const { agentId, companyId } = requireAgentActor(req);
+    res.json(await svc.traderListTradingWallets(companyId, agentId));
+  });
+
+  router.post("/agent-wallets/trading/:walletId/top-up-request", agentScope(), validate(requestTradingTopUpSchema), async (req, res) => {
+    const { agentId, companyId } = requireAgentActor(req);
+    const result = await svc.traderRequestTopUp(companyId, agentId, walletIdOf(req), req.body.reason);
+    await logActivity(db, {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "crypto.top_up_requested",
+      entityType: "agent",
+      entityId: agentId,
+      details: { walletId: walletIdOf(req), approvalId: result.approvalId, created: result.created },
+    });
+    res.status(result.created ? 201 : 200).json(result);
   });
 
   router.get("/agent-wallets/transactions/:transactionId", agentScope(), async (req, res) => {
