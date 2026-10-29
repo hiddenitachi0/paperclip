@@ -58,11 +58,55 @@ uses only the first two files and is **not** how prod is deployed; see step 2.)
 
 ## Steps
 
-1. **Add the key to the server key file.** Open
-   `/root/paperclip-secrets/server.env` in an editor as root and add one line,
-   `PAPERCLIP_SECRETS_MASTER_KEY=<same value as the master.key file>`. Copy the
-   value from the file in the editor; do not type it into a shell command.
-   Keep the file at mode `0400`, owned by root.
+1. **Make `server.env` hold every server key, then add the master key.**
+   - **Precondition: all the other server keys must already be in
+     `/root/paperclip-secrets/server.env`.** The overlay blanks all six server
+     keys in the container settings (`BETTER_AUTH_SECRET`, `DATABASE_URL`,
+     `DATABASE_BYPASS_URL`, `DATABASE_MIGRATION_URL`,
+     `PAPERCLIP_AGENT_JWT_SECRET`, `PAPERCLIP_SERVER_ANTHROPIC_API_KEY`) and
+     takes them from `server.env` only. If the file is missing or holds only
+     the master key, step 3 starts the server without them and it crash-loops
+     (or, for `DATABASE_URL`, cannot reach its database).
+     Before step 2, `server.env` must contain a non-blank line with the
+     **same value as `.env`** for each of: `BETTER_AUTH_SECRET`,
+     `PAPERCLIP_AGENT_JWT_SECRET` and `DATABASE_URL`; plus
+     `DATABASE_BYPASS_URL`, `DATABASE_MIGRATION_URL` and
+     `PAPERCLIP_SERVER_ANTHROPIC_API_KEY` for every one of them that `.env`
+     sets. `DATABASE_URL` is needed in `server.env` even if `.env` does not set
+     it: the prod compose file then falls back to the default login
+     (`postgres://paperclip:paperclip@db:5432/paperclip`), so copy that default
+     into `server.env` in that case (the check below compares against it). Add any missing line in an editor as root,
+     copying the value from `.env` in the editor.
+   - **Check it without printing any value.** This prints only the names and
+     `ok` / `MISSING` / `DIFFERENT`; it never prints a value. Run it as root
+     from the repo root (no `set -x`, no `echo` of the files):
+
+     ```sh
+     SRV=/root/paperclip-secrets/server.env
+     if [ -f .env ] && [ -f "$SRV" ]; then
+     for n in BETTER_AUTH_SECRET PAPERCLIP_AGENT_JWT_SECRET DATABASE_URL \
+              DATABASE_BYPASS_URL DATABASE_MIGRATION_URL PAPERCLIP_SERVER_ANTHROPIC_API_KEY; do
+       s=$(grep -m1 "^$n=" "$SRV"); e=$(grep -m1 "^$n=" .env)
+       [ "$n" = DATABASE_URL ] && [ -z "$e" ] && e="DATABASE_URL=postgres://paperclip:paperclip@db:5432/paperclip"
+       case $n in BETTER_AUTH_SECRET|PAPERCLIP_AGENT_JWT_SECRET|DATABASE_URL) must=1;; *) must=;; esac
+       if [ -z "${s#"$n="}" ]; then
+         if [ -n "$must" ] || [ -n "${e#"$n="}" ]; then r=MISSING; else r="not set (fine, .env does not set it)"; fi
+       elif [ -n "$e" ] && [ "$s" != "$e" ]; then r=DIFFERENT
+       else r=ok; fi
+       printf '%-40s %s\n' "$n" "$r"
+     done
+     else echo "STOP: run this from the repo root, as root; nothing was checked"; fi
+     ```
+
+     `BETTER_AUTH_SECRET`, `PAPERCLIP_AGENT_JWT_SECRET` and `DATABASE_URL`
+     must each show `ok`. Any other name must show `ok` or "not set".
+     `MISSING` or `DIFFERENT` on any name: fix `server.env` and run the check
+     again before going on. To also see which names the file holds, use
+     `cut -d= -f1 "$SRV" | sort` (names only).
+   - **Then add the master key.** Add one more line to the same file,
+     `PAPERCLIP_SECRETS_MASTER_KEY=<same value as the master.key file>`. Copy
+     the value from the file in the editor; do not type it into a shell
+     command. Keep the file at mode `0400`, owned by root.
 2. **Make the secrets overlay permanent on every deploy path.** Do this
    **before** the first `up -d` with the overlay and before any other deploy.
    Once the key lives only in `server.env`, a server started **without** the
