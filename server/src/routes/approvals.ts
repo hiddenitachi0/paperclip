@@ -30,7 +30,13 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
-import { isCryptoWalletTxApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import {
+  isCryptoSweepAddressApproval,
+  isCryptoSweepPaymentApproval,
+  isCryptoTopUpApproval,
+  isCryptoWalletTxApproval,
+  type CrossCompanyInstructionDecisionHooks,
+} from "../services/approvals.js";
 import {
   approvalService,
   accessService,
@@ -79,7 +85,7 @@ import {
   isOperatorActionApproval,
   readOperatorActionCatalog,
 } from "../services/operator-actions.js";
-import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { REPORT_SCRIPT_APPROVAL_KIND, reportScriptsService } from "../services/report-scripts.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { redactEventPayload } from "../redaction.js";
@@ -2613,6 +2619,20 @@ export function approvalRoutes(
       if (isCryptoWalletTxApproval(existingForKindCheck)) {
         assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a crypto wallet payment is sent");
         if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a crypto wallet payment.");
+        // A profit sweep sends money to the cold wallet: the owner's call, like the cold-wallet address itself.
+        if (isCryptoSweepPaymentApproval(existingForKindCheck)) {
+          assertCompanyOwnerOrInstanceAdmin(req, existingForKindCheck.companyId, "whether profit is swept to the cold wallet");
+        }
+      }
+      // The cold-wallet address profit is swept to: only the owner, and only a person.
+      if (isCryptoSweepAddressApproval(existingForKindCheck)) {
+        assertCompanyOwnerOrInstanceAdmin(req, existingForKindCheck.companyId, "the cold-wallet address for profit sweeps");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a cold-wallet address.");
+      }
+      // "Please top up" requests move no money, but only a person who runs the company answers them.
+      if (isCryptoTopUpApproval(existingForKindCheck)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "a wallet top-up request");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can answer a wallet top-up request.");
       }
       // One-click host actions: only a person who is this company's owner or
       // admin (or an instance admin) may say yes, and only to a card that is

@@ -489,8 +489,11 @@ DECLARE
     -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
+    -- company-scoped, so it is in both lists.
+    'trading_alerts',
     -- DUR-5007 candle store. Created (and granted on) in
-    -- 0263_trading_candle_store.sql; instance-wide public market data with no
+    -- 0265_trading_candle_store.sql; instance-wide public market data with no
     -- company_id, so these two are in the login-role list ONLY.
     'trading_candle_ingest_events',
     'trading_candles',
@@ -866,6 +869,9 @@ DECLARE
     'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
+    -- company-scoped, so it is in both lists.
+    'trading_alerts',
     'trading_daily_stats',
     'trading_fifo_lots',
     'trading_ledger_entries',

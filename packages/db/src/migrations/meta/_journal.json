@@ -1839,8 +1839,15 @@
     {
       "idx": 263,
       "version": "7",
-      "when": 1793299965414,
-      "tag": "0263_trading_candle_store",
+      "when": 1793299848328,
+      "tag": "0263_trading_routine_wallets",
+      "breakpoints": true
+    },
+    {
+      "idx": 265,
+      "version": "7",
+      "when": 1793303000000,
+      "tag": "0265_trading_candle_store",
       "breakpoints": true
     }
   ]

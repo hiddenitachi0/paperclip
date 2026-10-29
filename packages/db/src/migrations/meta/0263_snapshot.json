@@ -1,5 +1,5 @@
 {
-  "id": "4f0d2127-7da2-4080-91b8-5761f447ac6c",
+  "id": "1c130155-e234-4546-9cbb-f17e5c44338a",
   "prevId": "0424c04d-4f13-4114-a386-2338ed24d61d",
   "version": "7",
   "dialect": "postgresql",
@@ -12731,6 +12731,12 @@
           "notNull": true,
           "default": "'{}'::jsonb"
         },
+        "trader_agent_id": {
+          "name": "trader_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -12759,6 +12765,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "company_crypto_settings_trader_agent_id_agents_id_fk": {
+          "name": "company_crypto_settings_trader_agent_id_agents_id_fk",
+          "tableFrom": "company_crypto_settings",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "trader_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -13106,6 +13125,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "routine_action": {
+          "name": "routine_action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -13293,7 +13318,11 @@
       "checkConstraints": {
         "crypto_wallet_transactions_initiated_by_check": {
           "name": "crypto_wallet_transactions_initiated_by_check",
-          "value": "\"crypto_wallet_transactions\".\"initiated_by\" IN ('agent', 'owner')"
+          "value": "\"crypto_wallet_transactions\".\"initiated_by\" IN ('agent', 'owner', 'routine')"
+        },
+        "crypto_wallet_transactions_routine_action_check": {
+          "name": "crypto_wallet_transactions_routine_action_check",
+          "value": "\"crypto_wallet_transactions\".\"routine_action\" IS NULL OR \"crypto_wallet_transactions\".\"routine_action\" IN ('sweep', 'trade')"
         },
         "crypto_wallet_transactions_kind_check": {
           "name": "crypto_wallet_transactions_kind_check",
@@ -13429,6 +13458,85 @@
         "last_balance_at": {
           "name": "last_balance_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "holder": {
+          "name": "holder",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'agent'"
+        },
+        "max_balance": {
+          "name": "max_balance",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "daily_loss_stop": {
+          "name": "daily_loss_stop",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sweep_threshold": {
+          "name": "sweep_threshold",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "top_up_floor": {
+          "name": "top_up_floor",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "top_up_target": {
+          "name": "top_up_target",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sweep_address": {
+          "name": "sweep_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sweep_address_approved_at": {
+          "name": "sweep_address_approved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pending_sweep_address": {
+          "name": "pending_sweep_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pending_sweep_approval_id": {
+          "name": "pending_sweep_approval_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "top_up_approval_id": {
+          "name": "top_up_approval_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "loss_day": {
+          "name": "loss_day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "loss_day_peak": {
+          "name": "loss_day_peak",
+          "type": "numeric(78, 0)",
           "primaryKey": false,
           "notNull": false
         },
@@ -13577,6 +13685,148 @@
         "crypto_wallets_limits_check": {
           "name": "crypto_wallets_limits_check",
           "value": "\"crypto_wallets\".\"per_transaction_limit\" >= 0 AND \"crypto_wallets\".\"daily_limit\" >= 0 AND \"crypto_wallets\".\"total_limit\" >= 0 AND (\"crypto_wallets\".\"approval_above\" IS NULL OR \"crypto_wallets\".\"approval_above\" >= 0)"
+        },
+        "crypto_wallets_holder_check": {
+          "name": "crypto_wallets_holder_check",
+          "value": "\"crypto_wallets\".\"holder\" IN ('agent', 'trading_routine')"
+        },
+        "crypto_wallets_routine_shape_check": {
+          "name": "crypto_wallets_routine_shape_check",
+          "value": "\"crypto_wallets\".\"holder\" = 'agent' OR (\"crypto_wallets\".\"agent_id\" IS NULL AND \"crypto_wallets\".\"network\" = 'testnet' AND \"crypto_wallets\".\"max_balance\" IS NOT NULL AND \"crypto_wallets\".\"daily_loss_stop\" IS NOT NULL)"
+        },
+        "crypto_wallets_routine_amounts_check": {
+          "name": "crypto_wallets_routine_amounts_check",
+          "value": "(\"crypto_wallets\".\"max_balance\" IS NULL OR \"crypto_wallets\".\"max_balance\" >= 0) AND (\"crypto_wallets\".\"daily_loss_stop\" IS NULL OR \"crypto_wallets\".\"daily_loss_stop\" >= 0) AND (\"crypto_wallets\".\"sweep_threshold\" IS NULL OR \"crypto_wallets\".\"sweep_threshold\" >= 0) AND (\"crypto_wallets\".\"top_up_floor\" IS NULL OR \"crypto_wallets\".\"top_up_floor\" >= 0) AND (\"crypto_wallets\".\"top_up_target\" IS NULL OR \"crypto_wallets\".\"top_up_target\" >= 0)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.trading_alerts": {
+      "name": "trading_alerts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "wallet_id": {
+          "name": "wallet_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ready'"
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "delivered_at": {
+          "name": "delivered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "trading_alerts_company_status_idx": {
+          "name": "trading_alerts_company_status_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "trading_alerts_company_id_companies_id_fk": {
+          "name": "trading_alerts_company_id_companies_id_fk",
+          "tableFrom": "trading_alerts",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "trading_alerts_wallet_id_crypto_wallets_id_fk": {
+          "name": "trading_alerts_wallet_id_crypto_wallets_id_fk",
+          "tableFrom": "trading_alerts",
+          "tableTo": "crypto_wallets",
+          "columnsFrom": [
+            "wallet_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_alerts_status_check": {
+          "name": "trading_alerts_status_check",
+          "value": "\"trading_alerts\".\"status\" IN ('ready', 'delivered', 'failed', 'expired')"
         }
       },
       "isRLSEnabled": false
@@ -42635,220 +42885,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.trading_candle_ingest_events": {
-      "name": "trading_candle_ingest_events",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigserial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "market": {
-          "name": "market",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "timeframe": {
-          "name": "timeframe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ref": {
-          "name": "ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "open_time": {
-          "name": "open_time",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "detail": {
-          "name": "detail",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "trading_candle_ingest_events_kind_ref_idx": {
-          "name": "trading_candle_ingest_events_kind_ref_idx",
-          "columns": [
-            {
-              "expression": "kind",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "source",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "ref",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_candle_ingest_events_created_idx": {
-          "name": "trading_candle_ingest_events_created_idx",
-          "columns": [
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_candle_ingest_events_kind_check": {
-          "name": "trading_candle_ingest_events_kind_check",
-          "value": "\"trading_candle_ingest_events\".\"kind\" IN ('archive_done', 'correction', 'invalid_bars', 'source_stopped', 'gap_note')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.trading_candles": {
-      "name": "trading_candles",
-      "schema": "",
-      "columns": {
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "market": {
-          "name": "market",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "timeframe": {
-          "name": "timeframe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "open_time": {
-          "name": "open_time",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "open": {
-          "name": "open",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "high": {
-          "name": "high",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "low": {
-          "name": "low",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "close": {
-          "name": "close",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "volume": {
-          "name": "volume",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "ingested_at": {
-          "name": "ingested_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "trading_candles_pk": {
-          "name": "trading_candles_pk",
-          "columns": [
-            "source",
-            "market",
-            "timeframe",
-            "open_time"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_candles_source_check": {
-          "name": "trading_candles_source_check",
-          "value": "\"trading_candles\".\"source\" IN ('kraken', 'binance', 'coinbase')"
-        },
-        "trading_candles_timeframe_check": {
-          "name": "trading_candles_timeframe_check",
-          "value": "\"trading_candles\".\"timeframe\" IN ('5m', '1h', '4h', '1d')"
-        },
-        "trading_candles_sanity_check": {
-          "name": "trading_candles_sanity_check",
-          "value": "\"trading_candles\".\"open\" > 0 AND \"trading_candles\".\"high\" > 0 AND \"trading_candles\".\"low\" > 0 AND \"trading_candles\".\"close\" > 0 AND \"trading_candles\".\"volume\" >= 0 AND \"trading_candles\".\"high\" >= \"trading_candles\".\"low\""
-        }
-      },
       "isRLSEnabled": false
     },
     "public.trading_daily_stats": {
