@@ -18,6 +18,9 @@ export { CRYPTO_REAL_MONEY_ENV };
 export const CRYPTO_REAL_MONEY_LOCK_MESSAGE =
   "Real money is switched off on this server (administrator setting). Only test-network wallets can be used.";
 
+export const CRYPTO_IMPORT_LOCK_MESSAGE =
+  "Importing a private key is switched off while real money is locked on this server. Create a new wallet instead; Paperclip generates its key.";
+
 export function isCryptoRealMoneyAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[CRYPTO_REAL_MONEY_ENV] === "allowed";
 }
@@ -25,6 +28,15 @@ export function isCryptoRealMoneyAllowed(env: NodeJS.ProcessEnv = process.env): 
 /** Throws a 403 with a plain message while real money is forbidden on this server. */
 export function assertCryptoRealMoneyAllowed(env: NodeJS.ProcessEnv = process.env): void {
   if (!isCryptoRealMoneyAllowed(env)) throw forbidden(CRYPTO_REAL_MONEY_LOCK_MESSAGE);
+}
+
+/**
+ * Private-key import is disabled for EVERY network while the lock is on: a
+ * key that already exists somewhere (possibly holding real coins) must not
+ * be brought into a "test" wallet where nothing could tell the two apart.
+ */
+export function assertCryptoKeyImportAllowed(env: NodeJS.ProcessEnv = process.env): void {
+  if (!isCryptoRealMoneyAllowed(env)) throw forbidden(CRYPTO_IMPORT_LOCK_MESSAGE);
 }
 
 /** The one boot-time warning. Never includes secrets: only the variable name and whether it allows real money. */
