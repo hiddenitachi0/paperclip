@@ -477,7 +477,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     if (input.network === "mainnet" && input.limits !== undefined && !actor.isOwner) {
       throw forbidden("Only the company's owner can set limits on a real-money wallet. Leave the limits out to start with the safe defaults.");
     }
-    const limits = limitsToBaseUnits(input.chain, input.limits ?? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain]);
+    // New test wallets ask a person for every agent send (approvalAbove
+    // empty); explicit limits and the real-money defaults are unchanged.
+    const defaultLimits: CryptoWalletLimits =
+      input.network === "mainnet" ? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain] : { ...DEFAULT_CRYPTO_WALLET_LIMITS[input.chain], approvalAbove: null };
+    const limits = limitsToBaseUnits(input.chain, input.limits ?? defaultLimits);
     const adapter = adapterFor(input.chain);
 
     let material: { privateKey: string; address: string };
@@ -942,8 +946,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           }`;
     const expiresAt = tx.approvalExpiresAt ?? new Date(nowOf().getTime() + CRYPTO_TX_APPROVAL_EXPIRY_MS);
     const isSweep = tx.routineAction === "sweep";
-    const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Reason given: "${tx.purpose}". ${reasonForOperator} ${
-      realMoney ? "This is REAL money and cannot be undone." : "This is on a test network; test coins have no value."
+    const networkLabel = cryptoNetworkLabel(chain, wallet.network as CryptoNetwork);
+    const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Network: ${networkLabel}. Reason given: "${tx.purpose}". ${reasonForOperator} ${
+      realMoney ? "This is REAL money and cannot be undone." : "Test coins: no real value."
     }`;
     const [approval] = await db
       .insert(approvals)
@@ -959,6 +964,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           transactionId: tx.id,
           chain,
           network: wallet.network,
+          networkLabel,
+          destination: tx.destination,
+          destinationLabel,
           // 'sweep' makes the approvals route ask for the owner, not any admin.
           ...(isSweep ? { routineAction: "sweep" } : {}),
           title: isSweep
@@ -2111,6 +2119,15 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           .where(and(eq(cryptoWalletTransactions.id, row.id), eq(cryptoWalletTransactions.status, "pending_approval")))
           .returning();
         if (!expired) return row;
+        // Close the board card too, so no dead card stays in "Needs you" and
+        // approving it later does nothing. A card a person already decided is
+        // left as it is.
+        if (row.approvalId) {
+          await db
+            .update(approvals)
+            .set({ status: "cancelled", decisionNote: "Expired: nobody answered in time, so nothing was sent.", decidedAt: now, updatedAt: now })
+            .where(and(eq(approvals.id, row.approvalId), eq(approvals.companyId, row.companyId), inArray(approvals.status, ["pending", "revision_requested"])));
+        }
         await writeLedger({ companyId: row.companyId, walletId: row.walletId, eventType: "wallet_tx_rejected", tx: expired, detail: { reason: "approval_expired" } });
         return expired;
       }

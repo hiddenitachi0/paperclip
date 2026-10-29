@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCompanyService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -95,6 +95,16 @@ async function createApp(actor: Record<string, unknown>) {
   app.use(errorHandler);
   return app;
 }
+
+// The first import of routes/companies.js (and middleware/index.js) pulls in the route,
+// service and db-schema graph and transforms it cold. That took 5-7 s, so whichever test ran
+// first ("rejects non-CEO agent callers") blew the default 5 s test timeout on CI. Pay that
+// cost once here, with a 60 s hook timeout (the same budget vitest.config.ts gives hooks).
+// The per-test vi.resetModules() below keeps the transform cache, so each test then only
+// re-evaluates already-transformed modules (a few hundred ms).
+beforeAll(async () => {
+  await createApp({ type: "board", userId: "warmup", source: "local_implicit" });
+}, 60_000);
 
 describe("PATCH /api/companies/:companyId/branding", () => {
   beforeEach(() => {

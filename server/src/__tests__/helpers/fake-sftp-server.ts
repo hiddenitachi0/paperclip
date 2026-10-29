@@ -48,10 +48,27 @@ function normalize(path: string): string {
   return `/${parts.join("/")}`;
 }
 
+/**
+ * A fresh ed25519 host key that ssh2 itself can load. ssh2's own key generator
+ * (lib/keygen.js) strips every leading zero byte from the public key, where it
+ * means to drop only the BIT STRING's unused-bits octet. So about 1 key in 256
+ * comes out with a 31-byte public key, which ssh2's parser refuses, and
+ * `new Server(...)` then throws "Cannot parse privateKey: Malformed OpenSSH
+ * private key" at random. Such a key is thrown away and a new one is made;
+ * the check is the same parse `new Server` does.
+ */
+function generateHostKey(): string {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const { private: privateKey } = utils.generateKeyPairSync("ed25519") as { private: string };
+    if (!(utils.parseKey(privateKey) instanceof Error)) return privateKey;
+  }
+  throw new Error("ssh2 did not produce a host key it can parse in 32 attempts");
+}
+
 export async function startFakeSftpServer(options: FakeSftpOptions): Promise<FakeSftpServer> {
   const files: Record<string, Buffer> = { ...options.files };
   const authAttempts: string[] = [];
-  const hostKey = utils.generateKeyPairSync("ed25519");
+  const hostKey = generateHostKey();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const connections = new Set<any>();
 
@@ -76,7 +93,7 @@ export async function startFakeSftpServer(options: FakeSftpOptions): Promise<Fak
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const server = new Server({ hostKeys: [hostKey.private] }, (client: any) => {
+  const server = new Server({ hostKeys: [hostKey] }, (client: any) => {
     connections.add(client);
     client.on("close", () => connections.delete(client));
     client.on("error", () => undefined);
