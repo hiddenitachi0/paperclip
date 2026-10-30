@@ -94,6 +94,18 @@ describe("evaluateDailyLoss", () => {
     expect(lost.loss).toBe(15_900_000n);
     expect(lost.loss >= stop).toBe(true);
   });
+  it("keeps the loss when a deposit lands below the day reference (DUR-5111)", () => {
+    // Reference 100, balance 91: loss 9.
+    const down = evaluateDailyLoss({ balance: 91n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
+    expect(down.loss).toBe(9n);
+    // Deposit +5 gives 96, still under the reference: the loss stays 9, not 4.
+    const deposit = evaluateDailyLoss({ balance: 96n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: down.peak, previousBalance: 91n });
+    expect(deposit.loss).toBe(9n);
+    // A deposit landing exactly on the reference behaves the same.
+    expect(evaluateDailyLoss({ balance: 100n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: down.peak, previousBalance: 91n }).loss).toBe(9n);
+    // Further drops add to the carried loss.
+    expect(evaluateDailyLoss({ balance: 90n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: deposit.peak, previousBalance: 96n }).loss).toBe(15n);
+  });
   it("still lets a gain raise the bar when nothing is owed, so given-back profit counts", () => {
     const up = evaluateDailyLoss({ balance: 130n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
     expect(up).toMatchObject({ peak: 130n, loss: 0n });

@@ -149,11 +149,13 @@ export interface DailyLossState {
 
 /**
  * The daily loss is measured from the day's highest balance, so a profit
- * that is given back counts as a loss. A reading that jumps ABOVE the
- * reference is treated as a deposit (the balance alone cannot tell it from a
- * windfall): the reference rises with it, but the loss already taken stays,
- * so topping up cannot wipe out the count (DUR-5087 N3). Rises that stay
- * under the reference do shrink the loss. The first look of a new day also
+ * that is given back counts as a loss. Any rise between two readings is
+ * treated as a possible deposit (the balance alone cannot tell it from a
+ * trading gain): the reference rises by the same amount, so the loss already
+ * taken stays and topping up cannot wipe out the count, whether the deposit
+ * lands above or below the reference (DUR-5087 N3, DUR-5111). The price is
+ * that a gain never offsets an earlier loss on the same day; the stop errs
+ * towards pausing, never towards missing a loss. The first look of a new day also
  * starts from the last balance seen the day before, so an overnight drop is
  * not forgotten. After the owner restarts a paused wallet (lossDayPeak null),
  * the count starts again from the balance as it is.
@@ -173,13 +175,10 @@ export function evaluateDailyLoss(input: {
   const adjusted = input.balance + input.outflowsToday;
   let peak: bigint;
   if (input.lossDay === input.today && input.lossDayPeak !== null) {
-    if (adjusted > input.lossDayPeak) {
-      const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
-      const carried = input.lossDayPeak > previousAdjusted ? input.lossDayPeak - previousAdjusted : 0n;
-      peak = adjusted + carried;
-    } else {
-      peak = input.lossDayPeak;
-    }
+    // Any rise lifts the reference by the same amount, so the loss already taken is carried, never reduced.
+    const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
+    const rise = adjusted > previousAdjusted ? adjusted - previousAdjusted : 0n;
+    peak = input.lossDayPeak + rise;
   } else if (input.lossDay !== null && input.previousBalance !== null) {
     peak = input.previousBalance > adjusted ? input.previousBalance : adjusted;
   } else {
