@@ -682,8 +682,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
 
     const jumpPct = singleTickPriceJumpPct(candles.closes);
     const jumpThresholdPct = tradingPriceJumpThresholdPct(timeframe);
-    if (jumpPct !== null && jumpPct > jumpThresholdPct && entriesHalt === null) {
-      await haltEntries(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct, jumpThresholdPct, timeframe });
+    // A jump during a daily-loss halt must not be lost: that halt lifts itself
+    // on the next UTC day, so upgrade it to the sticky circuit_breaker (operator
+    // review) -- otherwise buys resume once the jump bar has aged out of the
+    // last two closes. Drawdown and circuit_breaker halts are already sticky.
+    if (jumpPct !== null && jumpPct > jumpThresholdPct && (entriesHalt === null || entriesHalt === "daily_loss_limit")) {
+      await haltEntries(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct, jumpThresholdPct, timeframe, ...(entriesHalt ? { replacedHalt: entriesHalt } : {}) });
       entriesHalt = "circuit_breaker";
     }
 
@@ -849,6 +853,37 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "order_rejected", detail: { reason: "price_drift_after_approval" } });
           resolved++;
           continue;
+        }
+        if (order.side === "buy") {
+          // The approval card was raised on an earlier tick, and the halt state is
+          // only written by tickOne, so re-run the whole entry gate on fresh
+          // numbers (drawdown, daily loss, order count, cash, position caps).
+          // The gate asks for approval above the threshold; this card is that
+          // approval, so needs_approval passes.
+          const usd = usdSideOf(row);
+          const counters = dayCounters(row, now);
+          const currentEquityUsd = usd.cashUsd + row.positionQuantity * quote.bidUsd;
+          const gate = evaluateTradingEntryGate({
+            side: "buy",
+            signalPriceNok: signalPriceUsd * fx.rate,
+            quotePriceNok: priceUsd * fx.rate,
+            requestedQuantity: order.requestedQuantity,
+            riskConfig,
+            cashNok: usd.cashUsd * fx.rate,
+            positionQuantity: row.positionQuantity,
+            positionCostNok: row.positionCostNok,
+            ordersToday: counters.ordersToday,
+            realizedPnlTodayNok: counters.realizedPnlTodayNok,
+            peakEquity: Math.max(usd.peakEquityUsd, currentEquityUsd),
+            currentEquity: currentEquityUsd,
+            entriesHaltedReason: null,
+          });
+          if (gate.kind === "block") {
+            await db.update(tradingOrders).set({ status: "rejected", rejectionReason: `Not placed after approval: ${gate.reason}` }).where(eq(tradingOrders.id, order.id));
+            await ledger.writeLedgerEntry({ companyId: order.companyId, strategyId: order.strategyId, orderId: order.id, eventType: "risk_block", detail: { side: "buy", reason: gate.reason, stage: "after_approval" } });
+            resolved++;
+            continue;
+          }
         }
         await db.update(tradingOrders).set({ status: "rejected" }).where(eq(tradingOrders.id, order.id)); // superseded by the fresh fill row fillBuy/fillSell inserts
         if (order.side === "buy") await fillBuy(row, order.requestedQuantity, priceUsd, fx, order.ruleVersion, order.signalPriceNok, now);
