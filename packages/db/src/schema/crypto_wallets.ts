@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, doublePrecision, index, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, date, doublePrecision, index, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { companySecrets } from "./company_secrets.js";
@@ -41,6 +41,10 @@ export const companyCryptoSettings = pgTable("company_crypto_settings", {
   allWalletsFrozen: boolean("all_wallets_frozen").notNull().default(false),
   frozenReason: text("frozen_reason"),
   rpcEndpoints: jsonb("rpc_endpoints").notNull().default({}),
+  // The one AI Trader agent (migration 0263, DUR-5026). It may ask for a
+  // top-up of a code-held trading wallet and nothing else; it can never own
+  // a wallet, and an agent that owns one cannot be named here.
+  traderAgentId: uuid("trader_agent_id").references(() => agents.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -55,6 +59,12 @@ export const cryptoWallets = pgTable(
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     chain: text("chain").notNull(),
     network: text("network").notNull().default("testnet"),
+    // Which Bitcoin test network ('testnet4' | 'signet'); set only on Bitcoin
+    // test wallets. Fixed at creation: a trigger refuses any later change.
+    networkVariant: text("network_variant"),
+    // EVM chain the wallet signs on; set only on Ethereum test wallets, from
+    // the code allow-list. Fixed at creation (same trigger).
+    evmChainId: integer("evm_chain_id"),
     address: text("address").notNull(),
     // The only pointer to the key. NO ACTION: the secret row cannot be
     // deleted while a wallet points at it (checked at the end of the
@@ -73,6 +83,31 @@ export const cryptoWallets = pgTable(
     maxLeverage: integer("max_leverage").notNull().default(1),
     lastBalance: numeric("last_balance", { precision: 78, scale: 0 }),
     lastBalanceAt: timestamp("last_balance_at", { withTimezone: true }),
+    // Migration 0263 (DUR-5026): who holds the wallet. 'agent' = an agent's
+    // tools use it (agent_id set). 'trading_routine' = held by Paperclip's
+    // own trading code: agent_id is always null, no agent can ever use it,
+    // and it exists on test networks only (CHECK below).
+    holder: text("holder").notNull().default("agent"),
+    // Hard limits and flows of a trading-routine wallet, in the wallet's own
+    // coin (base units). Null on agent wallets. per_transaction_limit is the
+    // max per trade, daily_limit the max traded per day.
+    maxBalance: numeric("max_balance", { precision: 78, scale: 0 }),
+    dailyLossStop: numeric("daily_loss_stop", { precision: 78, scale: 0 }),
+    sweepThreshold: numeric("sweep_threshold", { precision: 78, scale: 0 }),
+    topUpFloor: numeric("top_up_floor", { precision: 78, scale: 0 }),
+    topUpTarget: numeric("top_up_target", { precision: 78, scale: 0 }),
+    // The approved cold-wallet address profit is swept to; null = no sweep.
+    sweepAddress: text("sweep_address"),
+    sweepAddressApprovedAt: timestamp("sweep_address_approved_at", { withTimezone: true }),
+    // A new address waiting on its owner approval card; it is never used until approved.
+    pendingSweepAddress: text("pending_sweep_address"),
+    pendingSweepApprovalId: uuid("pending_sweep_approval_id"),
+    // The open "please top up" card, if any (one at a time per wallet).
+    topUpApprovalId: uuid("top_up_approval_id"),
+    // Daily loss tracking: the UTC day and the day's highest balance, with
+    // the wallet's own sweeps/sends added back so they never count as a loss.
+    lossDay: date("loss_day", { mode: "string" }),
+    lossDayPeak: numeric("loss_day_peak", { precision: 78, scale: 0 }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -82,12 +117,31 @@ export const cryptoWallets = pgTable(
     companyAddressUq: uniqueIndex("crypto_wallets_company_chain_network_address_uq").on(table.companyId, table.chain, table.network, table.address),
     chainCheck: check("crypto_wallets_chain_check", sql`${table.chain} IN ('bitcoin', 'ethereum', 'solana', 'hyperliquid')`),
     networkCheck: check("crypto_wallets_network_check", sql`${table.network} IN ('testnet', 'mainnet')`),
+    networkVariantCheck: check(
+      "crypto_wallets_network_variant_check",
+      sql`(${table.chain} = 'bitcoin' AND ${table.network} = 'testnet') = (${table.networkVariant} IS NOT NULL) AND (${table.networkVariant} IS NULL OR ${table.networkVariant} IN ('testnet4', 'signet'))`,
+    ),
+    evmChainIdCheck: check(
+      "crypto_wallets_evm_chain_id_check",
+      sql`(${table.chain} = 'ethereum' AND ${table.network} = 'testnet') = (${table.evmChainId} IS NOT NULL) AND (${table.evmChainId} IS NULL OR ${table.evmChainId} > 0)`,
+    ),
     statusCheck: check("crypto_wallets_status_check", sql`${table.status} IN ('active', 'frozen', 'archived')`),
     keyOriginCheck: check("crypto_wallets_key_origin_check", sql`${table.keyOrigin} IN ('generated', 'imported')`),
     leverageCheck: check("crypto_wallets_max_leverage_check", sql`${table.maxLeverage} >= 1 AND ${table.maxLeverage} <= 5`),
     limitsCheck: check(
       "crypto_wallets_limits_check",
       sql`${table.perTransactionLimit} >= 0 AND ${table.dailyLimit} >= 0 AND ${table.totalLimit} >= 0 AND (${table.approvalAbove} IS NULL OR ${table.approvalAbove} >= 0)`,
+    ),
+    holderCheck: check("crypto_wallets_holder_check", sql`${table.holder} IN ('agent', 'trading_routine')`),
+    // A code-held wallet belongs to no agent, is test-network only and
+    // always carries its two hard stops. The database refuses anything else.
+    routineShapeCheck: check(
+      "crypto_wallets_routine_shape_check",
+      sql`${table.holder} = 'agent' OR (${table.agentId} IS NULL AND ${table.network} = 'testnet' AND ${table.maxBalance} IS NOT NULL AND ${table.dailyLossStop} IS NOT NULL)`,
+    ),
+    routineAmountsCheck: check(
+      "crypto_wallets_routine_amounts_check",
+      sql`(${table.maxBalance} IS NULL OR ${table.maxBalance} >= 0) AND (${table.dailyLossStop} IS NULL OR ${table.dailyLossStop} >= 0) AND (${table.sweepThreshold} IS NULL OR ${table.sweepThreshold} >= 0) AND (${table.topUpFloor} IS NULL OR ${table.topUpFloor} >= 0) AND (${table.topUpTarget} IS NULL OR ${table.topUpTarget} >= 0)`,
     ),
   }),
 );
@@ -155,6 +209,9 @@ export const cryptoWalletTransactions = pgTable(
     feeUpperBound: numeric("fee_upper_bound", { precision: 78, scale: 0 }),
     orderDetail: jsonb("order_detail"),
     purpose: text("purpose").notNull(),
+    // Migration 0263 (DUR-5026): what the trading routine was doing when it
+    // initiated this (initiated_by 'routine'): a profit sweep or a trade.
+    routineAction: text("routine_action"),
     status: text("status").notNull(),
     blockReason: text("block_reason"),
     approvalId: uuid("approval_id"),
@@ -179,12 +236,39 @@ export const cryptoWalletTransactions = pgTable(
     walletIdx: index("crypto_wallet_transactions_wallet_idx").on(table.walletId, table.createdAt),
     agentIdx: index("crypto_wallet_transactions_agent_idx").on(table.agentId, table.createdAt),
     statusIdx: index("crypto_wallet_transactions_status_idx").on(table.status),
-    initiatedByCheck: check("crypto_wallet_transactions_initiated_by_check", sql`${table.initiatedBy} IN ('agent', 'owner')`),
+    initiatedByCheck: check("crypto_wallet_transactions_initiated_by_check", sql`${table.initiatedBy} IN ('agent', 'owner', 'routine')`),
+    routineActionCheck: check("crypto_wallet_transactions_routine_action_check", sql`${table.routineAction} IS NULL OR ${table.routineAction} IN ('sweep', 'trade')`),
     kindCheck: check("crypto_wallet_transactions_kind_check", sql`${table.kind} IN ('send', 'order')`),
     statusCheck: check(
       "crypto_wallet_transactions_status_check",
       sql`${table.status} IN ('blocked', 'pending_approval', 'approved', 'submitted', 'confirmed', 'failed', 'rejected', 'expired_approval')`,
     ),
     amountCheck: check("crypto_wallet_transactions_amount_check", sql`${table.amount} >= 0`),
+  }),
+);
+
+/**
+ * Trading alerts (migration 0263, DUR-5026): the outbox the Telegram bridge
+ * polls for the trading routine's safety stops and top-up / sweep notices.
+ * Same lifecycle as watcher_alerts and payment_notices: written `ready` by the
+ * server, delivered and acknowledged by the bridge, expired after a day.
+ * `kind` is a plain label (not a CHECK) so later alert kinds need no migration.
+ */
+export const tradingAlerts = pgTable(
+  "trading_alerts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    walletId: uuid("wallet_id").references(() => cryptoWallets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("ready"),
+    text: text("text").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (table) => ({
+    companyStatusIdx: index("trading_alerts_company_status_idx").on(table.companyId, table.status, table.createdAt),
+    statusCheck: check("trading_alerts_status_check", sql`${table.status} IN ('ready', 'delivered', 'failed', 'expired')`),
   }),
 );

@@ -85,13 +85,13 @@ export const tradingStrategies = pgTable(
     consecutiveErrors: integer("consecutive_errors").notNull().default(0),
     lastTickAt: timestamp("last_tick_at", { withTimezone: true }),
     lastTickError: text("last_tick_error"),
-    // DUR-5002 (migration 0263): rule_config and risk_config are a CACHE of the
+    // DUR-5002 (migration 0266): rule_config and risk_config are a CACHE of the
     // active version (trading_strategy_versions), written only inside the
     // activation transaction in services/trading-versions.ts. The tick reads
     // the version, never these two columns.
     ruleConfig: jsonb("rule_config").notNull(),
     riskConfig: jsonb("risk_config").notNull(),
-    // The one live version. Null only for a strategy that predates 0263 and has
+    // The one live version. Null only for a strategy that predates 0266 and has
     // not been converted yet (the service converts it on boot and on first use).
     activeVersionId: uuid("active_version_id").references((): AnyPgColumn => tradingStrategyVersions.id, { onDelete: "set null" }),
     // Stop / target / highest price of the open position, set when the position
@@ -102,7 +102,7 @@ export const tradingStrategies = pgTable(
     // buy-and-hold benchmark. Null if the initial quote fetch failed -- the
     // benchmark degrades to null in that case rather than blocking creation.
     startingQuoteNok: doublePrecision("starting_quote_nok"),
-    // DUR-5001 (migration 0263): strategies are scored in USD, the market's own
+    // DUR-5001 (migration 0262): strategies are scored in USD, the market's own
     // currency, so the NOK rate creates no fake gains or losses. These four are
     // the USD side of the same accounting; the *_nok columns stay as the NOK
     // ledger/display. Nullable only so a row written by pre-0262 code during a
@@ -157,7 +157,7 @@ export const tradingOrders = pgTable(
     status: text("status").notNull(),
     ruleVersion: text("rule_version").notNull(),
     // DUR-5002: the rule-book version that produced this order. Null only for
-    // orders written before 0263.
+    // orders written before 0266.
     strategyVersionId: uuid("strategy_version_id").references(() => tradingStrategyVersions.id, { onDelete: "set null" }),
     signalPriceNok: doublePrecision("signal_price_nok").notNull(),
     requestedQuantity: doublePrecision("requested_quantity").notNull(),
@@ -276,7 +276,7 @@ export type TradingStrategyVersionStatus = (typeof TRADING_STRATEGY_VERSION_STAT
 export const TRADING_STRATEGY_VERSION_PROPOSER_TYPES = ["user", "agent", "system"] as const;
 
 /**
- * DUR-5002 (migration 0263): the rule book of a strategy, one immutable row
+ * DUR-5002 (migration 0266): the rule book of a strategy, one immutable row
  * per version. draft -> approved -> superseded. The tick reads only the
  * strategy's `active_version_id` row.
  *
@@ -294,7 +294,7 @@ export const TRADING_STRATEGY_VERSION_PROPOSER_TYPES = ["user", "agent", "system
  * sma_crossover@1 strategies: they are exempt from the past-data start gate
  * (decision 7); anything new is not.
  *
- * Rollback: see 0263_trading_strategy_versions.sql.
+ * Rollback: see 0266_trading_strategy_versions.sql.
  */
 export const tradingStrategyVersions = pgTable(
   "trading_strategy_versions",

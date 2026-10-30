@@ -489,12 +489,15 @@ DECLARE
     -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
+    -- company-scoped, so it is in both lists.
+    'trading_alerts',
     'trading_daily_stats',
     'trading_fifo_lots',
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
-    -- DUR-5002: created, granted on and policed in 0263_trading_strategy_versions.sql; company-scoped, so in both lists.
+    -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
@@ -863,12 +866,15 @@ DECLARE
     'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
+    -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
+    -- company-scoped, so it is in both lists.
+    'trading_alerts',
     'trading_daily_stats',
     'trading_fifo_lots',
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
-    -- DUR-5002: created, granted on and policed in 0263_trading_strategy_versions.sql; company-scoped, so in both lists.
+    -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so

@@ -187,7 +187,7 @@ export {
   TRADING_STRATEGY_VERSION_STATUSES,
   type TradingStrategyVersionStatus,
 } from "./trading.js";
-export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions } from "./crypto_wallets.js";
+export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions, tradingAlerts } from "./crypto_wallets.js";
 export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms, contractSettings } from "./contracts.js";
 export { crmOrganizations } from "./crm_organizations.js";
 export { crmContacts } from "./crm_contacts.js";

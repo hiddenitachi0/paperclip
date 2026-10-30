@@ -3279,6 +3279,7 @@ export * from "./video-storyline-directors.js";
 export * from "./code-renders.js";
 export * from "./media-setups.js";
 export * from "./crypto-wallets.js";
+export * from "./trading-wallets.js";
 export {
   POSITION_CATALOGUE,
   CATALOGUE_SKILL_KEYS,

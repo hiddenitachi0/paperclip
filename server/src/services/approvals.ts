@@ -106,6 +106,35 @@ export function isCryptoWalletTxApproval(approval: Pick<typeof approvals.$inferS
 }
 
 /**
+ * The trading routine's two other cards (DUR-5026): a new cold-wallet
+ * address for profit sweeps (owner-only to approve), and the Trader's
+ * "please top up" request. Both are filed only by cryptoWalletService from
+ * the wallet's own row, for the same reason as the payment cards: a card
+ * someone else wrote could show a different address or amount than the one
+ * the wallet would act on.
+ */
+export const CRYPTO_SWEEP_ADDRESS_APPROVAL_KIND = "crypto_sweep_address";
+export const CRYPTO_TOP_UP_APPROVAL_KIND = "crypto_topup_request";
+
+export function isCryptoSweepAddressApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === CRYPTO_SWEEP_ADDRESS_APPROVAL_KIND;
+}
+
+export function isCryptoTopUpApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === CRYPTO_TOP_UP_APPROVAL_KIND;
+}
+
+/** A first profit sweep is a payment card whose money goes to the owner's cold wallet: only the owner may approve it. */
+export function isCryptoSweepPaymentApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return isCryptoWalletTxApproval(approval) && approval.payload?.routineAction === "sweep";
+}
+
+/** Every card only the wallet service may file. */
+export function isCryptoServiceFiledApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return isCryptoWalletTxApproval(approval) || isCryptoSweepAddressApproval(approval) || isCryptoTopUpApproval(approval);
+}
+
+/**
  * Trading strategy rule-book cards (kind "trading_strategy_version", DUR-5002)
  * are filed only by tradingVersionsService from its own stored draft, never
  * through create(): a card someone else wrote could show different rules than
@@ -125,7 +154,7 @@ const TRADING_VERSION_DECISION_ELSEWHERE =
   "A trading strategy's rules can only be switched by a company owner or admin from the approval card: approving activates exactly the stored draft the card shows";
 
 const CRYPTO_WALLET_CARD_FILED_ELSEWHERE =
-  "Crypto wallet payment cards can only be filed by the wallet itself, when an agent asks to pay. Use the agent's wallet tools instead";
+  "Crypto wallet cards (payments, sweep addresses, top-up requests) can only be filed by the wallet itself. Use the agent's wallet tools or the wallet screens instead";
 
 const REPORT_SCRIPT_DECISION_ELSEWHERE =
   "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
@@ -184,6 +213,8 @@ export function isApprovalCardOnlyKind(approval: Pick<typeof approvals.$inferSel
     kind === "operator_action" ||
     kind === "deploy" ||
     kind === CRYPTO_WALLET_TX_APPROVAL_KIND ||
+    kind === CRYPTO_SWEEP_ADDRESS_APPROVAL_KIND ||
+    kind === CRYPTO_TOP_UP_APPROVAL_KIND ||
     kind === TRADING_STRATEGY_VERSION_APPROVAL_KIND ||
     isUnsupportedDeployLikeKind(kind)
   );
@@ -613,8 +644,8 @@ export function approvalService(db: Db) {
       if (isReportScriptVersionApproval({ type: data.type, payload: data.payload })) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
       }
-      if (isCryptoWalletTxApproval({ type: data.type, payload: data.payload })) {
-        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
+      if (isCryptoServiceFiledApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: (data.payload as Record<string, unknown> | null)?.kind });
       }
       if (isTradingStrategyVersionApproval({ type: data.type, payload: data.payload })) {
         throw unprocessable(TRADING_VERSION_CARD_FILED_ELSEWHERE, { kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND });
@@ -964,8 +995,8 @@ export function approvalService(db: Db) {
       if (isReportScriptVersionApproval(existing) || (payload && isReportScriptVersionApproval({ type: existing.type, payload }))) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
       }
-      if (isCryptoWalletTxApproval(existing) || (payload && isCryptoWalletTxApproval({ type: existing.type, payload }))) {
-        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
+      if (isCryptoServiceFiledApproval(existing) || (payload && isCryptoServiceFiledApproval({ type: existing.type, payload }))) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: existing.payload?.kind });
       }
       if (isTradingStrategyVersionApproval(existing) || (payload && isTradingStrategyVersionApproval({ type: existing.type, payload }))) {
         throw unprocessable(TRADING_VERSION_CARD_FILED_ELSEWHERE, { kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND });

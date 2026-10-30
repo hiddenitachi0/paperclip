@@ -7,7 +7,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * DUR-5002, migration 0263_trading_strategy_versions: the rehearsal. It runs
+ * DUR-5002, migration 0266_trading_strategy_versions: the rehearsal. It runs
  * against a database that already holds a strategy, an order and a ledger row,
  * proves the upgrade keeps every one of them (new columns NULL), that a second
  * run changes nothing, that the documented rollback removes only the new
@@ -19,10 +19,10 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {
-  console.warn(`Skipping migration 0263 test: ${support.reason ?? "unsupported environment"}`);
+  console.warn(`Skipping migration 0266 test: ${support.reason ?? "unsupported environment"}`);
 }
 
-const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0263_trading_strategy_versions.sql", import.meta.url));
+const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0266_trading_strategy_versions.sql", import.meta.url));
 const DIGEST = "a".repeat(64);
 
 type Row = Record<string, unknown>;
@@ -42,7 +42,7 @@ function rollbackStatements(): string[] {
     .map((line) => line.replace(/^--\s+/, "").trim());
 }
 
-d("migration 0263_trading_strategy_versions", () => {
+d("migration 0266_trading_strategy_versions", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const companyId = randomUUID();
@@ -74,7 +74,7 @@ d("migration 0263_trading_strategy_versions", () => {
   }
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0263-trading-versions-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0266-trading-versions-");
     db = createDb(tempDb.connectionString);
     await db.execute(sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Trading', 'TRD')`);
     for (const id of [strategyId, otherStrategyId]) {
@@ -90,7 +90,7 @@ d("migration 0263_trading_strategy_versions", () => {
   });
 
   it("upgrades a database that already holds trading rows without touching them, and a second run changes nothing", async () => {
-    // Put the database back into its pre-0263 shape, with real rows in it.
+    // Put the database back into its pre-0266 shape, with real rows in it.
     for (const statement of rollbackStatements()) await db.execute(sql.raw(statement));
     const orderId = randomUUID();
     await db.execute(sql`

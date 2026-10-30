@@ -19,17 +19,25 @@ import {
   CRYPTO_TX_APPROVAL_EXPIRY_MS,
   CRYPTO_TX_COUNTING_STATUSES,
   DEFAULT_CRYPTO_AGENT_LIMITS,
-  DEFAULT_CRYPTO_RPC_ENDPOINTS,
+  DEFAULT_BITCOIN_NETWORK_VARIANT,
   DEFAULT_CRYPTO_WALLET_LIMITS,
+  DEFAULT_TRADING_WALLET_LIMITS,
   HYPERLIQUID_DEFAULT_MAX_LEVERAGE,
+  EVM_CHAIN_IDS,
+  cryptoEndpointSlot,
   cryptoNetworkLabel,
+  defaultCryptoRpcEndpoint,
   formatChainAmount,
   formatCryptoAmount,
+  isTestEvmChainId,
   parseCryptoAmount,
+  type BitcoinNetworkVariant,
   type CompanyCryptoSettings,
   type CreateCryptoWalletInput,
+  type CreateTradingWalletInput,
   type CryptoAgentLimits,
   type CryptoChain,
+  type CryptoEndpointSlot,
   type CryptoNetwork,
   type CryptoQuoteRequest,
   type CryptoSendRequest,
@@ -41,11 +49,14 @@ import {
   type CryptoWalletSummary,
   type CryptoWalletTransactionSummary,
   type HyperliquidOrderRequest,
+  type TradingAlertKind,
   type TradingLedgerEventType,
+  type TradingWalletLimitInput,
+  type TradingWalletSettings,
   type UpdateCompanyCryptoSettingsInput,
   type UpdateCryptoWalletInput,
 } from "@paperclipai/shared";
-import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { assertCryptoKeyImportAllowed, assertCryptoRealMoneyAllowed, CRYPTO_REAL_MONEY_LOCK_MESSAGE, isCryptoRealMoneyAllowed } from "./crypto-real-money-lock.js";
 import {
@@ -59,6 +70,17 @@ import {
   type SignedTransfer,
 } from "./crypto-wallet-chains.js";
 import { evaluateHyperliquidLeverage, evaluateWalletSpend } from "./crypto-wallet-policy.js";
+import {
+  evaluateBalanceBreach,
+  evaluateDailyLoss,
+  evaluateRoutineTrade,
+  parseTradingLimits,
+  sweepAmount,
+  topUpNeeded,
+  TradingLimitsError,
+  utcDayKey,
+} from "./trading-wallet-policy.js";
+import { tradingAlertsService, type TradingAlertSink } from "./trading-alerts.js";
 import { createCryptoRpcOutboundPolicy, createSafeOutboundFetch, SafeOutboundFetchError, type OutboundFetch } from "./safe-outbound-fetch.js";
 import { secretService } from "./secrets.js";
 import { ccxtTradingMarketData, isTradingMarketDataError, type TradingMarketDataSource } from "./trading-market-data.js";
@@ -117,6 +139,10 @@ export interface CryptoWalletServiceDeps {
   /** Builds the outbound fetch for one endpoint. Default: the safe outbound fetch pinned to that endpoint's host. */
   fetchFor?: (endpointUrl: string) => OutboundFetch;
   secrets?: SecretsForWallets;
+  /** Where the trading routine queues its Telegram alerts. Default: the trading_alerts outbox. */
+  alerts?: TradingAlertSink;
+  /** How often the tick looks at each trading wallet's balance (the hard stops, sweep, top-up). Default 5 minutes. */
+  tradingWatchIntervalMs?: number;
 }
 
 export interface CryptoActor {
@@ -151,6 +177,22 @@ function toLimits(row: CryptoWalletRow): CryptoWalletLimits {
   };
 }
 
+function toTradingSettings(row: CryptoWalletRow): TradingWalletSettings | null {
+  if (row.holder !== "trading_routine") return null;
+  const decimals = CRYPTO_CHAIN_INFO[row.chain as CryptoChain].decimals;
+  const fmt = (value: string | null) => (value === null ? null : formatCryptoAmount(value, decimals));
+  return {
+    maxBalance: formatCryptoAmount(row.maxBalance ?? "0", decimals),
+    dailyLossStop: formatCryptoAmount(row.dailyLossStop ?? "0", decimals),
+    sweepThreshold: fmt(row.sweepThreshold),
+    topUpFloor: fmt(row.topUpFloor),
+    topUpTarget: fmt(row.topUpTarget),
+    sweepAddress: row.sweepAddress,
+    sweepAddressApprovedAt: row.sweepAddressApprovedAt?.toISOString() ?? null,
+    pendingSweepAddress: row.pendingSweepAddress,
+  };
+}
+
 /** The only shape a wallet ever leaves this service in. No key, no secret id. */
 export function toWalletSummary(row: CryptoWalletRow): CryptoWalletSummary {
   return {
@@ -159,6 +201,8 @@ export function toWalletSummary(row: CryptoWalletRow): CryptoWalletSummary {
     agentId: row.agentId,
     chain: row.chain as CryptoChain,
     network: row.network as CryptoNetwork,
+    networkVariant: (row.networkVariant as BitcoinNetworkVariant | null) ?? null,
+    evmChainId: row.evmChainId ?? null,
     address: row.address,
     label: row.label,
     keyOrigin: row.keyOrigin as "generated" | "imported",
@@ -168,6 +212,8 @@ export function toWalletSummary(row: CryptoWalletRow): CryptoWalletSummary {
     maxLeverage: row.maxLeverage,
     lastBalance: row.lastBalance,
     lastBalanceAt: row.lastBalanceAt?.toISOString() ?? null,
+    holder: row.holder as "agent" | "trading_routine",
+    trading: toTradingSettings(row),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -178,7 +224,8 @@ export function toTxSummary(row: CryptoWalletTxRow): CryptoWalletTransactionSumm
     id: row.id,
     walletId: row.walletId,
     agentId: row.agentId,
-    initiatedBy: row.initiatedBy as "agent" | "owner",
+    initiatedBy: row.initiatedBy as "agent" | "owner" | "routine",
+    routineAction: (row.routineAction as "sweep" | "trade" | null) ?? null,
     kind: row.kind as "send" | "order",
     chain: row.chain as CryptoChain,
     network: row.network as CryptoNetwork,
@@ -285,6 +332,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       allWalletsFrozen: row?.allWalletsFrozen ?? false,
       frozenReason: row?.frozenReason ?? null,
       rpcEndpoints: (row?.rpcEndpoints as CompanyCryptoSettings["rpcEndpoints"]) ?? {},
+      traderAgentId: row?.traderAgentId ?? null,
     };
   }
 
@@ -323,23 +371,41 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       patch.frozenReason = input.allWalletsFrozen ? (input.frozenReason?.trim() || "Frozen by an owner or admin.") : null;
     }
 
+    if (input.traderAgentId !== undefined) {
+      if (!actor.isOwner) throw forbidden("Only the company's owner can name the Trader agent.");
+      if (input.traderAgentId !== null) {
+        await requireAgent(companyId, input.traderAgentId);
+        // The Trader never holds a wallet: no agent that owns one can be named.
+        const [holds] = await db
+          .select({ id: cryptoWallets.id })
+          .from(cryptoWallets)
+          .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.agentId, input.traderAgentId)))
+          .limit(1);
+        if (holds) throw unprocessable("That agent holds a wallet, so it cannot be the Trader. Take the wallet away from it first.");
+      }
+      patch.traderAgentId = input.traderAgentId;
+    }
+
     if (input.rpcEndpoints) {
       // Which network service a wallet talks to decides which network it
       // really signs on, so this is the owner's call, like real money.
       if (!actor.isOwner) throw forbidden("Only the company's owner can change the crypto network addresses.");
       const merged: CompanyCryptoSettings["rpcEndpoints"] = JSON.parse(JSON.stringify(current.rpcEndpoints));
-      for (const [chain, networks] of Object.entries(input.rpcEndpoints) as Array<[CryptoChain, Partial<Record<CryptoNetwork, string | null>>]>) {
-        for (const [network, url] of Object.entries(networks ?? {}) as Array<[CryptoNetwork, string | null]>) {
+      for (const [chain, slots] of Object.entries(input.rpcEndpoints) as Array<[CryptoChain, Partial<Record<CryptoEndpointSlot, string | null>>]>) {
+        for (const [slot, url] of Object.entries(slots ?? {}) as Array<[CryptoEndpointSlot, string | null]>) {
+          if (defaultCryptoRpcEndpoint(chain, slot) === undefined) {
+            throw unprocessable("Only Bitcoin has a signet network address.");
+          }
           const forChain = (merged[chain] ??= {});
           if (url === null) {
-            delete forChain[network];
+            delete forChain[slot];
           } else {
             try {
               createCryptoRpcOutboundPolicy(url);
             } catch (err) {
               throw unprocessable(err instanceof Error ? err.message : "That network address is not allowed.");
             }
-            forChain[network] = url;
+            forChain[slot] = url;
           }
         }
       }
@@ -375,14 +441,27 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return agentLimitsReset === undefined ? settings : { ...settings, agentLimitsReset };
   }
 
-  function endpointFor(settings: CompanyCryptoSettings, chain: CryptoChain, network: CryptoNetwork): string {
-    return settings.rpcEndpoints?.[chain]?.[network] ?? DEFAULT_CRYPTO_RPC_ENDPOINTS[chain][network];
+  /** The company's own address for this wallet's slot (chain x network x variant), else the built-in one. */
+  function endpointFor(settings: CompanyCryptoSettings, chain: CryptoChain, network: CryptoNetwork, networkVariant?: BitcoinNetworkVariant | null): string {
+    const slot = cryptoEndpointSlot(chain, network, networkVariant);
+    return settings.rpcEndpoints?.[chain]?.[slot] ?? defaultCryptoRpcEndpoint(chain, slot)!;
   }
 
-  async function chainContext(companyId: string, chain: CryptoChain, network: CryptoNetwork): Promise<ChainContext> {
+  /**
+   * What a chain adapter needs for one wallet. The network, Bitcoin variant
+   * and Ethereum chain ID come from the wallet's stored (fixed) values, never
+   * from a code default, so changing a default moves no existing wallet.
+   */
+  async function chainContext(
+    companyId: string,
+    chain: CryptoChain,
+    wallet: Pick<CryptoWalletRow, "network" | "networkVariant" | "evmChainId">,
+  ): Promise<ChainContext> {
     const settings = await getSettings(companyId);
-    const rpcUrl = endpointFor(settings, chain, network);
-    return { network, rpcUrl, fetch: fetchFor(rpcUrl) };
+    const network = wallet.network as CryptoNetwork;
+    const networkVariant = (wallet.networkVariant as BitcoinNetworkVariant | null) ?? undefined;
+    const rpcUrl = endpointFor(settings, chain, network, networkVariant);
+    return { network, networkVariant, chainId: wallet.evmChainId ?? undefined, rpcUrl, fetch: fetchFor(rpcUrl) };
   }
 
   // ─── Wallets ───────────────────────────────────────────────────────────
@@ -413,6 +492,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     if (input.mode === "import") assertCryptoKeyImportAllowed();
     const agent = await requireAgent(companyId, input.agentId);
     const settings = await getSettings(companyId);
+    if (settings.traderAgentId === agent.id) {
+      throw unprocessable("This agent is the Trader. The Trader never holds a wallet: trading wallets are held by Paperclip's own trading code.");
+    }
     if (input.network === "mainnet" && !settings.mainnetEnabled) {
       throw forbidden("Real money is switched off for this company. The owner can turn it on in the crypto settings; until then, use the test network.");
     }
@@ -425,6 +507,16 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       input.network === "mainnet" ? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain] : { ...DEFAULT_CRYPTO_WALLET_LIMITS[input.chain], approvalAbove: null };
     const limits = limitsToBaseUnits(input.chain, input.limits ?? defaultLimits);
     const adapter = adapterFor(input.chain);
+
+    // Fixed for the wallet's whole life (a database trigger refuses any later
+    // change). The defaults below apply to NEW wallets only.
+    const testnet = input.network === "testnet";
+    const networkVariant: BitcoinNetworkVariant | null =
+      input.chain === "bitcoin" && testnet ? (input.networkVariant ?? DEFAULT_BITCOIN_NETWORK_VARIANT) : null;
+    const evmChainId: number | null = input.chain === "ethereum" && testnet ? (input.evmChainId ?? EVM_CHAIN_IDS.testnet) : null;
+    if (evmChainId !== null && !isTestEvmChainId(evmChainId)) {
+      throw unprocessable("That Ethereum network is not an allowed test network.");
+    }
 
     let material: { privateKey: string; address: string };
     try {
@@ -469,7 +561,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         name: `${info.label} wallet key: ${input.label} (${shortAddress}, ${suffix})`,
         key: `crypto_wallet_${input.chain}_${input.network}_${suffix}`,
         value: material.privateKey,
-        description: `The secret key of ${agent.name}'s ${info.label} wallet ${material.address} (${cryptoNetworkLabel(input.chain, input.network)}). Only the server uses it, to sign payments. It cannot be shown or copied out.`,
+        description: `The secret key of ${agent.name}'s ${info.label} wallet ${material.address} (${cryptoNetworkLabel(input.chain, input.network, { networkVariant, evmChainId })}). Only the server uses it, to sign payments. It cannot be shown or copied out.`,
         kind: "crypto_wallet_key",
       },
       { userId: actor.userId },
@@ -485,6 +577,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         agentId: agent.id,
         chain: input.chain,
         network: input.network,
+        networkVariant,
+        evmChainId,
         address: material.address,
         secretId: secret.id,
         keyOrigin: input.mode === "generate" ? "generated" : "imported",
@@ -501,7 +595,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       companyId,
       walletId: row!.id,
       eventType: "wallet_created",
-      detail: { chain: input.chain, network: input.network, address: row!.address, keyOrigin: row!.keyOrigin, agentId: agent.id, byUserId: actor.userId },
+      detail: { chain: input.chain, network: input.network, networkVariant, evmChainId, address: row!.address, keyOrigin: row!.keyOrigin, agentId: agent.id, byUserId: actor.userId },
     });
     return toWalletSummary(row!);
   }
@@ -513,8 +607,29 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     }
   }
 
+  /**
+   * A code-held trading wallet's money paths (who it can send to, owner send,
+   * leverage) are the owner's alone, on any network (DUR-5087 N1): a company
+   * admin who could add their own address and send the balance would bypass
+   * the sweep-to-cold-wallet design with no approval card.
+   */
+  function assertOwnerForRoutineWallet(wallet: CryptoWalletRow, actor: { isOwner: boolean }, what: string) {
+    if (wallet.holder === "trading_routine" && !actor.isOwner) {
+      throw forbidden(`Only the company's owner can ${what} on a trading wallet.`);
+    }
+  }
+
   async function updateWallet(companyId: string, walletId: string, input: UpdateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     const row = await requireWalletRow(companyId, walletId);
+    if (row.holder === "trading_routine") {
+      // A code-held wallet is never handed to an agent, and its limits have
+      // their own owner-only route (they include the hard stops).
+      if (input.agentId !== undefined && input.agentId !== null) {
+        throw unprocessable("A trading wallet is held by Paperclip's trading code and can never be given to an agent.");
+      }
+      if (input.limits !== undefined) throw unprocessable("Change a trading wallet's limits on its trading limits screen.");
+      if (input.maxLeverage !== undefined) assertOwnerForRoutineWallet(row, actor, "change leverage");
+    }
     if (input.limits !== undefined || input.maxLeverage !== undefined || input.agentId !== undefined) {
       assertOwnerForRealMoney(row, actor, "change limits, leverage or which agent uses it");
     }
@@ -527,7 +642,12 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       patch.maxLeverage = input.maxLeverage;
     }
     if (input.agentId !== undefined) {
-      if (input.agentId !== null) await requireAgent(companyId, input.agentId);
+      if (input.agentId !== null) {
+        await requireAgent(companyId, input.agentId);
+        if ((await getSettings(companyId)).traderAgentId === input.agentId) {
+          throw unprocessable("That agent is the Trader. The Trader never holds a wallet.");
+        }
+      }
       patch.agentId = input.agentId;
     }
     const [updated] = await db.update(cryptoWallets).set(patch).where(and(eq(cryptoWallets.id, walletId), eq(cryptoWallets.companyId, companyId))).returning();
@@ -560,13 +680,18 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     if (!frozen && row.status === "frozen" && row.network === "mainnet" && !actor.isOwner) {
       throw forbidden("Only the company's owner can unfreeze a real-money wallet.");
     }
+    // Starting a paused trading wallet again is the owner's decision, not an admin's.
+    if (!frozen && row.status === "frozen" && row.holder === "trading_routine" && !actor.isOwner) {
+      throw forbidden("Only the company's owner can start a paused trading wallet again.");
+    }
     const now = nowOf();
     const [updated] = await db
       .update(cryptoWallets)
       .set(
         frozen
           ? { status: "frozen", frozenReason: reason?.trim() || "Frozen by an owner or admin.", frozenAt: now, updatedAt: now }
-          : { status: "active", frozenReason: null, frozenAt: null, updatedAt: now },
+          : // The daily loss count starts again from the balance as it is (see evaluateDailyLoss).
+            { status: "active", frozenReason: null, frozenAt: null, lossDay: null, lossDayPeak: null, updatedAt: now },
       )
       .where(and(eq(cryptoWallets.id, walletId), eq(cryptoWallets.companyId, companyId)))
       .returning();
@@ -625,6 +750,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   ): Promise<CryptoWalletDestination> {
     const wallet = await requireWalletRow(companyId, walletId);
     assertOwnerForRealMoney(wallet, actor, "add an allowed address");
+    assertOwnerForRoutineWallet(wallet, actor, "add an allowed address");
     const chain = wallet.chain as CryptoChain;
     let normalized: string | null;
     try {
@@ -649,8 +775,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return { id: row!.id, walletId, address: row!.address, label: row!.label, createdAt: row!.createdAt.toISOString() };
   }
 
-  async function removeDestination(companyId: string, walletId: string, destinationId: string, actor: { userId: string }): Promise<void> {
-    await requireWalletRow(companyId, walletId);
+  async function removeDestination(companyId: string, walletId: string, destinationId: string, actor: { userId: string; isOwner: boolean }): Promise<void> {
+    const wallet = await requireWalletRow(companyId, walletId);
+    assertOwnerForRoutineWallet(wallet, actor, "remove an allowed address");
     const [removed] = await db
       .delete(cryptoWalletDestinations)
       .where(and(eq(cryptoWalletDestinations.id, destinationId), eq(cryptoWalletDestinations.walletId, walletId), eq(cryptoWalletDestinations.companyId, companyId)))
@@ -708,10 +835,26 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
   // ─── Balance and reconciliation ────────────────────────────────────────
 
+  /**
+   * Reads a wallet's balance from the network and reconciles it. A trading
+   * wallet is always read through watchTradingWallet, so no caller (the
+   * owner's balance screen, the Trader's top-up request) can refresh the
+   * reading without the daily-loss and max-balance stops being applied to
+   * it: a refresh stamps lastBalanceAt, and the scheduler skips a wallet it
+   * saw recently (DUR-5087 N2).
+   */
   async function refreshBalance(companyId: string, walletId: string): Promise<CryptoWalletBalance> {
     const wallet = await requireWalletRow(companyId, walletId);
+    if (wallet.holder === "trading_routine" && wallet.status !== "archived") {
+      return (await watchTradingWallet(wallet, nowOf())).fresh;
+    }
+    return readBalance(companyId, walletId);
+  }
+
+  async function readBalance(companyId: string, walletId: string): Promise<CryptoWalletBalance> {
+    const wallet = await requireWalletRow(companyId, walletId);
     const chain = wallet.chain as CryptoChain;
-    const ctx = await chainContext(companyId, chain, wallet.network as CryptoNetwork);
+    const ctx = await chainContext(companyId, chain, wallet);
     let result: { balance: bigint; withdrawable?: bigint };
     try {
       result = await adapterFor(chain).getBalance(ctx, wallet.address);
@@ -759,6 +902,10 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
             .set({ status: "frozen", frozenReason: note, frozenAt: now, updatedAt: now })
             .where(eq(cryptoWallets.id, walletId));
           await writeLedger({ companyId, walletId, eventType: "wallet_kill_switch", detail: { scope: "wallet", action: "freeze", reason: "unexplained_outflow", by: { actorType: "system", actorId: "reconciliation" } } });
+          // The owner is told at the moment of the freeze, whoever asked for this reading.
+          if (wallet.holder === "trading_routine") {
+            await queueAlert(wallet, "wallet_paused", `Safety stop: the trading wallet "${wallet.label}" was paused. ${note}`);
+          }
         }
         logger.warn({ companyId, walletId, chain }, "crypto wallet: unexplained outflow, wallet frozen");
       }
@@ -823,11 +970,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   const costUsdSql = sql`case when ${cryptoWalletTransactions.status} in (${COUNTING_SQL}) then coalesce(${cryptoWalletTransactions.amountUsd}, 0) when ${cryptoWalletTransactions.status} = 'failed' then coalesce((${cryptoWalletTransactions.chainDetail} ->> 'feePaidUsd')::float8, 0) else 0 end`;
   const stillCostsSql = sql`(${cryptoWalletTransactions.status} in (${COUNTING_SQL}) or (${cryptoWalletTransactions.status} = 'failed' and (${cryptoWalletTransactions.chainDetail} ->> 'feePaid') is not null))`;
 
-  async function spentSoFar(tx: Pick<Db, "select">, wallet: CryptoWalletRow, agentId: string, now: Date) {
+  async function spentSoFar(tx: Pick<Db, "select">, wallet: CryptoWalletRow, agentId: string | null, now: Date) {
     const dayStartIso = utcDayStart(now).toISOString();
     const walletBase = and(eq(cryptoWalletTransactions.walletId, wallet.id), eq(cryptoWalletTransactions.countsTowardLimits, true), stillCostsSql);
     const agentBase = and(
-      eq(cryptoWalletTransactions.agentId, agentId),
+      agentId === null ? sql`false` : eq(cryptoWalletTransactions.agentId, agentId),
       eq(cryptoWalletTransactions.companyId, wallet.companyId),
       eq(cryptoWalletTransactions.countsTowardLimits, true),
       stillCostsSql,
@@ -869,7 +1016,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
             tx.feeUpperBound && BigInt(tx.feeUpperBound) > 0n ? `, plus a network fee of at most ${formatChainAmount(chain, tx.feeUpperBound)}` : ""
           }`;
     const expiresAt = tx.approvalExpiresAt ?? new Date(nowOf().getTime() + CRYPTO_TX_APPROVAL_EXPIRY_MS);
-    const networkLabel = cryptoNetworkLabel(chain, wallet.network as CryptoNetwork);
+    const isSweep = tx.routineAction === "sweep";
+    const networkLabel = cryptoNetworkLabel(chain, wallet.network as CryptoNetwork, wallet);
     const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Network: ${networkLabel}. Reason given: "${tx.purpose}". ${reasonForOperator} ${
       realMoney ? "This is REAL money and cannot be undone." : "Test coins: no real value."
     }`;
@@ -890,7 +1038,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           networkLabel,
           destination: tx.destination,
           destinationLabel,
-          title: `${realMoney ? "Real money: " : "Test coins: "}${agentName} wants to ${tx.kind === "order" ? "trade" : "pay"} from a crypto wallet`,
+          // 'sweep' makes the approvals route ask for the owner, not any admin.
+          ...(isSweep ? { routineAction: "sweep" } : {}),
+          title: isSweep
+            ? `${realMoney ? "Real money: " : "Test coins: "}sweep trading profit to your cold wallet`
+            : `${realMoney ? "Real money: " : "Test coins: "}${agentName} wants to ${tx.kind === "order" ? "trade" : "pay"} from a crypto wallet`,
           summary,
           plainSummary: `${summary} If nobody answers within an hour, nothing is sent.`,
           expiresAt: expiresAt.toISOString(),
@@ -922,12 +1074,17 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     // allow-list may have changed while the approval card was open.
     const switchRefusal = await assertSwitchesAllow(wallet);
     const destinationOk = txRow.kind === "order" || (txRow.destination !== null && (await allowListed(wallet, txRow.destination)) !== null);
-    if (switchRefusal || !destinationOk) {
-      const reason = switchRefusal ?? "The address is no longer on this wallet's allowed list.";
+    // A profit sweep goes only to the cold-wallet address as it is NOW: if the owner changed it while the card was open, nothing is sent.
+    const sweepRefusal =
+      txRow.routineAction === "sweep" && (wallet.sweepAddress === null || txRow.destination !== wallet.sweepAddress)
+        ? "The cold-wallet address changed (or was removed) while this sweep waited, so nothing was sent."
+        : null;
+    if (switchRefusal || sweepRefusal || !destinationOk) {
+      const reason = switchRefusal ?? sweepRefusal ?? "The address is no longer on this wallet's allowed list.";
       return finish(txRow, { status: "blocked", blockReason: reason }, "wallet_tx_blocked", { reason });
     }
 
-    const ctx = await chainContext(wallet.companyId, chain, wallet.network as CryptoNetwork);
+    const ctx = await chainContext(wallet.companyId, chain, wallet);
     let privateKey = "";
     let signed: SignedTransfer;
     try {
@@ -1038,6 +1195,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       .where(eq(cryptoWalletTransactions.id, txRow.id))
       .returning();
     await writeLedger({ companyId: txRow.companyId, walletId: txRow.walletId, eventType, tx: updated!, detail });
+    if (updated!.routineAction === "sweep" && ["confirmed", "failed", "blocked"].includes(updated!.status)) {
+      await alertSweepOutcome(updated!);
+    }
     return updated!;
   }
 
@@ -1054,7 +1214,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   interface SpendRequest {
     wallet: CryptoWalletRow;
     agentId: string | null;
-    initiatedBy: "agent" | "owner";
+    initiatedBy: "agent" | "owner" | "routine";
     initiatedByUserId: string | null;
     kind: "send" | "order";
     destination: string | null;
@@ -1069,6 +1229,10 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     purpose: string;
     preBlockReason: string | null;
     actor: CryptoActor;
+    /** Trading routine only: what it was doing. */
+    routineAction?: "sweep" | "trade";
+    /** A plain sentence: when set, this spend always waits for a person's approval card. */
+    forceApproval?: string;
   }
 
   /** Records the attempt, runs the gate under a lock, and either blocks, files a card, or sends. */
@@ -1094,6 +1258,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       countsTowardLimits: req.countsTowardLimits,
       orderDetail: req.orderDetail,
       purpose: req.purpose,
+      routineAction: req.routineAction ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -1113,8 +1278,23 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       let verdict: ReturnType<typeof evaluateWalletSpend>;
       if (req.fee > req.amount) {
         verdict = { kind: "block", reason: `The network fee could be up to ${formatChainAmount(chain, req.fee)}, more than the payment itself. Nothing was sent.` };
+      } else if (req.forceApproval) {
+        verdict = { kind: "needs_approval", reasonForOperator: req.forceApproval };
       } else if (req.initiatedBy === "owner" || !req.countsTowardLimits) {
+        // Owner sends, sweeps and reduce-only orders: no spending limit applies (an exit is never blocked).
         verdict = { kind: "allow" };
+      } else if (req.initiatedBy === "routine") {
+        // The trading routine's own trades: the wallet's hard caps, no agent limits, no approval card.
+        const spent = await spentSoFar(tx as unknown as Db, wallet, null, now);
+        verdict = evaluateRoutineTrade({
+          amount: req.amount,
+          perTrade: BigInt(wallet.perTransactionLimit),
+          daily: BigInt(wallet.dailyLimit),
+          total: BigInt(wallet.totalLimit),
+          spentToday: spent.walletToday,
+          spentTotal: spent.walletTotal,
+          formatAmount: (v) => formatChainAmount(chain, v),
+        });
       } else {
         const spent = await spentSoFar(tx as unknown as Db, wallet, req.agentId!, now);
         const agentLimits = await getAgentLimits(wallet.companyId, req.agentId!);
@@ -1156,7 +1336,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     await writeLedger({ companyId: wallet.companyId, walletId: wallet.id, eventType: "wallet_tx_requested", tx: row, detail: { initiatedBy: req.initiatedBy } });
 
     if (verdict.kind === "needs_approval") {
-      const agentName = req.agentId ? (await requireAgent(wallet.companyId, req.agentId)).name : "Someone";
+      const agentName = req.agentId ? (await requireAgent(wallet.companyId, req.agentId)).name : req.initiatedBy === "routine" ? "The trading routine" : "Someone";
       const approvalId = await fileApprovalCard(wallet, row, agentName, verdict.reasonForOperator, req.destinationLabel);
       const [withCard] = await db.update(cryptoWalletTransactions).set({ approvalId, updatedAt: nowOf() }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
       await writeLedger({ companyId: wallet.companyId, walletId: wallet.id, eventType: "wallet_tx_approval_requested", tx: withCard!, detail: { approvalId, reason: verdict.reasonForOperator } });
@@ -1175,7 +1355,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const chain = wallet.chain as CryptoChain;
     const ceiling = BigInt(CRYPTO_NETWORK_FEE_CEILING[chain]);
     try {
-      const ctx = await chainContext(wallet.companyId, chain, wallet.network as CryptoNetwork);
+      const ctx = await chainContext(wallet.companyId, chain, wallet);
       const estimate = await adapterFor(chain).estimateFee(ctx, { from: wallet.address, to, amount });
       if (estimate < 0n || estimate > ceiling) return { refusal: "The network fee is above Paperclip's ceiling right now. Nothing was sent; try again later." };
       const padded = (estimate * FEE_BUDGET_NUMERATOR + FEE_BUDGET_DENOMINATOR - 1n) / FEE_BUDGET_DENOMINATOR;
@@ -1260,10 +1440,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     });
   }
 
-  async function agentHyperliquidOrder(companyId: string, agentId: string, walletId: string, input: HyperliquidOrderRequest): Promise<CryptoWalletTransactionSummary> {
-    const wallet = await requireAgentWallet(companyId, agentId, walletId);
-    if (wallet.chain !== "hyperliquid") throw unprocessable("Trading orders are only possible on a Hyperliquid wallet.");
-    if (wallet.network === "mainnet") assertCryptoRealMoneyAllowed();
+  /** Sizes an order and runs every pre-check (switches, price sanity, leverage cap). Shared by the agent path and the trading routine. */
+  async function prepareHyperliquidOrder(wallet: CryptoWalletRow, input: HyperliquidOrderRequest) {
+    const companyId = wallet.companyId;
     const size = Number(input.size);
     const price = Number(input.limitPrice);
     if (!(size > 0) || !(price > 0)) throw unprocessable("Size and price must be more than zero.");
@@ -1272,7 +1451,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
     let preBlockReason = await assertSwitchesAllow(wallet);
     if (!preBlockReason) {
-      const ctx = await chainContext(companyId, "hyperliquid", wallet.network as CryptoNetwork);
+      const ctx = await chainContext(companyId, "hyperliquid", wallet);
       try {
         const [state, mid] = await Promise.all([
           adapters.hyperliquid.accountState(ctx, wallet.address),
@@ -1296,6 +1475,14 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         preBlockReason = chainFailure(err);
       }
     }
+    return { amount, notionalUsd, preBlockReason };
+  }
+
+  async function agentHyperliquidOrder(companyId: string, agentId: string, walletId: string, input: HyperliquidOrderRequest): Promise<CryptoWalletTransactionSummary> {
+    const wallet = await requireAgentWallet(companyId, agentId, walletId);
+    if (wallet.chain !== "hyperliquid") throw unprocessable("Trading orders are only possible on a Hyperliquid wallet.");
+    if (wallet.network === "mainnet") assertCryptoRealMoneyAllowed();
+    const { amount, notionalUsd, preBlockReason } = await prepareHyperliquidOrder(wallet, input);
 
     return processSpend({
       wallet,
@@ -1322,7 +1509,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const wallet = await requireAgentWallet(companyId, agentId, walletId);
     const chain = wallet.chain as CryptoChain;
     const price = await priceSource.usdPrice(chain).catch(() => null);
-    const ctx = await chainContext(companyId, chain, wallet.network as CryptoNetwork);
+    const ctx = await chainContext(companyId, chain, wallet);
     const out: Record<string, unknown> = { walletId, chain, network: wallet.network, assetPriceUsd: price };
     if (chain === "hyperliquid" && input.coin) {
       out.coin = input.coin;
@@ -1395,6 +1582,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   async function ownerSend(companyId: string, walletId: string, input: CryptoSendRequest, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletTransactionSummary> {
     const wallet = await requireWalletRow(companyId, walletId);
     assertOwnerForRealMoney(wallet, actor, "send funds");
+    assertOwnerForRoutineWallet(wallet, actor, "send funds");
     const prepared = await prepareSend(wallet, input);
     return processSpend({
       wallet,
@@ -1413,6 +1601,614 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       preBlockReason: prepared.preBlockReason,
       actor: { actorType: "user", actorId: actor.userId },
     });
+  }
+
+  // ─── Trading-routine wallets (DUR-5026) ────────────────────────────────
+  //
+  // Wallets held by Paperclip's trading code, not by any agent. Everything
+  // here runs from the server's own code: there is no agent tool for any of
+  // it, and the one Trader agent can only list these wallets and ask for a
+  // top-up. Test networks only: the database refuses anything else (CHECK
+  // crypto_wallets_routine_shape_check) and every function asserts it again.
+
+  const alertSink: TradingAlertSink = deps.alerts ?? tradingAlertsService(db);
+  const ROUTINE_ACTOR: CryptoActor = { actorType: "system", actorId: "trading-routine" };
+  /** After a sweep fails or is turned down, wait before trying again, so a refusal is not repeated every tick. */
+  const SWEEP_RETRY_AFTER_FAILURE_MS = 60 * 60_000;
+  const SWEEP_RETRY_AFTER_REFUSAL_MS = 24 * 60 * 60_000;
+  const TOP_UP_REASK_MS = 24 * 60 * 60_000;
+  const RECENT_RESULTS_WINDOW_MS = 7 * 24 * 60 * 60_000;
+  const SWEEP_ADDRESS_LABEL = "Cold wallet";
+  const tradingWatchIntervalMs = deps.tradingWatchIntervalMs ?? 5 * 60_000;
+
+  /** An alert must never stop the money logic around it: a failed write is logged (without text) and dropped. */
+  async function queueAlert(wallet: Pick<CryptoWalletRow, "companyId" | "id">, kind: TradingAlertKind, text: string) {
+    try {
+      await alertSink.write({ companyId: wallet.companyId, walletId: wallet.id, kind, text });
+    } catch (err) {
+      logger.error({ err: err instanceof Error ? err.name : "unknown", walletId: wallet.id, kind }, "trading wallet: could not queue an alert");
+    }
+  }
+
+  function assertRoutineWallet(wallet: CryptoWalletRow) {
+    if (wallet.holder !== "trading_routine") throw unprocessable("This is not a trading wallet.");
+    // Belt and braces next to the database CHECK: test networks only.
+    if (wallet.network !== "testnet") throw unprocessable("Trading wallets work on test networks only.");
+  }
+
+  async function requireRoutineWallet(companyId: string, walletId: string): Promise<CryptoWalletRow> {
+    const wallet = await requireWalletRow(companyId, walletId);
+    assertRoutineWallet(wallet);
+    return wallet;
+  }
+
+  function limitColumns(chain: CryptoChain, input: TradingWalletLimitInput) {
+    let amounts: ReturnType<typeof parseTradingLimits>;
+    try {
+      amounts = parseTradingLimits(chain, input);
+    } catch (err) {
+      if (err instanceof TradingLimitsError) throw unprocessable(err.message);
+      throw err;
+    }
+    const text = (value: bigint | null) => (value === null ? null : value.toString());
+    return {
+      perTransactionLimit: amounts.perTrade.toString(),
+      dailyLimit: amounts.daily.toString(),
+      totalLimit: amounts.total.toString(),
+      approvalAbove: null,
+      maxBalance: amounts.maxBalance.toString(),
+      dailyLossStop: amounts.dailyLossStop.toString(),
+      sweepThreshold: text(amounts.sweepThreshold),
+      topUpFloor: text(amounts.topUpFloor),
+      topUpTarget: text(amounts.topUpTarget),
+    };
+  }
+
+  /**
+   * Makes a wallet for the trading routine: the server generates the key,
+   * which goes straight into the encrypted secrets store. There is no import
+   * (the key is never typed or pasted anywhere), no agent and no main network.
+   */
+  async function createTradingWallet(companyId: string, input: CreateTradingWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
+    if (!actor.isOwner) throw forbidden("Only the company's owner can create a trading wallet.");
+    const chain = input.chain;
+    const network: CryptoNetwork = "testnet";
+    const limits = limitColumns(chain, input.limits ?? DEFAULT_TRADING_WALLET_LIMITS[chain]);
+    const adapter = adapterFor(chain);
+    // Same rule as an agent's test wallet: the test network is fixed at creation
+    // (the columns are required by CHECK for Bitcoin and Ethereum test wallets).
+    const networkVariant: BitcoinNetworkVariant | null = chain === "bitcoin" ? DEFAULT_BITCOIN_NETWORK_VARIANT : null;
+    const evmChainId: number | null = chain === "ethereum" ? EVM_CHAIN_IDS.testnet : null;
+    if (evmChainId !== null && !isTestEvmChainId(evmChainId)) {
+      throw unprocessable("That Ethereum network is not an allowed test network.");
+    }
+
+    let material: { privateKey: string; address: string };
+    try {
+      material = await adapter.generateKey(network);
+    } catch (err) {
+      throw unprocessable(err instanceof CryptoChainError ? err.message : "Could not make a key.");
+    }
+    const info = CRYPTO_CHAIN_INFO[chain];
+    const shortAddress = `${material.address.slice(0, 8)}…${material.address.slice(-6)}`;
+    const suffix = Math.random().toString(36).slice(2, 8);
+    const secret = await secrets.createManagedLocalSecret(
+      companyId,
+      {
+        name: `${info.label} trading wallet key: ${input.label} (${shortAddress}, ${suffix})`,
+        key: `crypto_wallet_${chain}_${network}_${suffix}`,
+        value: material.privateKey,
+        description: `The secret key of the trading routine's ${info.label} wallet ${material.address} (${cryptoNetworkLabel(chain, network, { networkVariant, evmChainId })}). Only the server uses it, to sign trades and sweeps. It cannot be shown or copied out, and no agent can use it.`,
+        kind: "crypto_wallet_key",
+      },
+      { userId: actor.userId },
+    );
+    material = { privateKey: "", address: material.address };
+
+    const now = nowOf();
+    const [row] = await db
+      .insert(cryptoWallets)
+      .values({
+        companyId,
+        agentId: null,
+        holder: "trading_routine",
+        chain,
+        network,
+        networkVariant,
+        evmChainId,
+        address: material.address,
+        secretId: secret.id,
+        keyOrigin: "generated",
+        label: input.label,
+        status: "active",
+        ...limits,
+        maxLeverage: HYPERLIQUID_DEFAULT_MAX_LEVERAGE,
+        createdByUserId: actor.userId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    await writeLedger({
+      companyId,
+      walletId: row!.id,
+      eventType: "wallet_created",
+      detail: { chain, network, networkVariant, evmChainId, address: row!.address, keyOrigin: "generated", holder: "trading_routine", byUserId: actor.userId },
+    });
+    return toWalletSummary(row!);
+  }
+
+  /** The owner changes the hard limits and flows of a trading wallet. Owner only: raising a limit widens what can be lost. */
+  async function updateTradingLimits(companyId: string, walletId: string, limits: TradingWalletLimitInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
+    if (!actor.isOwner) throw forbidden("Only the company's owner can change a trading wallet's limits.");
+    const wallet = await requireRoutineWallet(companyId, walletId);
+    const columns = limitColumns(wallet.chain as CryptoChain, limits);
+    const [updated] = await db
+      .update(cryptoWallets)
+      .set({ ...columns, updatedAt: nowOf() })
+      .where(and(eq(cryptoWallets.id, walletId), eq(cryptoWallets.companyId, companyId)))
+      .returning();
+    await writeLedger({ companyId, walletId, eventType: "wallet_settings_changed", detail: { action: "trading_limits", byUserId: actor.userId, limits } });
+    return toWalletSummary(updated!);
+  }
+
+  async function fileCard(wallet: CryptoWalletRow, requestedByAgentId: string | null, payload: Record<string, unknown>): Promise<string> {
+    const [approval] = await db
+      .insert(approvals)
+      .values({ companyId: wallet.companyId, type: "request_board_approval", requestedByAgentId, requestedByUserId: null, status: "pending", payload })
+      .returning({ id: approvals.id });
+    return approval!.id;
+  }
+
+  /**
+   * The owner proposes the cold-wallet address profit is swept to. Nothing
+   * changes until the owner approves the card this files; the address that
+   * is in force stays in force meanwhile. A newer proposal replaces an older
+   * one that is still waiting.
+   */
+  async function proposeSweepAddress(companyId: string, walletId: string, rawAddress: string, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
+    if (!actor.isOwner) throw forbidden("Only the company's owner can set the cold-wallet address.");
+    const wallet = await requireRoutineWallet(companyId, walletId);
+    const chain = wallet.chain as CryptoChain;
+    let normalized: string | null;
+    try {
+      normalized = await adapterFor(chain).validateAddress(rawAddress, wallet.network as CryptoNetwork);
+    } catch (err) {
+      throw unprocessable(chainFailure(err));
+    }
+    if (!normalized) {
+      throw unprocessable(`That is not a valid ${CRYPTO_CHAIN_INFO[chain].label} address for the test network. Check it letter by letter.`);
+    }
+    if (normalized === wallet.address) throw unprocessable("A wallet cannot sweep to itself.");
+    if (normalized === wallet.sweepAddress && !wallet.pendingSweepAddress) throw conflict("That is already the cold-wallet address.");
+
+    if (wallet.pendingSweepApprovalId) {
+      await db
+        .update(approvals)
+        .set({ status: "cancelled", updatedAt: nowOf() })
+        .where(and(eq(approvals.id, wallet.pendingSweepApprovalId), eq(approvals.companyId, companyId), eq(approvals.status, "pending")));
+    }
+    const label = wallet.label;
+    const change = wallet.sweepAddress ? `change the cold-wallet address from ${wallet.sweepAddress} to ${normalized}` : `set ${normalized} as the cold-wallet address`;
+    const summary = `Trading wallet "${label}" (${cryptoNetworkLabel(chain, "testnet")}): ${change}. Profit above the sweep amount is sent only to this address, and only after you approve. Check it letter by letter: coins sent to a wrong address cannot be recovered.`;
+    const approvalId = await fileCard(wallet, null, {
+      kind: "crypto_sweep_address",
+      walletId,
+      chain,
+      network: wallet.network,
+      oldAddress: wallet.sweepAddress,
+      newAddress: normalized,
+      title: wallet.sweepAddress ? "Test coins: change the cold-wallet address" : "Test coins: set the cold-wallet address",
+      summary,
+      plainSummary: summary,
+    });
+    const [updated] = await db
+      .update(cryptoWallets)
+      .set({ pendingSweepAddress: normalized, pendingSweepApprovalId: approvalId, updatedAt: nowOf() })
+      .where(and(eq(cryptoWallets.id, walletId), eq(cryptoWallets.companyId, companyId)))
+      .returning();
+    await writeLedger({ companyId, walletId, eventType: "wallet_settings_changed", detail: { action: "sweep_address_proposed", address: normalized, approvalId, byUserId: actor.userId } });
+    await queueAlert(updated!, "sweep_address_requested", `Waiting for you: approve the cold-wallet address for the trading wallet "${label}" on its approval card. Profit is not swept until you do.`);
+    return toWalletSummary(updated!);
+  }
+
+  /** Reads the sweep-address card and applies the owner's answer. The card's own address must still be the pending one. */
+  async function resolveSweepAddressCard(wallet: CryptoWalletRow, now: Date): Promise<void> {
+    if (!wallet.pendingSweepApprovalId) return;
+    const [approval] = await db.select().from(approvals).where(and(eq(approvals.id, wallet.pendingSweepApprovalId), eq(approvals.companyId, wallet.companyId)));
+    if (approval && (approval.status === "pending" || approval.status === "revision_requested")) return;
+    const cardAddress = (approval?.payload as Record<string, unknown> | undefined)?.newAddress;
+    const approved = approval?.status === "approved" && cardAddress === wallet.pendingSweepAddress && wallet.pendingSweepAddress !== null;
+    if (!approved) {
+      await db
+        .update(cryptoWallets)
+        .set({ pendingSweepAddress: null, pendingSweepApprovalId: null, updatedAt: now })
+        .where(and(eq(cryptoWallets.id, wallet.id), eq(cryptoWallets.pendingSweepApprovalId, wallet.pendingSweepApprovalId)));
+      await writeLedger({ companyId: wallet.companyId, walletId: wallet.id, eventType: "wallet_settings_changed", detail: { action: "sweep_address_not_approved", approvalStatus: approval?.status ?? "missing" } });
+      return;
+    }
+    const newAddress = wallet.pendingSweepAddress!;
+    // The destination must be on the allow-list for the send path to take it; the old cold wallet leaves the list.
+    await db
+      .insert(cryptoWalletDestinations)
+      .values({ companyId: wallet.companyId, walletId: wallet.id, address: newAddress, label: SWEEP_ADDRESS_LABEL, createdByUserId: approval!.decidedByUserId ?? null })
+      .onConflictDoNothing();
+    if (wallet.sweepAddress && wallet.sweepAddress !== newAddress) {
+      await db
+        .delete(cryptoWalletDestinations)
+        .where(and(eq(cryptoWalletDestinations.walletId, wallet.id), eq(cryptoWalletDestinations.address, wallet.sweepAddress), eq(cryptoWalletDestinations.label, SWEEP_ADDRESS_LABEL)));
+    }
+    await db
+      .update(cryptoWallets)
+      .set({ sweepAddress: newAddress, sweepAddressApprovedAt: now, pendingSweepAddress: null, pendingSweepApprovalId: null, updatedAt: now })
+      .where(and(eq(cryptoWallets.id, wallet.id), eq(cryptoWallets.pendingSweepApprovalId, wallet.pendingSweepApprovalId!)));
+    await writeLedger({
+      companyId: wallet.companyId,
+      walletId: wallet.id,
+      eventType: "wallet_settings_changed",
+      detail: { action: "sweep_address_approved", address: newAddress, previous: wallet.sweepAddress, approvalId: approval!.id, byUserId: approval!.decidedByUserId ?? null },
+    });
+  }
+
+  /** Pauses a trading wallet at once (a hard stop) and queues the Telegram alert. Only the active -> frozen change alerts. */
+  async function pauseTradingWallet(wallet: CryptoWalletRow, code: string, reason: string, now: Date): Promise<boolean> {
+    const [paused] = await db
+      .update(cryptoWallets)
+      .set({ status: "frozen", frozenReason: reason, frozenAt: now, updatedAt: now })
+      .where(and(eq(cryptoWallets.id, wallet.id), eq(cryptoWallets.status, "active")))
+      .returning();
+    if (!paused) return false;
+    await writeLedger({
+      companyId: wallet.companyId,
+      walletId: wallet.id,
+      eventType: "wallet_kill_switch",
+      detail: { scope: "wallet", action: "freeze", reason: code, by: { actorType: "system", actorId: "trading-routine" } },
+    });
+    logger.warn({ walletId: wallet.id, code }, "trading wallet paused by a hard stop");
+    await queueAlert(wallet, "wallet_paused", `Safety stop: the trading wallet "${wallet.label}" (${CRYPTO_CHAIN_INFO[wallet.chain as CryptoChain].label}, test network) was paused. ${reason} Nothing more will be traded or swept until the owner starts it again.`);
+    return true;
+  }
+
+  async function sentTotals(walletId: string, dayStart: Date) {
+    const [row] = await db
+      .select({
+        confirmedToday: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.status} = 'confirmed' and coalesce(${cryptoWalletTransactions.submittedAt}, ${cryptoWalletTransactions.createdAt}) >= ${dayStart.toISOString()}::timestamptz then ${cryptoWalletTransactions.amount} else 0 end), 0)::text`,
+        unconfirmed: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.status} in ('approved', 'submitted') then ${cryptoWalletTransactions.amount} else 0 end), 0)::text`,
+      })
+      .from(cryptoWalletTransactions)
+      .where(and(eq(cryptoWalletTransactions.walletId, walletId), eq(cryptoWalletTransactions.kind, "send")));
+    return {
+      confirmedToday: BigInt(String(row?.confirmedToday ?? "0").split(".")[0]!),
+      unconfirmed: BigInt(String(row?.unconfirmed ?? "0").split(".")[0]!),
+    };
+  }
+
+  interface WatchResult {
+    wallet: CryptoWalletRow;
+    balance: bigint;
+    /** True when the wallet is not running (already paused, or just paused by this look). */
+    paused: boolean;
+    /** The balance less whatever the wallet itself already sent that the network has not confirmed yet. */
+    effectiveBalance: bigint;
+    /** Hyperliquid only: what the exchange lets the wallet withdraw right now. */
+    withdrawable: bigint | null;
+    /** The reading this look was based on. */
+    fresh: CryptoWalletBalance;
+  }
+
+  /**
+   * One look at a trading wallet: reads the balance from the network, then
+   * applies the two balance-based hard stops (daily loss, maximum balance).
+   * A breach pauses the wallet and queues the alert. A balance that cannot be
+   * read throws, and the caller must treat that as "do not trade".
+   */
+  async function watchTradingWallet(wallet: CryptoWalletRow, now: Date): Promise<WatchResult> {
+    assertRoutineWallet(wallet);
+    const previousBalance = bigOrNull(wallet.lastBalance);
+    // readBalance, not refreshBalance: the latter comes back here. It freezes the wallet and queues the alert itself when coins left that Paperclip did not send.
+    const fresh = await readBalance(wallet.companyId, wallet.id);
+    const balance = BigInt(fresh.balance);
+    const row = await requireWalletRow(wallet.companyId, wallet.id);
+    const withdrawable = fresh.withdrawable === null || fresh.withdrawable === undefined ? null : BigInt(fresh.withdrawable);
+    if (row.status !== "active") return { wallet: row, balance, paused: true, effectiveBalance: balance, withdrawable, fresh };
+
+    const totals = await sentTotals(row.id, utcDayStart(now));
+    const today = utcDayKey(now);
+    const loss = evaluateDailyLoss({
+      balance,
+      outflowsToday: totals.confirmedToday,
+      today,
+      lossDay: row.lossDay,
+      lossDayPeak: bigOrNull(row.lossDayPeak),
+      previousBalance,
+    });
+    await db.update(cryptoWallets).set({ lossDay: today, lossDayPeak: loss.peak.toString() }).where(eq(cryptoWallets.id, row.id));
+    const effectiveBalance = balance > totals.unconfirmed ? balance - totals.unconfirmed : 0n;
+    const breach = evaluateBalanceBreach({
+      chain: row.chain as CryptoChain,
+      effectiveBalance,
+      loss: loss.loss,
+      maxBalance: BigInt(row.maxBalance!),
+      dailyLossStop: BigInt(row.dailyLossStop!),
+    });
+    if (breach.kind !== "ok") {
+      await pauseTradingWallet(row, breach.kind, breach.reason, now);
+      return { wallet: await requireWalletRow(row.companyId, row.id), balance, paused: true, effectiveBalance, withdrawable, fresh };
+    }
+    return { wallet: row, balance, paused: false, effectiveBalance, withdrawable, fresh };
+  }
+
+  /**
+   * A trade placed by Paperclip's trading code on a code-held Hyperliquid test
+   * wallet. No route calls this: only server code does. The hard stops are
+   * checked against a fresh balance first; the per-trade, per-day and total
+   * caps are checked under the wallet's lock; a reduce-only order (an exit)
+   * is never stopped by a spending cap. No approval card is involved.
+   */
+  async function routineHyperliquidOrder(companyId: string, walletId: string, input: HyperliquidOrderRequest): Promise<CryptoWalletTransactionSummary> {
+    const wallet = await requireRoutineWallet(companyId, walletId);
+    if (wallet.chain !== "hyperliquid") throw unprocessable("Trading orders are only possible on a Hyperliquid wallet.");
+    let latest = wallet;
+    let watchRefusal: string | null = null;
+    try {
+      latest = (await watchTradingWallet(wallet, nowOf())).wallet;
+    } catch (err) {
+      watchRefusal = `The wallet's balance could not be checked, so the hard limits could not be applied and nothing was traded. ${chainFailure(err)}`;
+    }
+    const prepared = await prepareHyperliquidOrder(latest, input);
+    return processSpend({
+      wallet: latest,
+      agentId: null,
+      initiatedBy: "routine",
+      initiatedByUserId: null,
+      kind: "order",
+      destination: null,
+      destinationLabel: null,
+      amount: prepared.amount,
+      fee: 0n,
+      amountUsd: prepared.notionalUsd,
+      countsTowardLimits: !input.reduceOnly,
+      orderDetail: { coin: input.coin, side: input.side, size: input.size, limitPrice: input.limitPrice, reduceOnly: input.reduceOnly, maxLeverage: latest.maxLeverage },
+      purpose: input.purpose,
+      preBlockReason: (input.reduceOnly ? null : watchRefusal) ?? prepared.preBlockReason,
+      actor: ROUTINE_ACTOR,
+      routineAction: "trade",
+    });
+  }
+
+  async function alertSweepOutcome(tx: CryptoWalletTxRow) {
+    const [wallet] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, tx.walletId));
+    if (!wallet) return;
+    const chain = wallet.chain as CryptoChain;
+    if (tx.status === "confirmed") {
+      await queueAlert(wallet, "sweep_sent", `Profit swept: ${formatChainAmount(chain, tx.amount)} from the trading wallet "${wallet.label}" went to your cold wallet.`);
+    } else {
+      await queueAlert(wallet, "sweep_sent", `A profit sweep from the trading wallet "${wallet.label}" did not go through: ${tx.blockReason ?? tx.error ?? "stopped by a safety rule"}. Nothing left the wallet.`);
+    }
+  }
+
+  /** Sends the surplus above the sweep amount to the approved cold wallet. The first sweep to an address waits for the owner's card. */
+  async function maybeSweep(wallet: CryptoWalletRow, effectiveBalance: bigint, withdrawable: bigint | null, now: Date): Promise<void> {
+    if (wallet.sweepThreshold === null || wallet.sweepAddress === null || wallet.sweepAddressApprovedAt === null) return;
+    const chain = wallet.chain as CryptoChain;
+    const dust = BigInt(CRYPTO_DUST[chain]);
+    let surplus = sweepAmount({ effectiveBalance, threshold: BigInt(wallet.sweepThreshold), dust });
+    if (surplus === null) return;
+    // On Hyperliquid, margin for open positions cannot be withdrawn: never ask for more than the exchange will release (less its fee).
+    if (chain === "hyperliquid" && withdrawable !== null) {
+      const fee = BigInt(CRYPTO_NETWORK_FEE_CEILING.hyperliquid);
+      const releasable = withdrawable > fee ? withdrawable - fee : 0n;
+      if (surplus > releasable) surplus = releasable;
+      if (surplus <= dust) return;
+    }
+
+    const recent = await db
+      .select()
+      .from(cryptoWalletTransactions)
+      .where(and(eq(cryptoWalletTransactions.walletId, wallet.id), eq(cryptoWalletTransactions.routineAction, "sweep")))
+      .orderBy(desc(cryptoWalletTransactions.createdAt))
+      .limit(20);
+    if (recent.some((tx) => ["pending_approval", "approved", "submitted"].includes(tx.status))) return;
+    const latest = recent[0];
+    if (latest) {
+      const age = now.getTime() - latest.createdAt.getTime();
+      if ((latest.status === "rejected" || latest.status === "expired_approval") && age < SWEEP_RETRY_AFTER_REFUSAL_MS) return;
+      if ((latest.status === "failed" || latest.status === "blocked") && age < SWEEP_RETRY_AFTER_FAILURE_MS) return;
+    }
+    const firstToThisAddress = !recent.some((tx) => tx.destination === wallet.sweepAddress && (tx.status === "submitted" || tx.status === "confirmed"));
+
+    const prepared = await prepareSend(wallet, {
+      to: wallet.sweepAddress,
+      amount: formatCryptoAmount(surplus, CRYPTO_CHAIN_INFO[chain].decimals),
+      purpose: "Profit sweep to the cold wallet",
+    });
+    const result = await processSpend({
+      wallet,
+      agentId: null,
+      initiatedBy: "routine",
+      initiatedByUserId: null,
+      kind: "send",
+      destination: prepared.destination,
+      destinationLabel: prepared.destinationLabel,
+      amount: prepared.amount,
+      fee: prepared.fee,
+      amountUsd: prepared.amountUsd,
+      countsTowardLimits: false,
+      orderDetail: null,
+      purpose: "Profit sweep to the cold wallet",
+      preBlockReason: prepared.preBlockReason,
+      actor: ROUTINE_ACTOR,
+      routineAction: "sweep",
+      ...(firstToThisAddress ? { forceApproval: "This is the first sweep to this cold-wallet address, so you decide first." } : {}),
+    });
+    if (result.status === "pending_approval") {
+      await queueAlert(wallet, "sweep_waiting_approval", `Waiting for you: the trading wallet "${wallet.label}" wants to sweep ${formatChainAmount(chain, result.amount)} of profit to your cold wallet. Approve or turn it down on the approval card.`);
+    }
+  }
+
+  /** Plain sentences about how the wallet has done lately, built from the server's own records. */
+  async function recentResultsFor(wallet: CryptoWalletRow, balance: bigint, now: Date): Promise<string[]> {
+    const chain = wallet.chain as CryptoChain;
+    const since = new Date(now.getTime() - RECENT_RESULTS_WINDOW_MS);
+    const rows = await db
+      .select({ status: cryptoWalletTransactions.status, kind: cryptoWalletTransactions.kind, routineAction: cryptoWalletTransactions.routineAction })
+      .from(cryptoWalletTransactions)
+      .where(and(eq(cryptoWalletTransactions.walletId, wallet.id), gte(cryptoWalletTransactions.createdAt, since)));
+    const trades = rows.filter((r) => r.routineAction === "trade");
+    const placed = trades.filter((r) => ["submitted", "confirmed"].includes(r.status)).length;
+    const refused = trades.filter((r) => r.status === "blocked").length;
+    const results = [`Last 7 days: ${placed} trade${placed === 1 ? "" : "s"} placed, ${refused} refused by a limit.`];
+    const [first] = await db
+      .select({ detail: tradingLedgerEntries.detail })
+      .from(tradingLedgerEntries)
+      .where(and(eq(tradingLedgerEntries.walletId, wallet.id), eq(tradingLedgerEntries.eventType, "wallet_reconciliation"), gte(tradingLedgerEntries.createdAt, since)))
+      .orderBy(asc(tradingLedgerEntries.createdAt))
+      .limit(1);
+    const earlier = (first?.detail as Record<string, unknown> | null)?.balance;
+    if (typeof earlier === "string" && /^\d+$/.test(earlier)) {
+      results.push(`Balance a week ago: ${formatChainAmount(chain, earlier)}; now: ${formatChainAmount(chain, balance)}.`);
+    }
+    const [lastStop] = await db
+      .select({ createdAt: tradingLedgerEntries.createdAt })
+      .from(tradingLedgerEntries)
+      .where(and(eq(tradingLedgerEntries.walletId, wallet.id), eq(tradingLedgerEntries.eventType, "wallet_kill_switch"), gte(tradingLedgerEntries.createdAt, since)))
+      .orderBy(desc(tradingLedgerEntries.createdAt))
+      .limit(1);
+    if (lastStop) results.push(`The wallet was paused by a safety stop on ${lastStop.createdAt.toISOString().slice(0, 10)}.`);
+    return results;
+  }
+
+  /**
+   * Files the "please top up" card: how much, why, and how the wallet has
+   * done lately. One card is open per wallet at a time; after an answer,
+   * the next request waits a day. The owner sends the funds himself; this
+   * card moves no money. Returns the open card when one already exists.
+   */
+  async function fileTopUpCard(
+    wallet: CryptoWalletRow,
+    balance: bigint,
+    reason: string,
+    requestedByAgentId: string | null,
+    now: Date,
+  ): Promise<{ approvalId: string; created: boolean } | null> {
+    if (wallet.topUpFloor === null || wallet.topUpTarget === null) return null;
+    const chain = wallet.chain as CryptoChain;
+    const needed = topUpNeeded({ balance, floor: BigInt(wallet.topUpFloor), target: BigInt(wallet.topUpTarget) });
+    if (needed === null) return null;
+    if (wallet.topUpApprovalId) {
+      const [open] = await db.select().from(approvals).where(and(eq(approvals.id, wallet.topUpApprovalId), eq(approvals.companyId, wallet.companyId)));
+      if (open && (open.status === "pending" || open.status === "revision_requested")) return { approvalId: open.id, created: false };
+      const answeredAt = open?.decidedAt ?? open?.updatedAt;
+      if (answeredAt && now.getTime() - answeredAt.getTime() < TOP_UP_REASK_MS) return null;
+    }
+    const recent = await recentResultsFor(wallet, balance, now);
+    const asset = CRYPTO_CHAIN_INFO[chain].asset;
+    const amountText = formatChainAmount(chain, needed);
+    // The Trader's words are quoted and labelled as theirs: the address and amounts above come from the server, not from the Trader.
+    const why = requestedByAgentId ? `The Trader says (its own words, not checked): "${reason}"` : `Why: ${reason}`;
+    const summary = `The trading wallet "${wallet.label}" (${cryptoNetworkLabel(chain, "testnet")}) holds ${formatChainAmount(chain, balance)}, below its floor of ${formatChainAmount(chain, wallet.topUpFloor)}. Please send about ${amountText} to ${wallet.address} to bring it back to ${formatChainAmount(chain, wallet.topUpTarget)}. ${recent.join(" ")} ${why} You send the funds yourself; nothing is taken from anywhere. These are test coins with no value.`;
+    const approvalId = await fileCard(wallet, requestedByAgentId, {
+      kind: "crypto_topup_request",
+      walletId: wallet.id,
+      chain,
+      network: wallet.network,
+      address: wallet.address,
+      asset,
+      suggestedAmount: amountText,
+      balance: formatChainAmount(chain, balance),
+      floor: formatChainAmount(chain, wallet.topUpFloor),
+      target: formatChainAmount(chain, wallet.topUpTarget),
+      reason,
+      recentResults: recent,
+      title: `Test coins: the trading wallet "${wallet.label}" needs a top-up`,
+      summary,
+      plainSummary: summary,
+    });
+    await db.update(cryptoWallets).set({ topUpApprovalId: approvalId, updatedAt: now }).where(eq(cryptoWallets.id, wallet.id));
+    await writeLedger({ companyId: wallet.companyId, walletId: wallet.id, eventType: "wallet_settings_changed", detail: { action: "top_up_requested", approvalId, suggestedAmount: amountText, byAgentId: requestedByAgentId } });
+    await queueAlert(wallet, "top_up_requested", `Top-up needed: the trading wallet "${wallet.label}" holds ${formatChainAmount(chain, balance)}. Please send about ${amountText} (details on the approval card).`);
+    return { approvalId, created: true };
+  }
+
+  async function requireTraderAgent(companyId: string, agentId: string) {
+    const settings = await getSettings(companyId);
+    if (!settings.traderAgentId || settings.traderAgentId !== agentId) {
+      throw forbidden("Only the company's Trader agent can use the trading wallet tools.");
+    }
+  }
+
+  /** The Trader's read-only view of the code-held wallets: no key, no secret id, nothing it can spend. */
+  async function traderListTradingWallets(companyId: string, agentId: string): Promise<CryptoWalletSummary[]> {
+    await requireTraderAgent(companyId, agentId);
+    const rows = await db
+      .select()
+      .from(cryptoWallets)
+      .where(and(eq(cryptoWallets.companyId, companyId), eq(cryptoWallets.holder, "trading_routine")))
+      .orderBy(asc(cryptoWallets.createdAt));
+    return rows.filter((r) => r.status !== "archived").map(toWalletSummary);
+  }
+
+  /** One top-up request per wallet per watch interval: the Trader cannot use this endpoint to make the network read the wallet over and over. */
+  const lastTopUpRequestAt = new Map<string, number>();
+
+  /**
+   * The Trader asks the owner for funds. Only possible while the balance is
+   * below the floor. The floor is checked against the stored reading first,
+   * so a request made while the wallet is above it never touches the network;
+   * otherwise the wallet gets a proper watch (balance read plus the hard
+   * stops), never a bare refresh -- a bare refresh would stamp lastBalanceAt
+   * and make the scheduler skip the stops for the next few minutes (DUR-5087 N2).
+   */
+  async function traderRequestTopUp(companyId: string, agentId: string, walletId: string, reason: string): Promise<{ approvalId: string; created: boolean }> {
+    await requireTraderAgent(companyId, agentId);
+    const wallet = await requireRoutineWallet(companyId, walletId);
+    if (wallet.status === "archived") throw unprocessable("This wallet is archived.");
+    if (wallet.topUpFloor === null || wallet.topUpTarget === null) throw unprocessable("This wallet has no top-up floor set, so a top-up cannot be requested.");
+    const now = nowOf();
+    const last = lastTopUpRequestAt.get(walletId);
+    if (last !== undefined && now.getTime() - last < tradingWatchIntervalMs) {
+      throw tooManyRequests("A top-up was asked for on this wallet a moment ago. Try again in a few minutes.");
+    }
+    lastTopUpRequestAt.set(walletId, now.getTime());
+    const notBelowFloor = () =>
+      unprocessable("The balance is not below the floor (or a request was answered less than a day ago), so no top-up card was filed.");
+    const stored = bigOrNull(wallet.lastBalance);
+    const floor = { floor: BigInt(wallet.topUpFloor), target: BigInt(wallet.topUpTarget) };
+    if (stored !== null && topUpNeeded({ balance: stored, ...floor }) === null) throw notBelowFloor();
+    // A reading the scheduler or a trade took within the last interval already went through the hard stops: use it.
+    const recent = wallet.lastBalanceAt !== null && stored !== null && now.getTime() - wallet.lastBalanceAt.getTime() < tradingWatchIntervalMs;
+    const watched = recent ? { wallet, balance: stored } : await watchTradingWallet(wallet, now);
+    const filed = await fileTopUpCard(watched.wallet, watched.balance, reason, agentId, now);
+    if (!filed) throw notBelowFloor();
+    return filed;
+  }
+
+  /** One pass over every trading wallet: apply the owner's card answers, the hard stops, the sweep and the top-up request. */
+  async function tradingTick(now: Date): Promise<number> {
+    const rows = await db
+      .select()
+      .from(cryptoWallets)
+      .where(and(eq(cryptoWallets.holder, "trading_routine"), inArray(cryptoWallets.status, ["active", "frozen"])))
+      // Never-looked-at wallets first, then the one looked at longest ago, so none starves behind a full batch.
+      .orderBy(sql`${cryptoWallets.lastBalanceAt} asc nulls first`)
+      .limit(TICK_BATCH);
+    let looked = 0;
+    for (const row of rows) {
+      try {
+        await resolveSweepAddressCard(row, now);
+        if (row.status !== "active") continue;
+        // The network is asked only now and then, not on every scheduler tick.
+        if (row.lastBalanceAt && now.getTime() - row.lastBalanceAt.getTime() < tradingWatchIntervalMs) continue;
+        const fresh = await requireWalletRow(row.companyId, row.id);
+        const watched = await watchTradingWallet(fresh, now);
+        looked++;
+        if (watched.paused) continue;
+        await maybeSweep(watched.wallet, watched.effectiveBalance, watched.withdrawable, now);
+        await fileTopUpCard(watched.wallet, watched.balance, "The balance fell below the floor.", null, now);
+      } catch (err) {
+        logger.error({ err: err instanceof Error ? err.name : "unknown", walletId: row.id }, "trading wallet tick: one wallet failed");
+      }
+    }
+    return looked;
   }
 
   // ─── The tick: approvals, expiry, network status ───────────────────────
@@ -1486,7 +2282,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   async function checkOnNetwork(row: CryptoWalletTxRow, now: Date): Promise<CryptoWalletTxRow> {
     const chain = row.chain as CryptoChain;
     const wallet = await requireWalletRow(row.companyId, row.walletId);
-    const ctx = await chainContext(row.companyId, chain, row.network as CryptoNetwork);
+    const ctx = await chainContext(row.companyId, chain, wallet);
     const detail = (row.chainDetail as Record<string, unknown> | null) ?? null;
     let status: TxStatusCheck;
     try {
@@ -1566,7 +2362,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return touched ?? row;
   }
 
-  async function tick(now: Date = nowOf()): Promise<{ checked: number; changed: number }> {
+  async function tick(now: Date = nowOf()): Promise<{ checked: number; changed: number; tradingWalletsChecked: number }> {
     const rows = await db
       .select()
       .from(cryptoWalletTransactions)
@@ -1588,7 +2384,10 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         logger.error({ err: err instanceof Error ? err.name : "unknown", txId: row.id }, "crypto wallet tick: one transaction failed to progress");
       }
     }
-    return { checked: rows.length, changed };
+    // Trading wallets: the payments above are settled first, so the balance
+    // the hard stops read already reflects them.
+    const tradingWalletsChecked = await tradingTick(now);
+    return { checked: rows.length, changed, tradingWalletsChecked };
   }
 
   return {
@@ -1616,6 +2415,12 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     agentHyperliquidOrder,
     agentQuote,
     agentGetTransaction,
+    createTradingWallet,
+    updateTradingLimits,
+    proposeSweepAddress,
+    routineHyperliquidOrder,
+    traderListTradingWallets,
+    traderRequestTopUp,
     tick,
   };
 }

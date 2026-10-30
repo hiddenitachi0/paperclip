@@ -7,6 +7,7 @@ import {
   EVM_MAX_PRIORITY_FEE_PER_GAS,
   formatCryptoAmount,
   isTestEvmChainId,
+  type BitcoinNetworkVariant,
   type CryptoChain,
   type CryptoNetwork,
 } from "@paperclipai/shared";
@@ -83,13 +84,20 @@ function assertHyperliquidMainnetDigestAllowed(domainName: string, primaryType: 
 
 export interface ChainContext {
   network: CryptoNetwork;
+  /**
+   * Bitcoin test wallets: the test network the wallet was created on. The
+   * network service must prove (genesis block) it is that one, not just any
+   * test network. Missing = testnet4, what every wallet from before signet is.
+   */
+  networkVariant?: BitcoinNetworkVariant;
   /** The endpoint for this chain and network (company setting or default). */
   rpcUrl: string;
   fetch: OutboundFetch;
   /**
-   * The EVM chain ID stored on the wallet, once one is stored. A test wallet
-   * with none stored is held to Sepolia. Either way the provider's chain ID
-   * must match it and be on the code allow-list (TEST_EVM_CHAIN_IDS).
+   * The EVM chain ID stored on the wallet (Ethereum test wallets always have
+   * one). It is the chain the wallet signs on, and the provider's chain ID must
+   * match it and be on the code allow-list (TEST_EVM_CHAIN_IDS). A test wallet
+   * without one is refused, never defaulted, so a default can move no wallet.
    */
   chainId?: number;
 }
@@ -373,7 +381,9 @@ const BTC_FEE_CEILING = BigInt(CRYPTO_NETWORK_FEE_CEILING.bitcoin);
 /**
  * Genesis block ids: how a bitcoin service proves which network it is on
  * (Esplora answers GET /block-height/0 with the genesis hash). A test wallet
- * accepts testnet4 and signet; testnet3 (dead) is not accepted.
+ * accepts only its own test network (testnet4 or signet), so a testnet4
+ * wallet never talks to a signet service or the other way round; testnet3
+ * (dead) is not accepted.
  */
 export const BITCOIN_GENESIS_HASHES: Record<CryptoNetwork, string[]> = {
   testnet: [
@@ -383,6 +393,16 @@ export const BITCOIN_GENESIS_HASHES: Record<CryptoNetwork, string[]> = {
   mainnet: ["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"],
 };
 
+export const BITCOIN_TEST_GENESIS_HASHES: Record<BitcoinNetworkVariant, string> = {
+  testnet4: BITCOIN_GENESIS_HASHES.testnet[0]!,
+  signet: BITCOIN_GENESIS_HASHES.testnet[1]!,
+};
+
+function acceptedBitcoinGenesis(ctx: ChainContext): string[] {
+  if (ctx.network === "mainnet") return BITCOIN_GENESIS_HASHES.mainnet;
+  return [BITCOIN_TEST_GENESIS_HASHES[ctx.networkVariant ?? "testnet4"]];
+}
+
 /** Esplora answers for "this exact transaction is already there" -- a re-send of the same bytes, not a failure. */
 const BTC_ALREADY_KNOWN = /already in block ?chain|txn-already-known|txn-already-in-mempool|already known/i;
 
@@ -391,10 +411,10 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
     const response = await ctx.fetch(joinUrl(ctx.rpcUrl, "/block-height/0"));
     if (!response.ok) throw new CryptoChainError("rpc_http", `The bitcoin network service answered with an error (HTTP ${response.status}).`);
     const genesis = (await response.text()).trim().toLowerCase();
-    if (!BITCOIN_GENESIS_HASHES[ctx.network].includes(genesis)) {
+    if (!acceptedBitcoinGenesis(ctx).includes(genesis)) {
       throw new CryptoChainError(
         "wrong_network",
-        `The bitcoin network service is not on the ${ctx.network === "mainnet" ? "main network" : "test network (testnet4 or signet)"} this wallet belongs to. Check the network address in the crypto settings.`,
+        `The bitcoin network service is not on the ${ctx.network === "mainnet" ? "main network" : `test network (${ctx.networkVariant ?? "testnet4"})`} this wallet belongs to. Check the network address in the crypto settings.`,
       );
     }
   }
@@ -631,7 +651,10 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
   /** Chain ID this wallet signs for: mainnet is fixed; a test wallet uses its stored chain ID (Sepolia until one is stored), which must be on the code allow-list. */
   function expectedChainId(ctx: ChainContext): bigint {
     if (ctx.network === "mainnet") return BigInt(EVM_CHAIN_IDS.mainnet);
-    const wanted = BigInt(ctx.chainId ?? EVM_CHAIN_IDS.testnet);
+    if (ctx.chainId === undefined) {
+      throw new CryptoChainError("wrong_network", "This wallet has no stored chain, so nothing was signed.");
+    }
+    const wanted = BigInt(ctx.chainId);
     if (!isTestEvmChainId(wanted)) {
       throw new CryptoChainError("wrong_network", "This wallet's stored chain is not an allowed test network, so nothing was signed.");
     }
