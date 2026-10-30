@@ -106,6 +106,18 @@ describe("evaluateDailyLoss", () => {
     // Further drops add to the carried loss.
     expect(evaluateDailyLoss({ balance: 90n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: deposit.peak, previousBalance: 96n }).loss).toBe(15n);
   });
+  it("keeps counting loss after a send confirms in the same interval as a rise (DUR-5116 F1)", () => {
+    const stop = 25n;
+    const look1 = evaluateDailyLoss({ balance: 100n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
+    // Sweep of 50 confirmed and the balance gained 10: adjusted 110.
+    const look2 = evaluateDailyLoss({ balance: 60n, outflowsToday: 50n, today, lossDay: today, lossDayPeak: look1.peak, previousBalance: 100n });
+    expect(look2).toMatchObject({ peak: 110n, loss: 0n });
+    const look3 = evaluateDailyLoss({ balance: 50n, outflowsToday: 50n, today, lossDay: today, lossDayPeak: look2.peak, previousBalance: 60n });
+    expect(look3.loss).toBe(10n);
+    const look4 = evaluateDailyLoss({ balance: 30n, outflowsToday: 50n, today, lossDay: today, lossDayPeak: look3.peak, previousBalance: 50n });
+    expect(look4).toMatchObject({ peak: 110n, loss: 30n });
+    expect(look4.loss >= stop).toBe(true);
+  });
   it("still lets a gain raise the bar when nothing is owed, so given-back profit counts", () => {
     const up = evaluateDailyLoss({ balance: 130n, outflowsToday: 0n, today, lossDay: today, lossDayPeak: 100n, previousBalance: 100n });
     expect(up).toMatchObject({ peak: 130n, loss: 0n });

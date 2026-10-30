@@ -160,9 +160,15 @@ export interface DailyLossState {
  * not forgotten. After the owner restarts a paused wallet (lossDayPeak null),
  * the count starts again from the balance as it is.
  *
- * previousBalance is the reading before this one; the loss at that reading
- * is estimated as `reference - (previousBalance + outflowsToday)`, which can
- * only understate it (never overstate) when a sweep confirmed in between.
+ * previousBalance is the reading before this one; the balance at that reading
+ * is estimated as `previousBalance + outflowsToday`. A send that confirmed
+ * between the two readings is already in outflowsToday but not in
+ * previousBalance, so that estimate is too high by the send, and the rise
+ * (hence the reference lift) too low. That understates the loss, now and in
+ * later readings, when a deposit or gain lands in the same interval as a
+ * confirmed send; the peak floor above keeps it from falling below the
+ * adjusted balance. Known residual: a sweep and a deposit landing in the
+ * same interval can still hide the deposit's share of an earlier loss.
  */
 export function evaluateDailyLoss(input: {
   balance: bigint;
@@ -178,7 +184,9 @@ export function evaluateDailyLoss(input: {
     // Any rise lifts the reference by the same amount, so the loss already taken is carried, never reduced.
     const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
     const rise = adjusted > previousAdjusted ? adjusted - previousAdjusted : 0n;
+    // Never below the adjusted balance: a sweep confirmed in the same interval as a rise hides part of the rise from `previousAdjusted`.
     peak = input.lossDayPeak + rise;
+    if (peak < adjusted) peak = adjusted;
   } else if (input.lossDay !== null && input.previousBalance !== null) {
     peak = input.previousBalance > adjusted ? input.previousBalance : adjusted;
   } else {
