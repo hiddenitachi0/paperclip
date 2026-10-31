@@ -28,6 +28,7 @@ import {
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
+import { redactKnownLeakedSecretPatterns } from "../redaction.js";
 import { reportTemplateRoutes } from "../routes/report-templates.js";
 import { reportScriptRoutes } from "../routes/report-scripts.js";
 import { agentService } from "../services/agents.js";
@@ -235,7 +236,10 @@ d("DUR-4072 report data fetch", () => {
       ["report:fiken_journal_entries", "ok", connectionId, companyId],
     ]);
     expect(events.find((event) => event.dataset === "report:fiken_journal_entries")!.facts).toMatchObject({ rows: 1 });
-    expect(events.every((event) => (event.params as { reportRunId?: string }).reportRunId === run.id)).toBe(true);
+    // Audit params go through the card-number scrub, so a random run id whose digits happen to
+    // form a Luhn-valid 13-19 digit run is stored as "[REDACTED:card_number]" (DUR-5122 flake).
+    const expectedRunId = redactKnownLeakedSecretPatterns(run.id);
+    expect(events.every((event) => (event.params as { reportRunId?: string }).reportRunId === expectedRunId)).toBe(true);
     expect(Object.values(snapshot.lookups).sort()).toEqual(events.map((event) => event.id).sort());
 
     // The key appears nowhere an agent or the script could see it.
