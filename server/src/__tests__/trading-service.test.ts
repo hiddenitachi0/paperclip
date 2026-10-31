@@ -869,4 +869,71 @@ d("tradingService", () => {
     expect(orders.find((o) => o.id === pending.id)).toMatchObject({ status: "rejected" });
     expect((await trading.requireStrategy(companyId, strategy.id)).positionQuantity).toBe(0);
   });
+
+  // ─── DUR-5097: follow-ups from the DUR-5078 security review ──────────────
+
+  it("a price jump during a daily-loss halt upgrades it to the sticky circuit breaker, so buys do not resume the next UTC day", async () => {
+    const companyId = await seedCompany();
+    const t1 = new Date("2026-01-01T23:15:00Z");
+    const flat = stubbed(t1, barsEndingAt([100, 100, 100, 100], new Date(t1.getTime() - 15 * 60_000)), 100);
+    const strategy = await flat.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await flat.setStatus(companyId, strategy.id, "running");
+    await db.update(tradingStrategies).set({ ordersTodayDate: "2026-01-01", realizedPnlTodayDate: "2026-01-01", realizedPnlTodayNok: -5_000 }).where(eq(tradingStrategies.id, strategy.id));
+    await flat.tick(t1);
+    expect((await flat.requireStrategy(companyId, strategy.id)).pauseReason).toBe("daily_loss_limit");
+
+    // 15 minutes later, while the daily-loss halt is active, a 30% jump.
+    const t2 = new Date(t1.getTime() + 15 * 60_000);
+    const jump = stubbed(t2, barsEndingAt([100, 100, 100, 130], new Date(t2.getTime() - 15 * 60_000)), 130);
+    await jump.tick(t2);
+    expect((await jump.requireStrategy(companyId, strategy.id)).pauseReason).toBe("circuit_breaker");
+    const alerts = (await jump.listLedgerEntries(companyId, strategy.id)).filter((e) => e.eventType === "circuit_breaker");
+    expect(alerts.map((a) => (a.detail as { cause?: string }).cause).sort()).toEqual(["circuit_breaker", "daily_loss_limit"]);
+    expect(alerts.find((a) => (a.detail as { cause?: string }).cause === "circuit_breaker")!.detail).toMatchObject({ reason: "single_tick_price_jump", replacedHalt: "daily_loss_limit" });
+
+    // Next UTC day, the jump bar has aged out and the loss counter reset -- a buy signal must still be refused.
+    const t3 = new Date("2026-01-02T00:30:00Z");
+    const next = stubbed(t3, barsEndingAt([130, 130, 130, 131], new Date(t3.getTime() - 15 * 60_000)), 131);
+    expect(await next.tick(t3)).toMatchObject({ filled: 0, blocked: 1 });
+    const row = await next.requireStrategy(companyId, strategy.id);
+    expect(row.pauseReason).toBe("circuit_breaker");
+    expect(row.positionQuantity).toBe(0);
+    await next.setStatus(companyId, strategy.id, "paused");
+  });
+
+  for (const scenario of [
+    { name: "drawdown", patch: { peakEquityUsd: 1_000_000, peakEquityNok: 10_000_000 }, expectedReason: "drawdown limit" },
+    { name: "daily loss", patch: { ordersTodayDate: "2026-01-01", realizedPnlTodayDate: "2026-01-01", realizedPnlTodayNok: -5_000 }, expectedReason: "loss limit" },
+  ]) {
+    it(`an approved buy card is not filled if the ${scenario.name} limit was crossed while it waited`, async () => {
+      const companyId = await seedCompany();
+      const now = new Date("2026-01-01T00:00:00Z");
+      const trading = tradingService(db, {
+        now: () => now,
+        marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
+      });
+      const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) }, { actorType: "user", actorId: "u1" });
+      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.tick(now);
+      const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
+      expect(pending.status).toBe("pending_approval");
+
+      // The limit is crossed while the card waits; tickOne has not run since, so pauseReason is still null.
+      await db.update(tradingStrategies).set(scenario.patch).where(eq(tradingStrategies.id, strategy.id));
+      expect((await trading.requireStrategy(companyId, strategy.id)).pauseReason).toBeNull();
+      await approvalService(db).approve(pending.approvalId!, "operator-1");
+      expect(await trading.tick(new Date(now.getTime() + 60_000))).toMatchObject({ approvalsResolved: 1, filled: 0 });
+
+      const orders = await trading.listOrders(companyId, strategy.id);
+      expect(orders.some((o) => o.status === "filled")).toBe(false);
+      expect(orders.find((o) => o.id === pending.id)).toMatchObject({ status: "rejected", rejectionReason: expect.stringContaining(scenario.expectedReason) });
+      const row = await trading.requireStrategy(companyId, strategy.id);
+      expect(row.positionQuantity).toBe(0);
+      expect(row.cashNok).toBe(2_000);
+      const blocks = (await trading.listLedgerEntries(companyId, strategy.id)).filter((e) => e.eventType === "risk_block");
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0]!.detail).toMatchObject({ side: "buy", stage: "after_approval" });
+      await trading.setStatus(companyId, strategy.id, "paused");
+    });
+  }
 });
