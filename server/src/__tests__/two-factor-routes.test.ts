@@ -5,7 +5,7 @@ import express from "express";
 import request from "supertest";
 import * as speakeasy from "speakeasy";
 import { like, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   authSessions,
@@ -30,7 +30,11 @@ if (!support.supported) {
 
 const ORIGIN = "http://localhost:3100";
 
-/** A TOTP code for the step `offset` steps from now. Each accepted use must be a later step than the last. */
+/**
+ * A TOTP code for the step `offset` steps from now. Each accepted use must be a later step than the last.
+ * The server accepts +/-2 steps, so the oldest offset used here (-2) is exactly on the edge of the window:
+ * the route suite freezes `Date` (see `freezeClockMidStep`) so the test and the server read one instant.
+ */
 function codeAt(secret: string, offset: number) {
   return speakeasy.totp({
     secret,
@@ -38,6 +42,15 @@ function codeAt(secret: string, offset: number) {
     step: 30,
     time: Math.floor(Date.now() / 1000) + offset * 30,
   });
+}
+
+const TOTP_STEP_MS = 30_000;
+
+/** Freezes `Date` at the middle of the current 30s step, so no code can cross a step boundary mid-test. */
+function freezeClockMidStep() {
+  const stepStart = Math.floor(Date.now() / TOTP_STEP_MS) * TOTP_STEP_MS;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(stepStart + TOTP_STEP_MS / 2);
 }
 
 describe("createCodeAttemptLimiter", () => {
@@ -76,6 +89,7 @@ d("board two-factor routes (embedded Postgres)", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-two-factor-routes-");
     db = createDb(tempDb.connectionString);
+    freezeClockMidStep();
     companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -86,6 +100,7 @@ d("board two-factor routes (embedded Postgres)", () => {
   }, 60_000);
 
   afterAll(async () => {
+    vi.useRealTimers();
     await tempDb?.cleanup();
   });
 
