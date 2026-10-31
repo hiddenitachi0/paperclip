@@ -54,6 +54,7 @@ import { mediaSetupRoutes } from "./routes/media-setups.js";
 import { bragRoutes } from "./routes/brag.js";
 import { codeRenderRoutes } from "./routes/code-renders.js";
 import { tradingRoutes } from "./routes/trading.js";
+import { tradingCandleRoutes } from "./routes/trading-candles.js";
 import { cryptoWalletRoutes } from "./routes/crypto-wallets.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -395,6 +396,7 @@ export async function createApp(
   api.use(bragRoutes(db));
   api.use(codeRenderRoutes(db));
   api.use(tradingRoutes(db));
+  api.use(tradingCandleRoutes(db));
   api.use(cryptoWalletRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
