@@ -1849,6 +1849,13 @@
       "when": 1793302560903,
       "tag": "0264_crypto_wallet_network_variant",
       "breakpoints": true
+    },
+    {
+      "idx": 265,
+      "version": "7",
+      "when": 1793303000000,
+      "tag": "0265_trading_candle_store",
+      "breakpoints": true
     }
   ]
 }

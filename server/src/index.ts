@@ -86,6 +86,7 @@ import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
+import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
@@ -1107,6 +1108,14 @@ export async function startServer(): Promise<StartedServer> {
     // USD/NOK rate (DUR-5001); request-time services only read what it stored.
     const tradingFxRates = fxRatesService(schedulerDb as any, norgesBankFetcher());
     const tradingAgent = tradingService(schedulerDb as any, { fxRates: tradingFxRates });
+    // DUR-5007: the candle store's backfill and top-up. Runs in a worker thread
+    // with its own database connection, on its own chain, never in the trading tick.
+    const candleStore = tradingCandleRunner({
+      databaseUrl: config.databaseBypassUrl || activeDatabaseConnectionString,
+      logger,
+      enabled: config.tradingCandleStoreEnabled,
+    });
+    registerCandleRunner(candleStore);
     const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1810,6 +1819,27 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "trading-agent tick failed");
+          }),
+      );
+
+      // DUR-5007: the candle store. tick() only decides whether a cycle is due
+      // and starts it in a worker thread; it returns at once, so this chain
+      // never holds a scheduler slot for the length of a backfill.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.candleStore, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: candleStore",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:candleStore",
+          },
+          async () => candleStore.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.started) logger.info("candle store cycle started");
+          })
+          .catch((err) => {
+            logger.error({ err }, "candle store tick failed");
           }),
       );
 
