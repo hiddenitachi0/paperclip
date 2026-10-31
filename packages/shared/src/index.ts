@@ -3091,6 +3091,9 @@ export {
   type UpdateTradingStrategyInput,
 } from "./trading.js";
 
+export * from "./trading-spec.js";
+export * from "./trading-indicators.js";
+
 export {
   PAYMENT_NOTICE_KINDS,
   PAYMENT_NOTICE_STATUSES,

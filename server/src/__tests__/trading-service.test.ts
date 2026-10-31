@@ -727,7 +727,9 @@ d("tradingService", () => {
   it("never raises a card for a sell, even with approval required on every trade", async () => {
     const companyId = await seedCompany();
     const { strategy, buyer } = await openPosition(companyId, TRADE_START, "15m");
-    await buyer.updateStrategy(companyId, strategy.id, { riskConfig: riskConfig({ approvalAboveNok: null }) });
+    // A rule or risk change is a draft plus a card; an owner approving the card is what makes it live.
+    const change = await buyer.updateStrategy(companyId, strategy.id, { riskConfig: riskConfig({ approvalAboveNok: null }) }, { actorType: "user", actorId: "u1" });
+    await buyer.versions.approveFromCard(companyId, change.pendingVersion!.approvalId!, "owner-1");
     const sellAt = new Date(TRADE_START.getTime() + 15 * 60_000);
     const trading = sellTick(sellAt, "15m", 3);
     expect(await trading.tick(sellAt)).toMatchObject({ checked: 1, filled: 1, approvalRequested: 0 });
@@ -746,7 +748,7 @@ d("tradingService", () => {
   for (const { timeframe, thresholdPct } of JUMP_FRAMES) {
     it(`a ${timeframe} jump over ${thresholdPct}% blocks buys but not sells, and a smaller jump blocks nothing`, async () => {
       const step = tradingTimeframeMs(timeframe);
-      const wide = { maxDrawdownPct: 95, dailyLossLimitNok: 1_000_000 }; // isolate the jump from the loss/drawdown trips
+      const wide = { maxDrawdownPct: 20, dailyLossLimitNok: 1_000 }; // the hard ceilings: as wide as a rule book may go, to isolate the jump from the loss/drawdown trips
       // Buy side: a jump up past the threshold -> refused, strategy still running.
       const jumpUp = thresholdPct + 1;
       const buyAt = new Date(TRADE_START.getTime() + 10 * step);
@@ -775,14 +777,17 @@ d("tradingService", () => {
       expect(await seller.tick(sellAt)).toMatchObject({ checked: 1, filled: 1, blocked: 0 });
       const sold = await seller.requireStrategy(sellCompany, strategy.id);
       expect(sold.positionQuantity).toBeCloseTo(0, 9);
-      expect(sold).toMatchObject({ status: "running", pauseReason: "circuit_breaker" });
+      // The exit went through, and entries are halted. A fall this big on a half-cash position can trip the drawdown limit
+      // (20%) before the jump check runs; either way buys are halted and the position is gone.
+      expect(sold.status).toBe("running");
+      expect(["circuit_breaker", "drawdown_limit"]).toContain(sold.pauseReason);
       await seller.setStatus(sellCompany, strategy.id, "paused");
     });
   }
 
   it("a halted-entries strategy refuses later buys but keeps evaluating exits; resume lifts the halt", async () => {
     const companyId = await seedCompany();
-    const { strategy } = await openPosition(companyId, TRADE_START, "15m", { maxDrawdownPct: 95, dailyLossLimitNok: 1_000_000 });
+    const { strategy } = await openPosition(companyId, TRADE_START, "15m", { maxDrawdownPct: 20, dailyLossLimitNok: 1_000 });
     // First a jump (with a buy signal on top) trips the halt while the position is open.
     const t1 = new Date(TRADE_START.getTime() + 15 * 60_000);
     const jump = stubbed(t1, barsEndingAt([100, 100, 100, 130], new Date(t1.getTime() - 15 * 60_000)), 130);

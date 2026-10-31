@@ -502,6 +502,8 @@ DECLARE
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
+    -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
+    'trading_strategy_versions',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
     -- is in this list only, not in the company-scoped one below.
@@ -877,6 +879,8 @@ DECLARE
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
+    -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
+    'trading_strategy_versions',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.

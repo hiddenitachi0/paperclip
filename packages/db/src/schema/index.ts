@@ -178,7 +178,16 @@ export { mediaLoras, mediaModelSetups, mediaProjectDefaults } from "./media_mode
 export { mediaModelSetupTrials } from "./media_model_setup_trials.js";
 export { tradingCandles, tradingCandleIngestEvents } from "./trading_candles.js";
 export { fxRates } from "./fx_rates.js";
-export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
+export {
+  tradingStrategies,
+  tradingOrders,
+  tradingFifoLots,
+  tradingLedgerEntries,
+  tradingDailyStats,
+  tradingStrategyVersions,
+  TRADING_STRATEGY_VERSION_STATUSES,
+  type TradingStrategyVersionStatus,
+} from "./trading.js";
 export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions, tradingAlerts } from "./crypto_wallets.js";
 export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms, contractSettings } from "./contracts.js";
 export { crmOrganizations } from "./crm_organizations.js";

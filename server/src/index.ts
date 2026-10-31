@@ -1242,6 +1242,17 @@ export async function startServer(): Promise<StartedServer> {
       await tradingAgent.verifyMarketsOnBoot().catch((err) => {
         logger.error({ err }, "startup trading-agent market check failed");
       });
+      // DUR-5002: every strategy that predates the rule-book versions gets its
+      // approved, grandfathered version 1 here (the tick also converts on first
+      // use, so a failure for one row never stops boot or trading).
+      await tradingAgent.versions
+        .convertLegacyStrategies()
+        .then((result) => {
+          if (result.converted > 0 || result.failed > 0) logger.warn({ ...result }, "startup trading-agent converted legacy strategies to rule-book versions");
+        })
+        .catch((err) => {
+          logger.error({ err }, "startup trading-agent legacy conversion failed");
+        });
 
       // DUR-100: verify every active routine's declared schedule chains actually
       // have a live, usable trigger row before logging anything as healthy —

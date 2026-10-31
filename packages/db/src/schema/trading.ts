@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { check, date, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, boolean, check, date, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { approvals } from "./approvals.js";
 import { companies } from "./companies.js";
 import { cryptoWallets, cryptoWalletTransactions } from "./crypto_wallets.js";
 
@@ -84,8 +85,18 @@ export const tradingStrategies = pgTable(
     consecutiveErrors: integer("consecutive_errors").notNull().default(0),
     lastTickAt: timestamp("last_tick_at", { withTimezone: true }),
     lastTickError: text("last_tick_error"),
+    // DUR-5002 (migration 0266): rule_config and risk_config are a CACHE of the
+    // active version (trading_strategy_versions), written only inside the
+    // activation transaction in services/trading-versions.ts. The tick reads
+    // the version, never these two columns.
     ruleConfig: jsonb("rule_config").notNull(),
     riskConfig: jsonb("risk_config").notNull(),
+    // The one live version. Null only for a strategy that predates 0266 and has
+    // not been converted yet (the service converts it on boot and on first use).
+    activeVersionId: uuid("active_version_id").references((): AnyPgColumn => tradingStrategyVersions.id, { onDelete: "set null" }),
+    // Stop / target / highest price of the open position, set when the position
+    // is opened (and re-derived when a new version goes live). Null when flat.
+    positionLevels: jsonb("position_levels"),
     startingCashNok: integer("starting_cash_nok").notNull(),
     // The asset's NOK price at creation time, used to compute the dashboard's
     // buy-and-hold benchmark. Null if the initial quote fetch failed -- the
@@ -145,6 +156,9 @@ export const tradingOrders = pgTable(
     side: text("side").notNull(),
     status: text("status").notNull(),
     ruleVersion: text("rule_version").notNull(),
+    // DUR-5002: the rule-book version that produced this order. Null only for
+    // orders written before 0266.
+    strategyVersionId: uuid("strategy_version_id").references(() => tradingStrategyVersions.id, { onDelete: "set null" }),
     signalPriceNok: doublePrecision("signal_price_nok").notNull(),
     requestedQuantity: doublePrecision("requested_quantity").notNull(),
     filledQuantity: doublePrecision("filled_quantity"),
@@ -212,6 +226,8 @@ export const tradingLedgerEntries = pgTable(
     // instead; the ledger_owner_check below requires one of the two.
     strategyId: uuid("strategy_id").references(() => tradingStrategies.id, { onDelete: "cascade" }),
     orderId: uuid("order_id").references(() => tradingOrders.id, { onDelete: "set null" }),
+    // DUR-5002: the rule-book version in force when the entry was written (strategy rows only).
+    strategyVersionId: uuid("strategy_version_id").references(() => tradingStrategyVersions.id, { onDelete: "set null" }),
     walletId: uuid("wallet_id").references(() => cryptoWallets.id, { onDelete: "cascade" }),
     walletTransactionId: uuid("wallet_transaction_id").references(() => cryptoWalletTransactions.id, { onDelete: "set null" }),
     txHash: text("tx_hash"),
@@ -252,5 +268,71 @@ export const tradingDailyStats = pgTable(
   },
   (table) => ({
     strategyDateUq: uniqueIndex("trading_daily_stats_strategy_date_uq").on(table.strategyId, table.statDate),
+  }),
+);
+
+export const TRADING_STRATEGY_VERSION_STATUSES = ["draft", "approved", "superseded"] as const;
+export type TradingStrategyVersionStatus = (typeof TRADING_STRATEGY_VERSION_STATUSES)[number];
+export const TRADING_STRATEGY_VERSION_PROPOSER_TYPES = ["user", "agent", "system"] as const;
+
+/**
+ * DUR-5002 (migration 0266): the rule book of a strategy, one immutable row
+ * per version. draft -> approved -> superseded. The tick reads only the
+ * strategy's `active_version_id` row.
+ *
+ * Immutability is enforced in the database, not just the service: a trigger
+ * (trading_strategy_versions_immutable) refuses any change to the spec,
+ * guidelines, digest, version number, owner or proposer on ANY row, and lets
+ * `status` move only draft -> approved, draft -> superseded and
+ * approved -> superseded. A row that is approved can never be edited.
+ *
+ * `spec_digest` is the SHA-256 of the canonical spec + guidelines; the
+ * approval card carries the same digest and the service refuses to activate a
+ * version whose stored text no longer hashes to it.
+ *
+ * `grandfathered` marks the versions converted from the original
+ * sma_crossover@1 strategies: they are exempt from the past-data start gate
+ * (decision 7); anything new is not.
+ *
+ * Rollback: see 0266_trading_strategy_versions.sql.
+ */
+export const tradingStrategyVersions = pgTable(
+  "trading_strategy_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    strategyId: uuid("strategy_id").notNull().references((): AnyPgColumn => tradingStrategies.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    spec: jsonb("spec").notNull(),
+    guidelines: text("guidelines").notNull().default(""),
+    status: text("status").notNull().default("draft"),
+    proposedByType: text("proposed_by_type").notNull(),
+    proposedById: text("proposed_by_id").notNull(),
+    approvedByUserId: text("approved_by_user_id"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    specDigest: text("spec_digest").notNull(),
+    grandfathered: boolean("grandfathered").notNull().default(false),
+    // The approval card that shows this draft; set once, when the card is filed.
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    strategyVersionUq: uniqueIndex("trading_strategy_versions_strategy_version_uq").on(table.strategyId, table.version),
+    oneApprovedUq: uniqueIndex("trading_strategy_versions_one_approved_uq").on(table.strategyId).where(sql`${table.status} = 'approved'`),
+    companyIdx: index("trading_strategy_versions_company_idx").on(table.companyId),
+    approvalIdx: index("trading_strategy_versions_approval_idx").on(table.approvalId),
+    statusCheck: check("trading_strategy_versions_status_check", sql`${table.status} IN ('draft', 'approved', 'superseded')`),
+    proposerCheck: check("trading_strategy_versions_proposer_check", sql`${table.proposedByType} IN ('user', 'agent', 'system')`),
+    versionCheck: check("trading_strategy_versions_version_check", sql`${table.version} >= 1`),
+    digestCheck: check("trading_strategy_versions_digest_check", sql`${table.specDigest} ~ '^[0-9a-f]{64}$'`),
+    // An approved version always says when it was approved and by whom; the
+    // only exception is a grandfathered conversion, which nobody approved.
+    // (A superseded row keeps whatever it had.)
+    approvalPairCheck: check(
+      "trading_strategy_versions_approval_pair_check",
+      sql`${table.status} <> 'approved' OR (${table.approvedAt} IS NOT NULL AND (${table.approvedByUserId} IS NOT NULL OR ${table.grandfathered}))`,
+    ),
   }),
 );

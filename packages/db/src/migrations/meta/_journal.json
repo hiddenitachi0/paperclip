@@ -1856,6 +1856,13 @@
       "when": 1793303000000,
       "tag": "0265_trading_candle_store",
       "breakpoints": true
+    },
+    {
+      "idx": 266,
+      "version": "7",
+      "when": 1793305000000,
+      "tag": "0266_trading_strategy_versions",
+      "breakpoints": true
     }
   ]
 }
