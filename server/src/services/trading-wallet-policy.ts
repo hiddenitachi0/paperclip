@@ -149,18 +149,26 @@ export interface DailyLossState {
 
 /**
  * The daily loss is measured from the day's highest balance, so a profit
- * that is given back counts as a loss. A reading that jumps ABOVE the
- * reference is treated as a deposit (the balance alone cannot tell it from a
- * windfall): the reference rises with it, but the loss already taken stays,
- * so topping up cannot wipe out the count (DUR-5087 N3). Rises that stay
- * under the reference do shrink the loss. The first look of a new day also
+ * that is given back counts as a loss. Any rise between two readings is
+ * treated as a possible deposit (the balance alone cannot tell it from a
+ * trading gain): the reference rises by the same amount, so the loss already
+ * taken stays and topping up cannot wipe out the count, whether the deposit
+ * lands above or below the reference (DUR-5087 N3, DUR-5111). The price is
+ * that a gain never offsets an earlier loss on the same day; the stop errs
+ * towards pausing, never towards missing a loss. The first look of a new day also
  * starts from the last balance seen the day before, so an overnight drop is
  * not forgotten. After the owner restarts a paused wallet (lossDayPeak null),
  * the count starts again from the balance as it is.
  *
- * previousBalance is the reading before this one; the loss at that reading
- * is estimated as `reference - (previousBalance + outflowsToday)`, which can
- * only understate it (never overstate) when a sweep confirmed in between.
+ * previousBalance is the reading before this one; the balance at that reading
+ * is estimated as `previousBalance + outflowsToday`. A send that confirmed
+ * between the two readings is already in outflowsToday but not in
+ * previousBalance, so that estimate is too high by the send, and the rise
+ * (hence the reference lift) too low. That understates the loss, now and in
+ * later readings, when a deposit or gain lands in the same interval as a
+ * confirmed send; the peak floor above keeps it from falling below the
+ * adjusted balance. Known residual: a sweep and a deposit landing in the
+ * same interval can still hide the deposit's share of an earlier loss.
  */
 export function evaluateDailyLoss(input: {
   balance: bigint;
@@ -173,13 +181,12 @@ export function evaluateDailyLoss(input: {
   const adjusted = input.balance + input.outflowsToday;
   let peak: bigint;
   if (input.lossDay === input.today && input.lossDayPeak !== null) {
-    if (adjusted > input.lossDayPeak) {
-      const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
-      const carried = input.lossDayPeak > previousAdjusted ? input.lossDayPeak - previousAdjusted : 0n;
-      peak = adjusted + carried;
-    } else {
-      peak = input.lossDayPeak;
-    }
+    // Any rise lifts the reference by the same amount, so the loss already taken is carried, never reduced.
+    const previousAdjusted = input.previousBalance === null ? input.lossDayPeak : input.previousBalance + input.outflowsToday;
+    const rise = adjusted > previousAdjusted ? adjusted - previousAdjusted : 0n;
+    // Never below the adjusted balance: a sweep confirmed in the same interval as a rise hides part of the rise from `previousAdjusted`.
+    peak = input.lossDayPeak + rise;
+    if (peak < adjusted) peak = adjusted;
   } else if (input.lossDay !== null && input.previousBalance !== null) {
     peak = input.previousBalance > adjusted ? input.previousBalance : adjusted;
   } else {
