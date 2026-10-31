@@ -492,6 +492,11 @@ DECLARE
     -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
+    -- DUR-5007 candle store. Created (and granted on) in
+    -- 0265_trading_candle_store.sql; instance-wide public market data with no
+    -- company_id, so these two are in the login-role list ONLY.
+    'trading_candle_ingest_events',
+    'trading_candles',
     'trading_daily_stats',
     'trading_fifo_lots',
     'trading_ledger_entries',

@@ -1,6 +1,6 @@
 {
   "id": "3ac0269e-5d30-48fd-bc2c-1429cefd107f",
-  "prevId": "4b12ad22-1aaa-4ae0-b604-400b2067f792",
+  "prevId": "744b1f22-b91e-4b4c-b937-c4e160951647",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -42907,6 +42907,220 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.trading_candle_ingest_events": {
+      "name": "trading_candle_ingest_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "market": {
+          "name": "market",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "timeframe": {
+          "name": "timeframe",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ref": {
+          "name": "ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "open_time": {
+          "name": "open_time",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "trading_candle_ingest_events_kind_ref_idx": {
+          "name": "trading_candle_ingest_events_kind_ref_idx",
+          "columns": [
+            {
+              "expression": "kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_candle_ingest_events_created_idx": {
+          "name": "trading_candle_ingest_events_created_idx",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_candle_ingest_events_kind_check": {
+          "name": "trading_candle_ingest_events_kind_check",
+          "value": "\"trading_candle_ingest_events\".\"kind\" IN ('archive_done', 'correction', 'invalid_bars', 'source_stopped', 'gap_note')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.trading_candles": {
+      "name": "trading_candles",
+      "schema": "",
+      "columns": {
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "market": {
+          "name": "market",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "timeframe": {
+          "name": "timeframe",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "open_time": {
+          "name": "open_time",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "open": {
+          "name": "open",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "high": {
+          "name": "high",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "low": {
+          "name": "low",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "close": {
+          "name": "close",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "volume": {
+          "name": "volume",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ingested_at": {
+          "name": "ingested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "trading_candles_pk": {
+          "name": "trading_candles_pk",
+          "columns": [
+            "source",
+            "market",
+            "timeframe",
+            "open_time"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_candles_source_check": {
+          "name": "trading_candles_source_check",
+          "value": "\"trading_candles\".\"source\" IN ('kraken', 'binance', 'coinbase')"
+        },
+        "trading_candles_timeframe_check": {
+          "name": "trading_candles_timeframe_check",
+          "value": "\"trading_candles\".\"timeframe\" IN ('5m', '1h', '4h', '1d')"
+        },
+        "trading_candles_sanity_check": {
+          "name": "trading_candles_sanity_check",
+          "value": "\"trading_candles\".\"open\" > 0 AND \"trading_candles\".\"high\" > 0 AND \"trading_candles\".\"low\" > 0 AND \"trading_candles\".\"close\" > 0 AND \"trading_candles\".\"volume\" >= 0 AND \"trading_candles\".\"high\" >= \"trading_candles\".\"low\""
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.trading_daily_stats": {
       "name": "trading_daily_stats",
       "schema": "",
@@ -43990,256 +44204,6 @@
         "trading_strategies_position_quantity_check": {
           "name": "trading_strategies_position_quantity_check",
           "value": "\"trading_strategies\".\"position_quantity\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.trading_strategy_versions": {
-      "name": "trading_strategy_versions",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "strategy_id": {
-          "name": "strategy_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "version": {
-          "name": "version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "spec": {
-          "name": "spec",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "guidelines": {
-          "name": "guidelines",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'draft'"
-        },
-        "proposed_by_type": {
-          "name": "proposed_by_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "proposed_by_id": {
-          "name": "proposed_by_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "approved_by_user_id": {
-          "name": "approved_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "approved_at": {
-          "name": "approved_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "superseded_at": {
-          "name": "superseded_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "spec_digest": {
-          "name": "spec_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "grandfathered": {
-          "name": "grandfathered",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "approval_id": {
-          "name": "approval_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "trading_strategy_versions_strategy_version_uq": {
-          "name": "trading_strategy_versions_strategy_version_uq",
-          "columns": [
-            {
-              "expression": "strategy_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_strategy_versions_one_approved_uq": {
-          "name": "trading_strategy_versions_one_approved_uq",
-          "columns": [
-            {
-              "expression": "strategy_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"trading_strategy_versions\".\"status\" = 'approved'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_strategy_versions_company_idx": {
-          "name": "trading_strategy_versions_company_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_strategy_versions_approval_idx": {
-          "name": "trading_strategy_versions_approval_idx",
-          "columns": [
-            {
-              "expression": "approval_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "trading_strategy_versions_company_id_companies_id_fk": {
-          "name": "trading_strategy_versions_company_id_companies_id_fk",
-          "tableFrom": "trading_strategy_versions",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "trading_strategy_versions_strategy_id_trading_strategies_id_fk": {
-          "name": "trading_strategy_versions_strategy_id_trading_strategies_id_fk",
-          "tableFrom": "trading_strategy_versions",
-          "tableTo": "trading_strategies",
-          "columnsFrom": [
-            "strategy_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "trading_strategy_versions_approval_id_approvals_id_fk": {
-          "name": "trading_strategy_versions_approval_id_approvals_id_fk",
-          "tableFrom": "trading_strategy_versions",
-          "tableTo": "approvals",
-          "columnsFrom": [
-            "approval_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_strategy_versions_status_check": {
-          "name": "trading_strategy_versions_status_check",
-          "value": "\"trading_strategy_versions\".\"status\" IN ('draft', 'approved', 'superseded')"
-        },
-        "trading_strategy_versions_proposer_check": {
-          "name": "trading_strategy_versions_proposer_check",
-          "value": "\"trading_strategy_versions\".\"proposed_by_type\" IN ('user', 'agent', 'system')"
-        },
-        "trading_strategy_versions_version_check": {
-          "name": "trading_strategy_versions_version_check",
-          "value": "\"trading_strategy_versions\".\"version\" >= 1"
-        },
-        "trading_strategy_versions_digest_check": {
-          "name": "trading_strategy_versions_digest_check",
-          "value": "\"trading_strategy_versions\".\"spec_digest\" ~ '^[0-9a-f]{64}$'"
-        },
-        "trading_strategy_versions_approval_pair_check": {
-          "name": "trading_strategy_versions_approval_pair_check",
-          "value": "\"trading_strategy_versions\".\"status\" <> 'approved' OR (\"trading_strategy_versions\".\"approved_at\" IS NOT NULL AND (\"trading_strategy_versions\".\"approved_by_user_id\" IS NOT NULL OR \"trading_strategy_versions\".\"grandfathered\"))"
         }
       },
       "isRLSEnabled": false
@@ -49439,6 +49403,256 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.trading_strategy_versions": {
+      "name": "trading_strategy_versions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "strategy_id": {
+          "name": "strategy_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "spec": {
+          "name": "spec",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "guidelines": {
+          "name": "guidelines",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'draft'"
+        },
+        "proposed_by_type": {
+          "name": "proposed_by_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposed_by_id": {
+          "name": "proposed_by_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "approved_by_user_id": {
+          "name": "approved_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "superseded_at": {
+          "name": "superseded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "spec_digest": {
+          "name": "spec_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "grandfathered": {
+          "name": "grandfathered",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "approval_id": {
+          "name": "approval_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "trading_strategy_versions_strategy_version_uq": {
+          "name": "trading_strategy_versions_strategy_version_uq",
+          "columns": [
+            {
+              "expression": "strategy_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_strategy_versions_one_approved_uq": {
+          "name": "trading_strategy_versions_one_approved_uq",
+          "columns": [
+            {
+              "expression": "strategy_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"trading_strategy_versions\".\"status\" = 'approved'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_strategy_versions_company_idx": {
+          "name": "trading_strategy_versions_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_strategy_versions_approval_idx": {
+          "name": "trading_strategy_versions_approval_idx",
+          "columns": [
+            {
+              "expression": "approval_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "trading_strategy_versions_company_id_companies_id_fk": {
+          "name": "trading_strategy_versions_company_id_companies_id_fk",
+          "tableFrom": "trading_strategy_versions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "trading_strategy_versions_strategy_id_trading_strategies_id_fk": {
+          "name": "trading_strategy_versions_strategy_id_trading_strategies_id_fk",
+          "tableFrom": "trading_strategy_versions",
+          "tableTo": "trading_strategies",
+          "columnsFrom": [
+            "strategy_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "trading_strategy_versions_approval_id_approvals_id_fk": {
+          "name": "trading_strategy_versions_approval_id_approvals_id_fk",
+          "tableFrom": "trading_strategy_versions",
+          "tableTo": "approvals",
+          "columnsFrom": [
+            "approval_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_strategy_versions_status_check": {
+          "name": "trading_strategy_versions_status_check",
+          "value": "\"trading_strategy_versions\".\"status\" IN ('draft', 'approved', 'superseded')"
+        },
+        "trading_strategy_versions_proposer_check": {
+          "name": "trading_strategy_versions_proposer_check",
+          "value": "\"trading_strategy_versions\".\"proposed_by_type\" IN ('user', 'agent', 'system')"
+        },
+        "trading_strategy_versions_version_check": {
+          "name": "trading_strategy_versions_version_check",
+          "value": "\"trading_strategy_versions\".\"version\" >= 1"
+        },
+        "trading_strategy_versions_digest_check": {
+          "name": "trading_strategy_versions_digest_check",
+          "value": "\"trading_strategy_versions\".\"spec_digest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "trading_strategy_versions_approval_pair_check": {
+          "name": "trading_strategy_versions_approval_pair_check",
+          "value": "\"trading_strategy_versions\".\"status\" <> 'approved' OR (\"trading_strategy_versions\".\"approved_at\" IS NOT NULL AND (\"trading_strategy_versions\".\"approved_by_user_id\" IS NOT NULL OR \"trading_strategy_versions\".\"grandfathered\"))"
+        }
+      },
       "isRLSEnabled": false
     }
   },

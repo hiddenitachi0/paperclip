@@ -3308,3 +3308,4 @@ export {
   type BoardChatActionEvent,
 } from "./board-chat.js";
 export * from "./env-file-refused.js";
+export * from "./trading-candles.js";
