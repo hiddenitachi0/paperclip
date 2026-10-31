@@ -162,6 +162,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "contracts.ts",
   // Media Studio model setups and LoRA library routes (Phase 1 register) are board-managed, agents read a filtered view, and not yet in the public OpenAPI document.
   "media-setups.ts",
+  // Candle store report routes (DUR-5007) are instance-admin-only, read-only, and not yet in the public OpenAPI document.
+  "trading-candles.ts",
 ]);
 
 function createApp() {
