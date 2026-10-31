@@ -891,7 +891,7 @@ d("trading wallets held by code", () => {
     expect((await approvalsApp(companyId, "admin").post(`/api/approvals/${row.topUpApprovalId}/approve`, {})).status).toBe(200);
     await s.tick(now);
     expect((await alertsOf(companyId)).filter((a) => a.kind === "top_up_requested")).toHaveLength(1);
-    now = new Date(now.getTime() + 48 * 60 * 60_000); // the card was answered at the real clock time, so jump well past a day
+    now = new Date(Math.max(now.getTime(), Date.now()) + 48 * 60 * 60_000); // the card was answered at the real clock time, so jump well past a day from whichever is later
     solState.balances.set(wallet.address, sol(0.1));
     const viaTrader = await trader.post(`/api/agent-wallets/trading/${wallet.id}/top-up-request`, { reason: "Two stops-outs this week; strategy needs more room" });
     expect(viaTrader.status).toBe(201);
