@@ -183,6 +183,51 @@ d("trading start gate", () => {
     expect((await trading.setStatus(companyId, strategy.id, "running")).status).toBe("running");
   });
 
+  it("does not start a strategy whose version changed between the gate check and the write (no false 'passed')", async () => {
+    const companyId = await seedCompany();
+    const strategy = await newStrategy(companyId);
+    const trading = service();
+    const v1 = (await trading.versions.ensureActiveVersion(strategy)).version;
+    await finishedRun(companyId, strategy.id, v1.id, true); // v1 passed; v2 never will
+    const proposed = await trading.versions.proposeVersion(companyId, strategy.id, { spec: stopSpec(), guidelines: "" }, { type: "user", id: "owner-1" });
+    if (proposed.outcome !== "drafted") throw new Error("expected a draft");
+    let approved: string | null = null;
+    const racing = tradingService(db, {
+      now: () => NOW,
+      marketData: fakeTradingMarketData({ candles: { BTC: { candles: [] } }, quotes: { BTC: { bidUsd: 21, askUsd: 21, at: NOW } } }),
+      afterStartGateCheck: async () => {
+        approved = (await trading.versions.approveFromCard(companyId, proposed.approvalId, "owner-1")).version.id;
+      },
+    });
+    await expect(racing.setStatus(companyId, strategy.id, "running")).rejects.toMatchObject({ status: 409, details: { code: "trading_start_gate_version_changed" } });
+    expect(approved).not.toBeNull();
+    const after = await trading.requireStrategy(companyId, strategy.id);
+    expect(after.status).toBe("paused");
+    expect(after.activeVersionId).toBe(approved);
+    const kill = (await db.select().from(tradingLedgerEntries).where(eq(tradingLedgerEntries.strategyId, strategy.id))).filter((e) => e.eventType === "kill_switch");
+    expect(kill).toHaveLength(0); // no false "gate passed" entry
+    // The new version still needs its own pass.
+    await expect(trading.setStatus(companyId, strategy.id, "running")).rejects.toMatchObject({ details: { code: "trading_start_gate_not_passed" } });
+  });
+
+  it("a lost race leaves no owner-override record either", async () => {
+    const companyId = await seedCompany();
+    const strategy = await newStrategy(companyId);
+    const trading = service();
+    const proposed = await trading.versions.proposeVersion(companyId, strategy.id, { spec: stopSpec(), guidelines: "" }, { type: "user", id: "owner-1" });
+    if (proposed.outcome !== "drafted") throw new Error("expected a draft");
+    const racing = tradingService(db, {
+      now: () => NOW,
+      marketData: fakeTradingMarketData({ candles: { BTC: { candles: [] } }, quotes: { BTC: { bidUsd: 21, askUsd: 21, at: NOW } } }),
+      afterStartGateCheck: async () => {
+        await trading.versions.approveFromCard(companyId, proposed.approvalId, "owner-1");
+      },
+    });
+    await expect(racing.setStatus(companyId, strategy.id, "running", { reason: "Paper money only; testing the race.", userId: "owner-1" })).rejects.toMatchObject({ status: 409 });
+    expect(await trading.backtests.listOverrides(companyId, strategy.id)).toHaveLength(0);
+    expect((await trading.requireStrategy(companyId, strategy.id)).status).toBe("paused");
+  });
+
   it("a new version needs its own pass; the old version's pass does not carry over", async () => {
     const companyId = await seedCompany();
     const strategy = await newStrategy(companyId);

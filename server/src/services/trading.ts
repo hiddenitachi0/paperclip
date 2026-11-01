@@ -31,7 +31,7 @@ import {
   type TradingStrategyStatus,
   type UpdateTradingStrategyInput,
 } from "@paperclipai/shared";
-import { notFound, unprocessable } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { approvalService } from "./approvals.js";
 import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rates.js";
@@ -69,6 +69,8 @@ export interface TradingServiceDeps {
   fxRates?: FxRatesService;
   /** The raw (non request-scoped) db, for the transactions a version change needs. Defaults to the db passed in. */
   rawDb?: Db;
+  /** Test seam only: runs between the start-gate check and the write in setStatus, so a test can change the active version in that gap. */
+  afterStartGateCheck?: () => Promise<void>;
 }
 
 /** What the open position's protective levels look like in trading_strategies.position_levels. USD, like the bars. */
@@ -301,10 +303,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     }
     const basis = await isVersionStartCleared(db, existing.companyId, active.version);
     if (basis) return { basis, versionId: active.version.id };
-    if (override) {
-      await backtests.recordOverride(existing.companyId, existing.id, active.version.id, override.reason, override.userId);
-      return { basis: "override", versionId: active.version.id };
-    }
+    // The override is only written once the strategy really started (see setStatus), so a lost race leaves no false record.
+    if (override) return { basis: "override", versionId: active.version.id };
     throw unprocessable(
       `Strategy "${existing.name}" (rules version ${active.version.version}) has not passed the past-data test yet, so it cannot start. Ask for a past-data test of these rules; an owner can also start it with a written reason.`,
       { code: "trading_start_gate_not_passed", strategyId: existing.id, versionId: active.version.id, versionNumber: active.version.version },
@@ -317,11 +317,19 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     const now = nowOf();
     if (target === "running") {
       const cleared = await assertStartGate(existing, override);
+      await deps.afterStartGateCheck?.(); // test seam: lets a test approve another version in the gap
+      // The gate was checked against ONE version. Only start the strategy if that is still its active version, otherwise a card approval that landed in the gap would leave it running rules that never passed (DUR-5143 F1).
       const [row] = await db
         .update(tradingStrategies)
         .set({ status: "running", pauseReason: null, nextCheckAt: now, checkLeaseUntil: null, consecutiveErrors: 0, updatedAt: now })
-        .where(eq(tradingStrategies.id, strategyId))
+        .where(and(eq(tradingStrategies.id, strategyId), cleared.versionId ? eq(tradingStrategies.activeVersionId, cleared.versionId) : isNull(tradingStrategies.activeVersionId)))
         .returning();
+      if (!row) {
+        throw conflict(`Strategy "${existing.name}" got new rules while it was being started, so it was not started. Check the new rules and start it again.`, { code: "trading_start_gate_version_changed", strategyId, checkedVersionId: cleared.versionId });
+      }
+      if (cleared.basis === "override" && override && cleared.versionId) {
+        await backtests.recordOverride(existing.companyId, existing.id, cleared.versionId, override.reason, override.userId);
+      }
       await ledger.writeLedgerEntry({
         companyId,
         strategyId,
@@ -334,7 +342,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           ...(cleared.basis === "override" && override ? { overrideReason: override.reason, overriddenByUserId: override.userId } : {}),
         },
       });
-      return row!;
+      return row;
     }
     const [row] = await db
       .update(tradingStrategies)
