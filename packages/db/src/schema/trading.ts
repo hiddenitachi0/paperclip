@@ -245,7 +245,7 @@ export const tradingLedgerEntries = pgTable(
     walletIdx: index("trading_ledger_entries_wallet_idx").on(table.walletId, table.createdAt),
     eventTypeCheck: check(
       "trading_ledger_entries_event_type_check",
-      sql`${table.eventType} IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation', 'wallet_created', 'wallet_tx_requested', 'wallet_tx_blocked', 'wallet_tx_approval_requested', 'wallet_tx_submitted', 'wallet_tx_confirmed', 'wallet_tx_failed', 'wallet_tx_rejected', 'wallet_kill_switch', 'wallet_reconciliation', 'wallet_settings_changed')`,
+      sql`${table.eventType} IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation', 'wallet_created', 'wallet_tx_requested', 'wallet_tx_blocked', 'wallet_tx_approval_requested', 'wallet_tx_submitted', 'wallet_tx_confirmed', 'wallet_tx_failed', 'wallet_tx_rejected', 'wallet_kill_switch', 'wallet_reconciliation', 'wallet_settings_changed', 'evaluator_gap')`,
     ),
     ownerCheck: check("trading_ledger_entries_owner_check", sql`${table.strategyId} IS NOT NULL OR ${table.walletId} IS NOT NULL`),
   }),

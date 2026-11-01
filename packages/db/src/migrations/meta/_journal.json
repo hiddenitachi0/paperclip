@@ -1863,6 +1863,13 @@
       "when": 1793305000000,
       "tag": "0266_trading_strategy_versions",
       "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1793556466417,
+      "tag": "0267_trading_predictions",
+      "breakpoints": true
     }
   ]
 }

@@ -88,6 +88,8 @@ export const TRADING_LEDGER_EVENT_TYPES = [
   "wallet_kill_switch",
   "wallet_reconciliation",
   "wallet_settings_changed",
+  // DUR-5010: a stretch of time the prediction evaluator was not running (detail: from, to, seconds).
+  "evaluator_gap",
 ] as const;
 export type TradingLedgerEventType = (typeof TRADING_LEDGER_EVENT_TYPES)[number];
 
