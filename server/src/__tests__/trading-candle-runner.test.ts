@@ -1,6 +1,7 @@
+import { Worker } from "node:worker_threads";
 import { describe, expect, it, vi } from "vitest";
 import type { CandleCycleResult } from "../services/trading-candle-backfill.js";
-import { tradingCandleRunner } from "../services/trading-candle-runner.js";
+import { candleWorkerExecArgv, resolveWorker, tradingCandleRunner } from "../services/trading-candle-runner.js";
 
 function result(overrides: Partial<CandleCycleResult> = {}): CandleCycleResult {
   return { inserted: 0, corrections: 0, invalid: 0, entriesDone: 0, stops: [], errors: [], timedOut: false, complete: true, ...overrides };
@@ -113,4 +114,31 @@ describe("trading candle runner (DUR-5007)", () => {
     expect(t.runner.status()).toMatchObject({ enabled: false, nextRunAt: null });
     expect(t.jobs).toHaveLength(0);
   });
+});
+
+describe("candle worker thread module loading (DUR-5130)", () => {
+  const probe = new URL("./fixtures/candle-worker-resolve-probe.mjs", import.meta.url);
+
+  function runProbe(execArgv: string[]): Promise<{ ok: boolean; error?: string }> {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(probe, { execArgv });
+      worker.once("message", (message) => {
+        void worker.terminate();
+        resolve(message);
+      });
+      worker.once("error", reject);
+    });
+  }
+
+  it("resolves @paperclipai/db inside a worker started with the production execArgv, for the compiled and the source worker", async () => {
+    expect(resolveWorker().execArgv).toEqual(candleWorkerExecArgv());
+    expect(candleWorkerExecArgv()[0]).toBe("--import");
+    expect(await runProbe(resolveWorker().execArgv)).toEqual({ ok: true });
+  }, 30_000);
+
+  it("fails to resolve @paperclipai/db with an empty execArgv (the DUR-5130 regression)", async () => {
+    const outcome = await runProbe([]);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/client\.js/);
+  }, 30_000);
 });

@@ -62,12 +62,24 @@ const WORKER_HEAP_MB = 768;
 const CONTINUE_PAUSE_MS = 15_000;
 const STOPPED_SOURCE_RETRY_MS = 15 * 60_000;
 
-function resolveWorker(): { url: URL; execArgv: string[] } {
-  const compiled = new URL("./trading-candle-worker.js", import.meta.url);
-  if (existsSync(compiled)) return { url: compiled, execArgv: [] };
-  // Source run (tsx / vitest): load the .ts worker through tsx.
+/**
+ * The worker thread needs the tsx loader in every layout, not only when it is
+ * itself a .ts file: `@paperclipai/db` resolves to `packages/db/src/index.ts`
+ * (its `exports` point at ./src/*.ts) and that file imports `./client.js`,
+ * which only tsx maps to client.ts. A Worker does not inherit the server's
+ * `--import` hook when given an empty execArgv, so the compiled worker in the
+ * image failed with "Cannot find module .../packages/db/src/client.js" (DUR-5130).
+ */
+export function candleWorkerExecArgv(): string[] {
   const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  return { url: new URL("./trading-candle-worker.ts", import.meta.url), execArgv: ["--import", tsx] };
+  return ["--import", tsx];
+}
+
+export function resolveWorker(): { url: URL; execArgv: string[] } {
+  const compiled = new URL("./trading-candle-worker.js", import.meta.url);
+  if (existsSync(compiled)) return { url: compiled, execArgv: candleWorkerExecArgv() };
+  // Source run (tsx / vitest): load the .ts worker through tsx.
+  return { url: new URL("./trading-candle-worker.ts", import.meta.url), execArgv: candleWorkerExecArgv() };
 }
 
 export function spawnCandleWorker(job: CandleWorkerJob, onMessage: (message: CandleWorkerMessage) => void, limitMs: number): Promise<CandleCycleResult> {
