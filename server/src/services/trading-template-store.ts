@@ -205,7 +205,8 @@ export function tradingTemplateStore(db: Db, deps: TradingTemplateStoreDeps = {}
       purpose: "gate",
       assets: [...template.spec.universe.assets],
       costs: { feeRatePct: TRADING_BACKTEST_COSTS.feeRatePct, spreadPct: TRADING_BACKTEST_COSTS.spreadPct, slippagePct: TRADING_BACKTEST_COSTS.slippagePct },
-      startingCashNok: 10_000,
+      // The default start cash of a new strategy, so the entry gate's position cap treats a template the way it will treat the strategy.
+      startingCashNok: 3_000,
       selection: "base",
       // A control has nothing to tune; every other template tries its neighbours so the trial count is honest.
       maxVariants: template.spec.meta.family === "control" ? 1 : TRADING_BACKTEST_LIMITS.maxVariants,

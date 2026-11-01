@@ -798,9 +798,9 @@ const BUY_AND_HOLD: TradingTemplateInput = control({
   thesis: "Buy once and keep it. Every other strategy has to beat this after fees, or it was not worth the trading.",
   entry: ALWAYS_TRUE,
   exit: { timeStopBars: 1000 },
-  fraction: 1,
+  fraction: 0.25,
   guidelines: "A control. Do: compare real strategies with it over the same dates. Don't: run it as a strategy.",
-  simplifications: ["Held for at most 1,000 candles at a time, then bought again, so a very long test pays a few extra fees."],
+  simplifications: ["Held for at most 1,000 candles at a time, then bought again, so a very long test pays a few extra fees.", "Sized like the strategies it is compared with (a quarter of the cash), not all of it, so the entry gate's position cap treats them alike."],
 });
 
 const STAY_IN_CASH: TradingTemplateInput = control({
