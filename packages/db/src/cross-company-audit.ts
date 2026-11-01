@@ -101,6 +101,11 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // every tick; every error and source stop is recorded in
   // trading_candle_ingest_events.
   "heartbeat-scheduler:candleStore",
+  // Recomputes the daily market-weather labels from the candle store (public
+  // market data in tables with no company_id; it reads and writes no company's
+  // rows). Fires every tick but only works about once an hour; failures are
+  // logged and backed off.
+  "heartbeat-scheduler:marketWeather",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

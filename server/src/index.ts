@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
+import { tradingRegimeRunner } from "./services/trading-regime-runner.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
@@ -1116,6 +1117,8 @@ export async function startServer(): Promise<StartedServer> {
       enabled: config.tradingCandleStoreEnabled,
     });
     registerCandleRunner(candleStore);
+    // DUR-5013: the daily market-weather labels, recomputed from the candle store.
+    const marketWeather = tradingRegimeRunner({ db: schedulerDb as any, logger, enabled: config.tradingMarketWeatherEnabled });
     const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1852,6 +1855,22 @@ export async function startServer(): Promise<StartedServer> {
           .catch((err) => {
             logger.error({ err }, "candle store tick failed");
           }),
+      );
+
+      // DUR-5013: market weather. The runner decides whether a pass is due (about
+      // hourly) and only writes new or changed days; it never touches company rows.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.marketWeather, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: marketWeather",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:marketWeather",
+          },
+          () => marketWeather.tick(new Date()),
+        ).catch((err) => {
+          logger.error({ err }, "market weather tick failed");
+        }),
       );
 
       // Crypto wallets for agents: resolves wallet payment approval cards
