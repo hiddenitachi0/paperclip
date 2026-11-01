@@ -2,11 +2,12 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { TRADING_ASSETS, askTraderSchema, createTradingStrategySchema, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
-import { badRequest } from "../errors.js";
+import { TRADING_ASSETS, askTraderSchema, createStrategyFromTemplateSchema, createTradingStrategySchema, findTradingTemplate, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { badRequest, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin } from "./authz.js";
+import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin, assertInstanceAdmin } from "./authz.js";
+import { tradingTemplateStore } from "../services/trading-template-store.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 import { currentMarketWeather, marketWeatherHistory } from "../services/trading-regimes.js";
 import { tradingTraderService } from "../services/trading-trader.js";
@@ -54,6 +55,45 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
       assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the trading agent");
     });
   }
+
+  // DUR-5014: the strategy template library. Library data, not company data, and
+  // not shown to client companies before the legal check (decision 19): every
+  // route here needs an instance admin, whichever company id the path carries.
+  // Reading only; the report queue is written by the scheduler chain's own connection.
+  const templates = tradingTemplateStore(db);
+
+  function templateScope() {
+    return companyScopeFromParam(rawDb, (req, companyId) => {
+      assertInstanceAdmin(req);
+      assertCompanyAccess(req, companyId);
+    });
+  }
+
+  router.get("/companies/:companyId/trading/templates", templateScope(), async (_req, res) => {
+    res.json(await templates.library());
+  });
+
+  router.get("/companies/:companyId/trading/templates/:templateKey", templateScope(), async (req, res) => {
+    res.json(await templates.getTemplate(req.params.templateKey as string));
+  });
+
+  router.get("/companies/:companyId/trading/templates/:templateKey/reports/:reportId", templateScope(), async (req, res) => {
+    res.json(await templates.getReport(req.params.templateKey as string, req.params.reportId as string));
+  });
+
+  /** A new paper strategy from a template: the template's rules as written become version 1 and its key goes into the strategy's lineage. It starts paused and still needs its own past-data test before it may run. */
+  router.post("/companies/:companyId/trading/strategies/from-template", templateScope(), validate(createStrategyFromTemplateSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const template = findTradingTemplate(req.body.templateKey);
+    if (!template) throw notFound("Template not found.");
+    const input = createTradingStrategySchema.parse({
+      name: req.body.name ?? `${template.spec.meta.name} ${req.body.asset}`.slice(0, 120),
+      asset: req.body.asset,
+      timeframe: template.spec.universe.decisionTimeframe,
+    });
+    const row = await trading.createStrategy(companyId, input, { actorType: "user", actorId: req.actor.userId ?? "board" }, template);
+    res.status(201).json(row);
+  });
 
   router.get("/companies/:companyId/trading/strategies", readScope(), async (req, res) => {
     res.json(await trading.listStrategies(req.params.companyId as string));

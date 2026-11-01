@@ -90,6 +90,7 @@ import { registerCandleRunner, tradingCandleRunner } from "./services/trading-ca
 import { tradingRegimeRunner } from "./services/trading-regime-runner.js";
 import { tradingBacktestStore } from "./services/trading-backtest-store.js";
 import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
+import { tradingTemplateStore } from "./services/trading-template-store.js";
 import { tradingEvaluatorService } from "./services/trading-evaluator.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
@@ -1126,7 +1127,7 @@ export async function startServer(): Promise<StartedServer> {
     // thread with its own database connection, on its own chain: never in the trading tick.
     const tradingBacktests = tradingBacktestRunner({
       databaseUrl: config.databaseBypassUrl || activeDatabaseConnectionString,
-      queue: tradingBacktestStore(bypassDb as any),
+      queue: { ...tradingBacktestStore(bypassDb as any), templateReports: tradingTemplateStore(bypassDb as any) },
       logger,
       enabled: config.tradingCandleStoreEnabled,
     });

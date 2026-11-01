@@ -140,7 +140,8 @@ export function buildVariants(base: TradingStrategySpec, maxVariants: number): B
   const names = Object.keys(base.indicators).sort();
   for (const name of names) {
     const def = base.indicators[name]!;
-    const key = "period" in def ? "period" : def.kind === "vwap" ? (def.anchor === "swing" ? "lookback" : null) : "lookback";
+    // A session range is anchored to an hour of the day: its neighbours are not "slightly longer", so it is left as written.
+    const key = "period" in def ? "period" : def.kind === "vwap" ? (def.anchor === "swing" ? "lookback" : null) : def.kind === "session_range" ? null : "lookback";
     if (key === null) continue;
     const current = (def as unknown as Record<string, number>)[key]!;
     const down = Math.max(2, Math.round(current * 0.75));
