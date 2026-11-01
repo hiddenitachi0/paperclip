@@ -1,11 +1,13 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { createTradingStrategySchema, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { askTraderSchema, createTradingStrategySchema, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin } from "./authz.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
+import { tradingTraderService } from "../services/trading-trader.js";
+import { logActivity } from "../services/activity-log.js";
 import { tradingEvaluatorService } from "../services/trading-evaluator.js";
 
 /**
@@ -19,6 +21,11 @@ import { tradingEvaluatorService } from "../services/trading-evaluator.js";
  * (assertCompanyOwnerAdminOrInstanceAdmin); reading is open to any active
  * company member.
  *
+ * DUR-5004: every write checks who is asking BEFORE it looks at the body, so an
+ * agent token gets a plain 403 whatever it sends. The Trader agent's own tools live in
+ * routes/agent-trading.ts; the one write here that concerns it ("Ask the analyst") is a
+ * person's action.
+ *
  * DUR-5002: changing a strategy's rules or limits (PATCH, or POST .../versions)
  * only ever files a draft version and an approval card; no route here
  * activates one. Approving happens on the card (routes/approvals.ts).
@@ -29,6 +36,7 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const trading = tradingService(db, { rawDb, ...deps });
+  const trader = tradingTraderService(db, rawDb);
   const evaluator = tradingEvaluatorService(db, { marketData: deps.marketData });
 
   function readScope() {
@@ -50,8 +58,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.post(
     "/companies/:companyId/trading/strategies",
-    validate(createTradingStrategySchema),
     writeScope(),
+    validate(createTradingStrategySchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       // writeScope() enforces board-only (assertCompanyOwnerAdminOrInstanceAdmin), so actor is always a board user here.
@@ -67,8 +75,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.patch(
     "/companies/:companyId/trading/strategies/:strategyId",
-    validate(updateTradingStrategySchema),
     writeScope(),
+    validate(updateTradingStrategySchema),
     async (req, res) => {
       // writeScope() enforces board-only, so the actor is always a person here.
       const actor = { actorType: "user" as const, actorId: req.actor.userId ?? "board" };
@@ -113,11 +121,33 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     res.json(await trading.versions.getCardSource(req.params.companyId as string, req.params.approvalId as string));
   });
 
+  /**
+   * "Ask the analyst": opens a task for the company's Trader agent with a
+   * person's question. Owner/admin only, like every other write here. It
+   * changes no strategy; the Trader answers by proposing a change (a card) or
+   * by commenting on the task.
+   */
+  router.post("/companies/:companyId/trading/analyst/ask", writeScope(), validate(askTraderSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const userId = req.actor.userId ?? "board";
+    const result = await trader.askTrader(companyId, { userId }, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userId,
+      action: "trading.trader_asked",
+      entityType: "issue",
+      entityId: result.issueId,
+      details: { strategyId: req.body.strategyId ?? null },
+    });
+    res.status(201).json(result);
+  });
+
   /** The kill switch -- the one route the UI's pause/resume button and the Telegram bridge's command both call. */
   router.post(
     "/companies/:companyId/trading/strategies/:strategyId/status",
-    validate(setTradingStrategyStatusSchema),
     writeScope(),
+    validate(setTradingStrategyStatusSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       // Starting a strategy that has not passed the past-data test is an owner's decision (decision 7), with a written reason.
@@ -157,8 +187,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   /** Queue a past-data test. It runs later, in a worker thread, one at a time; this only files the request. */
   router.post(
     "/companies/:companyId/trading/strategies/:strategyId/backtests",
-    validate(queueTradingBacktestSchema),
     writeScope(),
+    validate(queueTradingBacktestSchema),
     async (req, res) => {
       const row = await trading.backtests.queueRun(req.params.companyId as string, req.params.strategyId as string, req.body, { type: "user", id: req.actor.userId ?? "board" });
       res.status(202).json({ id: row.id, status: row.status, purpose: row.purpose, versionId: row.versionId });

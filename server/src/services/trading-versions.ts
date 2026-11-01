@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { approvals, tradingLedgerEntries, tradingStrategies, tradingStrategyVersions, withCompanyScope, type Db } from "@paperclipai/db";
 import {
+  TRADING_NOT_TESTED_ON_PAST_DATA,
   TRADING_STRATEGY_VERSION_APPROVAL_KIND,
   canonicalTradingJson,
   deriveTradingRiskConfig,
@@ -20,7 +21,7 @@ import {
   type TradingRuleBookInput,
   type TradingStrategySpec,
 } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { inheritStartClearance, isVersionStartCleared } from "./trading-backtest-store.js";
 
@@ -85,8 +86,12 @@ export function tradingVersionLabel(version: Pick<TradingStrategyVersionRow, "ve
 /** Everything on an approval card, generated from the stored version and nothing else. */
 export function tradingVersionCardPayload(strategy: { id: string; name: string }, version: TradingStrategyVersionRow, spec: TradingStrategySpec): Record<string, unknown> {
   const readBack = describeTradingSpec(spec);
-  const proposer = version.proposedByType === "agent" ? "The Trading Analyst" : version.proposedByType === "system" ? "The system" : "A team member";
+  const proposer = version.proposedByType === "agent" ? "The Trader" : version.proposedByType === "system" ? "The system" : "A team member";
   const summary = readBack.join(" ");
+  // Derived from the stored row alone, so the card check can regenerate it. No past-data test result is linked to a version yet
+  // (the test runner is a later piece), so an agent's proposal is always labelled untested; the label comes off only when a
+  // stored test result exists to point at.
+  const untested = version.proposedByType === "agent";
   return {
     kind: TRADING_STRATEGY_VERSION_APPROVAL_KIND,
     strategyId: strategy.id,
@@ -98,10 +103,30 @@ export function tradingVersionCardPayload(strategy: { id: string; name: string }
     proposedById: version.proposedById,
     title: tradingVersionCardTitle(strategy.name, version.version),
     summary,
-    plainSummary: `${proposer} proposes new rules (version ${version.version}) for the paper-trading strategy "${strategy.name}". Approving switches the strategy to exactly these rules from its next check; it trades play money only. ${summary}`,
+    plainSummary: `${proposer} proposes new rules (version ${version.version}) for the paper-trading strategy "${strategy.name}".${untested ? ` These rules are ${TRADING_NOT_TESTED_ON_PAST_DATA}.` : ""} Approving switches the strategy to exactly these rules from its next check; it trades play money only. ${summary}`,
     readBack,
     guidelines: version.guidelines,
+    ...(untested ? { pastDataTest: TRADING_NOT_TESTED_ON_PAST_DATA } : {}),
   };
+}
+
+/** The rules that differ between what is live and what is proposed, in the same plain words the card uses. */
+export function tradingChangesInWords(current: TradingStrategySpec, proposed: TradingStrategySpec): { added: string[]; removed: string[] } {
+  const before = describeTradingSpec(current);
+  const after = describeTradingSpec(proposed);
+  return { added: after.filter((line) => !before.includes(line)), removed: before.filter((line) => !after.includes(line)) };
+}
+
+/** The proposer's own words, shown on the card but never checked or acted on. */
+export interface TradingProposalNote {
+  summary: string;
+  reasons: string;
+}
+
+export interface ProposeVersionOptions {
+  note?: TradingProposalNote;
+  /** Refuse when this many agent proposals were already filed for the strategy in the last 24 hours. */
+  agentProposalsPerDay?: number;
 }
 
 function tradingVersionCardTitle(strategyName: string, versionNumber: number): string {
@@ -349,7 +374,7 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
    * strategy until an owner or admin approves the card. A newer proposal
    * supersedes an older open draft and closes its card.
    */
-  async function proposeVersion(companyId: string, strategyId: string, input: TradingRuleBookInput, proposer: TradingProposer): Promise<ProposeVersionResult> {
+  async function proposeVersion(companyId: string, strategyId: string, input: TradingRuleBookInput, proposer: TradingProposer, options: ProposeVersionOptions = {}): Promise<ProposeVersionResult> {
     const strategyRow = await requireStrategy(db, companyId, strategyId);
     const { strategy, version: active, spec: activeSpec } = await ensureActiveVersion(strategyRow);
     const parsed = tradingRuleBookSchema.safeParse(input);
@@ -369,7 +394,26 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         .where(and(eq(tradingStrategyVersions.strategyId, strategyId), eq(tradingStrategyVersions.status, "draft")));
       const same = openDrafts.find((d) => d.specDigest === digest);
       if (same) return { outcome: "already_pending" as const, version: same, approvalId: same.approvalId };
+      // An agent may only replace an agent's draft. A person's open proposal (and its card) is never cancelled
+      // by an agent; a person can still replace the agent's. Checked under the strategy row's lock.
+      if (proposer.type === "agent" && openDrafts.some((d) => d.proposedByType !== "agent")) {
+        throw conflict("A person's proposal for this strategy is waiting for a decision. Wait for it to be approved or rejected before proposing another change.", {
+          reason: "person_proposal_pending",
+        });
+      }
       const at = nowOf();
+      // Counted under the strategy row's lock, so two proposals at once cannot both slip under the cap.
+      if (proposer.type === "agent" && options.agentProposalsPerDay !== undefined) {
+        const [recent] = await tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(tradingStrategyVersions)
+          .where(and(eq(tradingStrategyVersions.strategyId, strategyId), eq(tradingStrategyVersions.proposedByType, "agent"), sql`${tradingStrategyVersions.createdAt} > now() - interval '24 hours'`));
+        if ((recent?.n ?? 0) >= options.agentProposalsPerDay) {
+          throw tooManyRequests(`At most ${options.agentProposalsPerDay} rule changes can be proposed for one strategy per day, and that many were already filed in the last 24 hours. Try again tomorrow.`, {
+            reason: "trader_proposal_daily_cap",
+          });
+        }
+      }
       for (const draft of openDrafts) {
         await tx.update(tradingStrategyVersions).set({ status: "superseded", supersededAt: at, updatedAt: at }).where(eq(tradingStrategyVersions.id, draft.id));
         if (draft.approvalId) {
@@ -407,8 +451,13 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
           requestedByAgentId: proposer.type === "agent" ? proposer.id : null,
           requestedByUserId: proposer.type === "user" ? proposer.id : null,
           status: "pending",
-          // Built from the stored row (what the database holds), not from the request body.
-          payload: tradingVersionCardPayload({ id: locked.id, name: locked.name }, stored, parseSpec(stored)),
+          // Built from the stored row (what the database holds), not from the request body. The two extra keys
+          // are not part of what the card check compares and can never change what approving activates.
+          payload: {
+            ...tradingVersionCardPayload({ id: locked.id, name: locked.name }, stored, parseSpec(stored)),
+            changes: tradingChangesInWords(activeSpec, parseSpec(stored)),
+            ...(options.note ? { proposerNote: { label: "The proposer's own words. Check the rules above, not this text.", ...options.note } } : {}),
+          },
         })
         .returning({ id: approvals.id });
       await tx.update(tradingStrategyVersions).set({ approvalId: card!.id, updatedAt: at }).where(eq(tradingStrategyVersions.id, stored.id));
@@ -417,7 +466,7 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         strategyId,
         strategyVersionId: stored.id,
         eventType: "reconciliation",
-        detail: { reason: "strategy_version_proposed", versionId: stored.id, versionNumber: stored.version, specDigest: digest, proposedBy: proposer, approvalId: card!.id },
+        detail: { reason: "strategy_version_proposed", versionId: stored.id, versionNumber: stored.version, specDigest: digest, proposedBy: proposer, approvalId: card!.id, ...(options.note ? { note: options.note } : {}) },
       });
       return { outcome: "drafted" as const, version: (await loadVersion(tx, companyId, stored.id))!, approvalId: card!.id };
     });
