@@ -1867,8 +1867,15 @@
     {
       "idx": 267,
       "version": "7",
-      "when": 1793307000000,
-      "tag": "0267_trading_backtest",
+      "when": 1793556466417,
+      "tag": "0267_trading_predictions",
+      "breakpoints": true
+    },
+    {
+      "idx": 268,
+      "version": "7",
+      "when": 1793562000000,
+      "tag": "0268_trading_backtest",
       "breakpoints": true
     }
   ]

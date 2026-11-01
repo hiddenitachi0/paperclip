@@ -277,6 +277,18 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     expect(crossed.status).toBe(404);
     expect(await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.strategyId, strategy.id))).toHaveLength(1);
   });
+  it("DUR-5010: any member reads the scoreboard (collecting, no hit rate), another company cannot, a bad version is a 400", async () => {
+    const companyId = await seedCompany();
+    const other = await seedCompany();
+    const strategy = await createStrategyAs(companyId);
+    const viewer = createApp(companyId, "viewer");
+    const board = await request(viewer).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/scoreboard`);
+    expect(board.status).toBe(200);
+    expect(board.body).toMatchObject({ strategyId: strategy.id, version: 1, status: { status: "collecting", samples: 0, targetSamples: 620 }, verdict: null, forecasters: [] });
+    expect((await request(viewer).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/scoreboard?version=0`)).status).toBe(400);
+    expect((await request(createApp(other, "owner")).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/scoreboard`)).status).toBe(403);
+    expect((await request(createApp(other, "owner")).get(`/api/companies/${other}/trading/strategies/${strategy.id}/scoreboard`)).status).toBe(404);
+  });
 
   describe("the start gate and past-data tests (DUR-5008)", () => {
     async function newStrategyAs(companyId: string) {

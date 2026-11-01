@@ -4,7 +4,7 @@ import { companies } from "./companies.js";
 import { tradingStrategies, tradingStrategyVersions } from "./trading.js";
 
 /**
- * DUR-5008 (migration 0267): the past-data test ("backtest") and its start gate.
+ * DUR-5008 (migration 0268): the past-data test ("backtest") and its start gate.
  *
  *   * trading_backtest_runs: one row per requested test of one strategy
  *     version. The worker writes the report, the gate verdict and the result
@@ -23,7 +23,7 @@ import { tradingStrategies, tradingStrategyVersions } from "./trading.js";
  *     (plan section 8). Append-only.
  *
  * All four are company-scoped (RLS in both lists of 0164). Rollback: see
- * 0267_trading_backtest.sql.
+ * 0268_trading_backtest.sql.
  */
 export const TRADING_BACKTEST_RUN_STATUSES_DB = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 

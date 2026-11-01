@@ -3310,3 +3310,4 @@ export {
 } from "./board-chat.js";
 export * from "./env-file-refused.js";
 export * from "./trading-candles.js";
+export * from "./trading-scoring.js";

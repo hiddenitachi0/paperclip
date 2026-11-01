@@ -10,13 +10,13 @@ import {
   normalCdf,
   normalInverseCdf,
   planHoldout,
-  seededRandom,
   summarizeBacktest,
   walkForwardWindows,
   wilsonInterval,
   type BacktestGateFacts,
   type BacktestTrade,
 } from "./trading-backtest.js";
+import { seededRandom } from "./trading-scoring.js";
 
 /**
  * DUR-5008: the pure maths and rules of the past-data test, pinned to values

@@ -261,18 +261,6 @@ export function deflatedSharpe(input: {
   return { probability: normalCdf(z), benchmarkSharpe: benchmark };
 }
 
-/** A small seeded generator (mulberry32): the random-entry baseline must give the same answer on every run. */
-export function seededRandom(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 /** A 32-bit seed from text (FNV-1a), so a run's random numbers follow from its own parameters. */
 export function seedFromText(text: string): number {
   let h = 0x811c9dc5;

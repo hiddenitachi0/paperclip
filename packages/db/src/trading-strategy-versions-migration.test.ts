@@ -43,12 +43,12 @@ function rollbackStatements(): string[] {
 }
 
 /**
- * DUR-5008: 0267 adds tables that point at trading_strategy_versions, so 0266
- * can only be rolled back after 0267 has been (newest first, as always). The
+ * DUR-5008: 0268 adds tables that point at trading_strategy_versions, so 0266
+ * can only be rolled back after 0268 has been (newest first, as always). The
  * rehearsal below puts the database back into its pre-0266 shape, so it takes
- * 0267 off first, using the rollback written in that migration's own header.
+ * 0268 off first, using the rollback written in that migration's own header.
  */
-const LATER_MIGRATION_PATH = fileURLToPath(new URL("./migrations/0267_trading_backtest.sql", import.meta.url));
+const LATER_MIGRATION_PATH = fileURLToPath(new URL("./migrations/0268_trading_backtest.sql", import.meta.url));
 function laterRollbackStatements(): string[] {
   return readFileSync(LATER_MIGRATION_PATH, "utf8")
     .split("\n")

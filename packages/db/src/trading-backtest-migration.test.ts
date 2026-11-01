@@ -7,7 +7,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * DUR-5008, migration 0267_trading_backtest: the rehearsal. It runs against a
+ * DUR-5008, migration 0268_trading_backtest: the rehearsal. It runs against a
  * database that already holds a strategy with an approved version, an order
  * and a ledger row; proves the upgrade keeps all of them, that a second run
  * changes nothing, that the documented rollback removes only the new objects
@@ -16,9 +16,9 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
-if (!support.supported) console.warn(`Skipping migration 0267 test: ${support.reason ?? "unsupported environment"}`);
+if (!support.supported) console.warn(`Skipping migration 0268 test: ${support.reason ?? "unsupported environment"}`);
 
-const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0267_trading_backtest.sql", import.meta.url));
+const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0268_trading_backtest.sql", import.meta.url));
 const DIGEST = "a".repeat(64);
 const TABLES = ["trading_backtest_runs", "trading_backtest_trials", "trading_backtest_holdout_reads", "trading_start_gate_overrides"];
 
@@ -39,7 +39,7 @@ function rollbackStatements(): string[] {
     .map((line) => line.replace(/^--\s+/, "").trim());
 }
 
-d("migration 0267_trading_backtest", () => {
+d("migration 0268_trading_backtest", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const companyId = randomUUID();
@@ -51,7 +51,7 @@ d("migration 0267_trading_backtest", () => {
   }
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0267-trading-backtest-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0268-trading-backtest-");
     db = createDb(tempDb.connectionString);
     await db.execute(sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Trading', 'TRD')`);
     await db.execute(sql`
