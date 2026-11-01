@@ -10,6 +10,7 @@ import { useCompanyRole } from "../hooks/useCompanyRole";
 import { tradingApi, type TradingStrategySummary } from "../api/trading";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
+import { startGateRefusal } from "../lib/tradingBacktestWords";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
@@ -121,7 +122,15 @@ export function Trading() {
     mutationFn: ({ id, status }: { id: string; status: "running" | "paused" }) =>
       tradingApi.setStatus(selectedCompanyId!, id, status),
     onSuccess: invalidate,
-    onError: (error) => pushToast({ title: "Could not change the strategy", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error, variables) => {
+      // A strategy that has not passed the past-data test is refused by the server; its reason is shown, with a way to open the test.
+      const refusal = startGateRefusal(error);
+      if (refusal) {
+        pushToast({ title: "Not started yet", body: refusal.reason, tone: "warn", ttlMs: 15_000, action: { label: "Open the strategy", href: `/trading/${variables.id}` } });
+        return;
+      }
+      pushToast({ title: "Could not change the strategy", body: errorMessage(error, ""), tone: "error" });
+    },
   });
 
   const busy = setStatus.isPending;
