@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CandlestickChart, Pause, Play } from "lucide-react";
-import { describeTradingPauseReason, type CreateTradingStrategyInput } from "@paperclipai/shared";
-import { Link } from "@/lib/router";
+import { describeTradingPauseReason } from "@paperclipai/shared";
+import { Link, useNavigate } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { CreateTradingStrategyDialog } from "../components/CreateTradingStrategyDialog";
+import { TradingDisclaimer } from "../components/TradingDisclaimer";
 import { CryptoCompanySettingsCard } from "../components/CryptoCompanySettingsCard";
 import { TestWalletsPanel } from "../components/TestWalletsPanel";
 
@@ -97,7 +97,8 @@ export function Trading() {
   const role = useCompanyRole(selectedCompanyId);
   const canManage = role.canManageConnections;
 
-  const [formOpen, setFormOpen] = useState(false);
+  const navigate = useNavigate();
+  const openNewStrategy = () => navigate("/trading/new");
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Trading" }]);
@@ -115,16 +116,6 @@ export function Trading() {
     if (selectedCompanyId) queryClient.invalidateQueries({ queryKey: queryKeys.trading.list(selectedCompanyId) });
   };
 
-  const create = useMutation({
-    mutationFn: (input: Partial<CreateTradingStrategyInput>) => tradingApi.create(selectedCompanyId!, input),
-    onSuccess: () => {
-      invalidate();
-      setFormOpen(false);
-      pushToast({ title: "Strategy added", body: "It starts paused — press Start when you're ready.", tone: "success" });
-    },
-    onError: (error) => pushToast({ title: "Could not add the strategy", body: errorMessage(error, ""), tone: "error" }),
-  });
-
   const setStatus = useMutation({
     mutationFn: ({ id, status }: { id: string; status: "running" | "paused" }) =>
       tradingApi.setStatus(selectedCompanyId!, id, status),
@@ -132,7 +123,7 @@ export function Trading() {
     onError: (error) => pushToast({ title: "Could not change the strategy", body: errorMessage(error, ""), tone: "error" }),
   });
 
-  const busy = create.isPending || setStatus.isPending;
+  const busy = setStatus.isPending;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -143,8 +134,11 @@ export function Trading() {
             Fixed, code-only rules trade with play money and explain themselves — no real money, no AI on the order
             path. Use Stop any time to halt a strategy immediately.
           </p>
+          <div className="mt-1">
+            <TradingDisclaimer />
+          </div>
         </div>
-        {canManage ? <Button onClick={() => setFormOpen(true)}>Add strategy</Button> : null}
+        {canManage ? <Button onClick={openNewStrategy}>Add strategy</Button> : null}
       </div>
 
       {strategiesQuery.isLoading ? (
@@ -160,7 +154,7 @@ export function Trading() {
               : "No trading strategies yet. A company owner or admin can add one."
           }
           action={canManage ? "Add strategy" : undefined}
-          onAction={canManage ? () => setFormOpen(true) : undefined}
+          onAction={canManage ? openNewStrategy : undefined}
         />
       ) : (
         <ul className="divide-y divide-border rounded-lg border border-border">
@@ -184,12 +178,7 @@ export function Trading() {
 
       {canManage && selectedCompanyId ? <CryptoCompanySettingsCard companyId={selectedCompanyId} /> : null}
 
-      <CreateTradingStrategyDialog
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        busy={create.isPending}
-        onSubmit={(input) => create.mutate(input)}
-      />
+      <TradingDisclaimer />
     </div>
   );
 }
