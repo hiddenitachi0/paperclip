@@ -255,6 +255,14 @@ function IndicatorEditor({ name, def, spec, onChange, onRemove }: { name: string
         </>
       ) : def.kind === "swing_high" || def.kind === "swing_low" ? (
         period("Look back over", def.lookback, (lookback) => ({ ...def, lookback }))
+      ) : def.kind === "session_range" ? (
+        <Field label="Opening stretch" hint="Set by the template this strategy came from. Change it by proposing a new version.">
+          {() => (
+            <span>
+              The {def.band === "high" ? "highest" : "lowest"} price of the first {def.sessionBars} candle{def.sessionBars === 1 ? "" : "s"} after {String(def.anchorHourUtc).padStart(2, "0")}:00 UTC
+            </span>
+          )}
+        </Field>
       ) : (
         period("Look back over", def.period, (p) => ({ ...def, period: p }))
       )}
