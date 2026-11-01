@@ -284,6 +284,35 @@ d("trading rule-book versions", () => {
       await expectCacheEqualsActiveVersion(strategy.id);
     });
 
+    it("an agent can never cancel a person's open proposal, but a person can replace the agent's", async () => {
+      const companyId = await seedCompany();
+      const trading = service(T_BUY);
+      const agent = { type: "agent" as const, id: randomUUID() };
+      await db.insert(agents).values({ id: agent.id, companyId, name: "Trader", role: "analyst" });
+      const tighter = (n: number) => ({ spec: stopSpec({ neverDo: riskConfig({ maxPositionNok: n }) }), guidelines: "" });
+
+      // a person's open draft: the agent is refused with a 409 and nothing changes
+      const s1 = await trading.createStrategy(companyId, { ...INPUT, riskConfig: riskConfig({ maxPositionNok: 1_000 }) }, USER);
+      const person = await trading.versions.proposeVersion(companyId, s1.id, tighter(800), { type: "user", id: "u1" });
+      if (person.outcome !== "drafted") throw new Error("expected a person draft");
+      await expect(trading.versions.proposeVersion(companyId, s1.id, tighter(500), agent)).rejects.toMatchObject({ status: 409 });
+      const rows1 = await versionRows(s1.id);
+      expect(rows1.map((r) => [r.version, r.status])).toEqual([[1, "approved"], [2, "draft"]]);
+      expect((await cardOf(person.approvalId)).status).toBe("pending");
+
+      // an agent may replace its own earlier draft; a person may replace the agent's
+      const s2 = await trading.createStrategy(companyId, { ...INPUT, riskConfig: riskConfig({ maxPositionNok: 1_000 }) }, USER);
+      const first = await trading.versions.proposeVersion(companyId, s2.id, tighter(800), agent);
+      const second = await trading.versions.proposeVersion(companyId, s2.id, tighter(700), agent);
+      if (first.outcome !== "drafted" || second.outcome !== "drafted") throw new Error("expected agent drafts");
+      expect((await cardOf(first.approvalId)).status).toBe("cancelled");
+      const replaced = await trading.versions.proposeVersion(companyId, s2.id, tighter(600), { type: "user", id: "u1" });
+      expect(replaced.outcome).toBe("drafted");
+      expect((await cardOf(second.approvalId)).status).toBe("cancelled");
+      // now a person's draft is open again, so the agent is refused
+      await expect(trading.versions.proposeVersion(companyId, s2.id, tighter(500), agent)).rejects.toMatchObject({ status: 409 });
+    });
+
     it("refuses rules for another coin or timeframe, and invalid rules, without storing anything", async () => {
       const companyId = await seedCompany();
       const trading = service(T_BUY);
