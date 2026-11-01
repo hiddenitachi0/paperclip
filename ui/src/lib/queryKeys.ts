@@ -357,6 +357,7 @@ export const queryKeys = {
     list: (companyId: string) => ["trading-strategies", companyId] as const,
     dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
     orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
+    versions: (companyId: string, strategyId: string) => ["trading-versions", companyId, strategyId] as const,
   },
   // Crypto wallets for agents.
   cryptoWallets: {
