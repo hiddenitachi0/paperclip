@@ -1884,6 +1884,13 @@
       "when": 1793564000000,
       "tag": "0269_trading_regimes",
       "breakpoints": true
+    },
+    {
+      "idx": 270,
+      "version": "7",
+      "when": 1793574000000,
+      "tag": "0270_trading_template_library",
+      "breakpoints": true
     }
   ]
 }
