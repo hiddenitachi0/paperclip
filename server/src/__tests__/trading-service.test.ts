@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
-import { createDb, companies, approvals, tradingStrategies, type Db } from "@paperclipai/db";
+import { createDb, companies, approvals, tradingAlerts, tradingStrategies, type Db } from "@paperclipai/db";
 import {
   TRADING_ENGINE_VERSION,
   TRADING_MAX_CATCH_UP_BARS,
@@ -266,6 +266,11 @@ d("tradingService", () => {
     const alert = ledgerEntries.find((e) => e.eventType === "circuit_breaker")!;
     expect(alert.detail).toMatchObject({ alert: "entries_halted", cause: "circuit_breaker", reason: "single_tick_price_jump", timeframe: "15m", jumpThresholdPct: 15 });
     expect(ledgerEntries.filter((e) => e.eventType === "circuit_breaker")).toHaveLength(1);
+
+    // DUR-5017: the trip also queued one plain-words Telegram alert.
+    const halted = await db.select().from(tradingAlerts).where(and(eq(tradingAlerts.companyId, companyId), eq(tradingAlerts.kind, "entries_halted")));
+    expect(halted).toHaveLength(1);
+    expect(halted[0]!.text).toContain("price jumped suddenly");
 
     await trading.setStatus(companyId, strategy.id, "paused");
   });

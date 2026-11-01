@@ -88,6 +88,7 @@ import { videoStorylineRenderService } from "./services/video-storyline-render.j
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
 import { tradingRegimeRunner } from "./services/trading-regime-runner.js";
+import { tradingVigilanceRunner } from "./services/trading-vigilance-runner.js";
 import { tradingBacktestStore } from "./services/trading-backtest-store.js";
 import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
 import { tradingEvaluatorService } from "./services/trading-evaluator.js";
@@ -1122,6 +1123,8 @@ export async function startServer(): Promise<StartedServer> {
     registerCandleRunner(candleStore);
     // DUR-5013: the daily market-weather labels, recomputed from the candle store.
     const marketWeather = tradingRegimeRunner({ db: schedulerDb as any, logger, enabled: config.tradingMarketWeatherEnabled });
+    // DUR-5017: vigilance alerts found by looking (weather flips, big moves, strategies left paused, the daily summary).
+    const tradingVigilance = tradingVigilanceRunner({ db: schedulerDb as any, logger });
     // DUR-5008: past-data tests (walk-forward backtests). One at a time, in a worker
     // thread with its own database connection, on its own chain: never in the trading tick.
     const tradingBacktests = tradingBacktestRunner({
@@ -1900,6 +1903,22 @@ export async function startServer(): Promise<StartedServer> {
           () => marketWeather.tick(new Date()),
         ).catch((err) => {
           logger.error({ err }, "market weather tick failed");
+        }),
+      );
+
+      // DUR-5017: vigilance alerts. The runner decides whether a pass is due (about
+      // every ten minutes); each occurrence is queued once by its dedupe key.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingVigilance, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tradingVigilance",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tradingVigilance",
+          },
+          () => tradingVigilance.tick(new Date()),
+        ).catch((err) => {
+          logger.error({ err }, "trading vigilance tick failed");
         }),
       );
 

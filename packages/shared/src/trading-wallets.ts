@@ -81,8 +81,58 @@ export const TRADING_ALERT_KINDS = [
   "sweep_address_requested",
   "sweep_waiting_approval",
   "sweep_sent",
+  // Vigilance alerts (DUR-5017).
+  "market_weather_flip",
+  "big_move",
+  "entries_halted",
+  "strategy_halted",
+  "paused_after_restart",
+  "daily_summary",
 ] as const;
 export type TradingAlertKind = (typeof TRADING_ALERT_KINDS)[number];
+
+/** The vigilance events a company can switch on and off (DUR-5017, decision 16). */
+export const TRADING_ALERT_EVENTS = ["weather_flips", "big_moves", "breaker_trips", "paused_after_restart", "daily_summary"] as const;
+export type TradingAlertEvent = (typeof TRADING_ALERT_EVENTS)[number];
+
+export const TRADING_ALERT_EVENT_LABELS: Readonly<Record<TradingAlertEvent, string>> = {
+  weather_flips: "The market weather for a coin changes",
+  big_moves: "A coin makes an unusually big move",
+  breaker_trips: "A safety stop halts a strategy",
+  paused_after_restart: "A strategy is still paused hours after an update",
+  daily_summary: "One short summary message a day",
+};
+
+export const TRADING_ALERT_DEFAULTS = {
+  bigMoveAtrK: 3,
+  pausedAfterRestartHours: 2,
+} as const;
+
+export interface TradingAlertSettings {
+  weatherFlips: boolean;
+  bigMoves: boolean;
+  breakerTrips: boolean;
+  pausedAfterRestart: boolean;
+  dailySummary: boolean;
+  /** An "unusually big move" is more than this many typical 4-hour swings (ATR) in one closed 4-hour bar. */
+  bigMoveAtrK: number;
+  /** A strategy still paused this many hours after a restart triggers the paused-after-restart alert. */
+  pausedAfterRestartHours: number;
+}
+
+export const updateTradingAlertSettingsSchema = z
+  .object({
+    weatherFlips: z.boolean().optional(),
+    bigMoves: z.boolean().optional(),
+    breakerTrips: z.boolean().optional(),
+    pausedAfterRestart: z.boolean().optional(),
+    dailySummary: z.boolean().optional(),
+    bigMoveAtrK: z.number().min(1, "Use a number from 1 to 10.").max(10, "Use a number from 1 to 10.").optional(),
+    pausedAfterRestartHours: z.number().int().min(1, "Use whole hours from 1 to 72.").max(72, "Use whole hours from 1 to 72.").optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: "Send at least one setting to change." });
+export type UpdateTradingAlertSettingsInput = z.infer<typeof updateTradingAlertSettingsSchema>;
 
 export interface TradingAlertOutboxItem {
   id: string;
