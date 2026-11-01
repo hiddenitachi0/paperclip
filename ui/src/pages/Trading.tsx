@@ -17,6 +17,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { TradingDisclaimer } from "../components/TradingDisclaimer";
 import { CryptoCompanySettingsCard } from "../components/CryptoCompanySettingsCard";
+import { MarketWeatherPanel } from "../components/MarketWeatherPanel";
 import { TestWalletsPanel } from "../components/TestWalletsPanel";
 
 /**
@@ -182,6 +183,8 @@ export function Trading() {
       {!canManage && strategies.length > 0 ? (
         <p className="text-xs text-muted-foreground">Only a company owner or admin can add strategies or use the kill switch.</p>
       ) : null}
+
+      {selectedCompanyId ? <MarketWeatherPanel companyId={selectedCompanyId} /> : null}
 
       {canManage && selectedCompanyId ? <TestWalletsPanel companyId={selectedCompanyId} /> : null}
 

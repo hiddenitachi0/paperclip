@@ -1,5 +1,9 @@
 import type {
   CreateTradingStrategyInput,
+  TradingRegimeFlipCounts,
+  TradingRegimeSpell,
+  TradingRegimeTrend,
+  TradingRegimeVolatility,
   TradingRuleBookInput,
   UpdateTradingStrategyInput,
   TradingAsset,
@@ -147,7 +151,37 @@ export interface TradingBacktestRun {
   finishedAt: string | null;
 }
 
+/** One coin's current market weather (the server's ready-to-show line plus the parts behind it). */
+export interface MarketWeatherItem {
+  asset: TradingAsset;
+  name: string;
+  /** Ready to show, e.g. "Bitcoin: uptrend, normal swings, since 12 Oct". */
+  text: string;
+  trend: TradingRegimeTrend;
+  volatility: TradingRegimeVolatility;
+  squeeze: boolean;
+  spellNo: number;
+  spellStartDay: string;
+  day: string;
+  availableAt: string;
+  source: string;
+}
+
+export interface MarketWeatherHistory {
+  asset: TradingAsset;
+  name: string;
+  current: MarketWeatherItem | null;
+  /** Newest first, capped by the `spells` option. `flips.spells` is the true total. */
+  spells: TradingRegimeSpell[];
+  flips: TradingRegimeFlipCounts;
+  firstDay: string | null;
+}
+
 export const tradingApi = {
+  marketWeather: (companyId: string) =>
+    api.get<{ items: MarketWeatherItem[] }>(`/companies/${companyId}/trading/market-weather`),
+  marketWeatherHistory: (companyId: string, asset: TradingAsset, spells = 5) =>
+    api.get<MarketWeatherHistory>(`/companies/${companyId}/trading/market-weather/${asset}?spells=${spells}`),
   list: (companyId: string) => api.get<TradingStrategySummary[]>(`/companies/${companyId}/trading/strategies`),
   create: (companyId: string, input: Partial<CreateTradingStrategyInput>) =>
     api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies`, input),

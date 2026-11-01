@@ -361,6 +361,8 @@ export const queryKeys = {
     startGate: (companyId: string, strategyId: string) => ["trading-start-gate", companyId, strategyId] as const,
     backtests: (companyId: string, strategyId: string) => ["trading-backtests", companyId, strategyId] as const,
     backtest: (companyId: string, strategyId: string, runId: string) => ["trading-backtest", companyId, strategyId, runId] as const,
+    marketWeather: (companyId: string) => ["trading-market-weather", companyId] as const,
+    marketWeatherHistory: (companyId: string, asset: string) => ["trading-market-weather", companyId, asset] as const,
   },
   // Crypto wallets for agents.
   cryptoWallets: {

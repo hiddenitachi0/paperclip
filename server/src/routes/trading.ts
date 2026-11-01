@@ -1,11 +1,14 @@
 import { Router } from "express";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { askTraderSchema, createTradingStrategySchema, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { TRADING_ASSETS, askTraderSchema, createTradingStrategySchema, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { badRequest } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin } from "./authz.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
+import { currentMarketWeather, marketWeatherHistory } from "../services/trading-regimes.js";
 import { tradingTraderService } from "../services/trading-trader.js";
 import { logActivity } from "../services/activity-log.js";
 import { tradingEvaluatorService } from "../services/trading-evaluator.js";
@@ -210,6 +213,26 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.get("/companies/:companyId/trading/strategies/:strategyId/orders", readScope(), async (req, res) => {
     res.json(await trading.listOrders(req.params.companyId as string, req.params.strategyId as string));
+  });
+
+  // DUR-5013: market weather. Instance-wide public data (one label per coin per
+  // day from the candle store), read-only, any active company member. A label is
+  // only listed once its day has closed, so "today" shows yesterday's label.
+  router.get("/companies/:companyId/trading/market-weather", readScope(), async (_req, res) => {
+    res.json({ items: await currentMarketWeather(db, new Date()) });
+  });
+
+  const weatherHistoryQuery = z.object({
+    from: z.coerce.date().optional(),
+    to: z.coerce.date().optional(),
+    spells: z.coerce.number().int().min(1).max(500).default(50),
+  });
+  router.get("/companies/:companyId/trading/market-weather/:asset", readScope(), async (req, res) => {
+    const asset = (TRADING_ASSETS as readonly string[]).includes(String(req.params.asset)) ? (req.params.asset as (typeof TRADING_ASSETS)[number]) : null;
+    if (!asset) throw badRequest("Unknown coin.");
+    const query = weatherHistoryQuery.safeParse(req.query);
+    if (!query.success) throw badRequest("Invalid market weather query.", query.error.flatten());
+    res.json(await marketWeatherHistory(db, asset, new Date(), { from: query.data.from, to: query.data.to, spellLimit: query.data.spells }));
   });
 
   // DUR-5010: the prediction scoreboard. Read-only; while a version is still collecting it shows

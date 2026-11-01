@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
+import { tradingRegimeRunner } from "./services/trading-regime-runner.js";
 import { tradingBacktestStore } from "./services/trading-backtest-store.js";
 import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
 import { tradingEvaluatorService } from "./services/trading-evaluator.js";
@@ -1119,6 +1120,8 @@ export async function startServer(): Promise<StartedServer> {
       enabled: config.tradingCandleStoreEnabled,
     });
     registerCandleRunner(candleStore);
+    // DUR-5013: the daily market-weather labels, recomputed from the candle store.
+    const marketWeather = tradingRegimeRunner({ db: schedulerDb as any, logger, enabled: config.tradingMarketWeatherEnabled });
     // DUR-5008: past-data tests (walk-forward backtests). One at a time, in a worker
     // thread with its own database connection, on its own chain: never in the trading tick.
     const tradingBacktests = tradingBacktestRunner({
@@ -1882,6 +1885,22 @@ export async function startServer(): Promise<StartedServer> {
           .catch((err) => {
             logger.error({ err }, "candle store tick failed");
           }),
+      );
+
+      // DUR-5013: market weather. The runner decides whether a pass is due (about
+      // hourly) and only writes new or changed days; it never touches company rows.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.marketWeather, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: marketWeather",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:marketWeather",
+          },
+          () => marketWeather.tick(new Date()),
+        ).catch((err) => {
+          logger.error({ err }, "market weather tick failed");
+        }),
       );
 
       // DUR-5008: past-data tests. tick() only looks at the queue and starts a
