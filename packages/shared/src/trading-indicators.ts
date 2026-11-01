@@ -187,6 +187,29 @@ export function donchianSeries(bars: readonly Bar[], period: number, band: "uppe
   return out;
 }
 
+/**
+ * DUR-5014: the range of a "session" (an opening range). The session starts on
+ * the bar that opens at `anchorHourUtc:00` and lasts `sessionBars` bars. The
+ * value is null until the session's last bar has closed, then holds that
+ * session's high (or low) for the rest of the same UTC day (24 hours after the
+ * session's first bar), so it only uses closed bars. A bar size that has no bar
+ * opening at the anchor hour never produces a value.
+ */
+export function sessionRangeSeries(bars: readonly Bar[], band: "high" | "low", anchorHourUtc: number, sessionBars: number): IndicatorSeries {
+  const out = nulls(bars.length);
+  let anchor = -1;
+  for (let i = 0; i < bars.length; i++) {
+    const open = bars[i]!.openTime;
+    if (open.getUTCHours() === anchorHourUtc && open.getUTCMinutes() === 0) anchor = i;
+    if (anchor < 0 || i - anchor < sessionBars - 1) continue;
+    if (open.getTime() - bars[anchor]!.openTime.getTime() >= 24 * 3_600_000) continue;
+    let value = band === "high" ? -Infinity : Infinity;
+    for (let j = anchor; j < anchor + sessionBars; j++) value = band === "high" ? Math.max(value, bars[j]!.high) : Math.min(value, bars[j]!.low);
+    out[i] = value;
+  }
+  return out;
+}
+
 /** Highest high over the last `lookback` bars, INCLUDING the current bar. */
 export function swingHighSeries(bars: readonly Bar[], lookback: number): IndicatorSeries {
   const out = nulls(bars.length);

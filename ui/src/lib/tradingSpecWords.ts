@@ -64,6 +64,8 @@ export function indicatorPhrase(def: TradingIndicatorDefinition): string {
       return `the highest price of the last ${CANDLES(def.lookback)}`;
     case "swing_low":
       return `the lowest price of the last ${CANDLES(def.lookback)}`;
+    case "session_range":
+      return `the ${def.band === "high" ? "highest" : "lowest"} price of the first ${CANDLES(def.sessionBars)} after ${String(def.anchorHourUtc).padStart(2, "0")}:00 UTC`;
     default: {
       const exhaustive: never = def;
       return exhaustive;

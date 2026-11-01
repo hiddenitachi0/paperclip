@@ -19,6 +19,7 @@ import {
   rocSeries,
   rsiSeries,
   rvolSeries,
+  sessionRangeSeries,
   smaSeries,
   swingHighSeries,
   swingLowSeries,
@@ -80,6 +81,8 @@ export const tradingIndicatorDefinitionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("roc"), period }).strict(),
   z.object({ kind: z.literal("swing_high"), lookback: period }).strict(),
   z.object({ kind: z.literal("swing_low"), lookback: period }).strict(),
+  /** DUR-5014: the high or low of the first `sessionBars` bars from `anchorHourUtc:00` (an opening range), usable once those bars have closed and for the rest of that UTC day. */
+  z.object({ kind: z.literal("session_range"), band: z.enum(["high", "low"]), anchorHourUtc: z.number().int().min(0).max(23), sessionBars: z.number().int().min(1).max(12) }).strict(),
 ]);
 export type TradingIndicatorDefinition = z.infer<typeof tradingIndicatorDefinitionSchema>;
 
@@ -343,6 +346,8 @@ function indicatorMinBars(def: TradingIndicatorDefinition): number {
     case "swing_high":
     case "swing_low":
       return def.lookback;
+    case "session_range":
+      return def.sessionBars;
     default: {
       const exhaustive: never = def;
       return exhaustive;
@@ -351,6 +356,7 @@ function indicatorMinBars(def: TradingIndicatorDefinition): number {
 }
 
 function indicatorPeriod(def: TradingIndicatorDefinition): number {
+  if (def.kind === "session_range") return def.sessionBars;
   return def.kind === "vwap" ? (def.anchor === "swing" ? def.lookback : 1) : "period" in def ? def.period : def.lookback;
 }
 
@@ -485,6 +491,8 @@ function indicatorSeries(def: TradingIndicatorDefinition, bars: readonly Trading
       return swingHighSeries(bars, def.lookback);
     case "swing_low":
       return swingLowSeries(bars, def.lookback);
+    case "session_range":
+      return sessionRangeSeries(bars, def.band, def.anchorHourUtc, def.sessionBars);
     default: {
       const exhaustive: never = def;
       return exhaustive;
@@ -973,6 +981,8 @@ function describeIndicator(name: string, def: TradingIndicatorDefinition): strin
       return `${name} = highest high of the last ${def.lookback} bars`;
     case "swing_low":
       return `${name} = lowest low of the last ${def.lookback} bars`;
+    case "session_range":
+      return `${name} = ${def.band} of the first ${def.sessionBars} bar${def.sessionBars === 1 ? "" : "s"} after ${String(def.anchorHourUtc).padStart(2, "0")}:00 UTC`;
     default: {
       const exhaustive: never = def;
       return exhaustive;
