@@ -81,6 +81,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:videoStorylineStitch",
   "heartbeat-scheduler:costReconciliation",
   "heartbeat-scheduler:tradingAgent",
+  "heartbeat-scheduler:tradingEvaluator",
   "heartbeat-scheduler:localModelHealth",
   "heartbeat-scheduler:modelSetupReview",
   // Follows up wallet approval cards and submitted payments each tick; every

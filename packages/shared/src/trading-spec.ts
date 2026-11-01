@@ -171,6 +171,14 @@ export const tradingPredictionSchema = z
     /** A move smaller than this % either way counts as "flat" when scoring a direction call. */
     flatBandPct: z.number().min(0).max(5),
     rUnit: z.enum(["stop_distance", "atr_at_entry"]),
+    /**
+     * DUR-5010: the planned number of independent resolved predictions and the
+     * minimum running time (days), fixed with the version when it is approved.
+     * Optional so every version approved before they existed keeps its digest;
+     * absent means the defaults in trading-scoring.ts (about 620 and 90 days).
+     */
+    targetSamples: z.number().int().min(20).max(20_000).optional(),
+    minRunningDays: z.number().int().min(0).max(1_000).optional(),
   })
   .strict();
 

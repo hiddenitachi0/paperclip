@@ -87,6 +87,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
+import { tradingEvaluatorService } from "./services/trading-evaluator.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
@@ -1116,6 +1117,10 @@ export async function startServer(): Promise<StartedServer> {
       enabled: config.tradingCandleStoreEnabled,
     });
     registerCandleRunner(candleStore);
+    // DUR-5010: the prediction evaluator. Its own chain, never in the paper order
+    // path: it places no orders and files no cards, so it starts by itself on
+    // every boot even though the order path pauses on restart (DUR-4171).
+    const tradingEvaluator = tradingEvaluatorService(schedulerDb as any);
     const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1253,6 +1258,21 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "startup trading-agent legacy conversion failed");
         });
+
+      // DUR-5010: the evaluator writes a gap event for the time since its last
+      // heartbeat and remembers this boot; bars that closed during the downtime
+      // are never predicted. A failure here must not stop boot.
+      if (config.tradingEvaluatorEnabled) {
+        // Same connection as reconcileOnBoot above (schedulerDb), so no extra bypass wrapper.
+        await tradingEvaluator
+          .boot(new Date())
+          .then((result) => {
+            logger.info({ gapSeconds: Math.round(result.gapMs / 1000), strategies: result.strategies }, "startup trading evaluator booted");
+          })
+          .catch((err) => {
+            logger.error({ err }, "startup trading evaluator boot failed");
+          });
+      }
 
       // DUR-100: verify every active routine's declared schedule chains actually
       // have a live, usable trigger row before logging anything as healthy —
@@ -1853,6 +1873,31 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "candle store tick failed");
           }),
       );
+
+      // DUR-5010: the prediction evaluator and resolver. A separate chain from
+      // the trading tick above: it only reads strategies, writes the append-only
+      // prediction ledger, and never places an order or files a card.
+      if (config.tradingEvaluatorEnabled) {
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingEvaluator, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: tradingEvaluator",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:tradingEvaluator",
+            },
+            () => tradingEvaluator.tick(new Date()),
+          )
+            .then((result) => {
+              if (result.predictionsWritten > 0 || result.resolved > 0 || result.verdictsWritten > 0) {
+                logger.info({ ...result }, "trading-evaluator tick");
+              }
+            })
+            .catch((err) => {
+              logger.error({ err }, "trading-evaluator tick failed");
+            }),
+        );
+      }
 
       // Crypto wallets for agents: resolves wallet payment approval cards
       // (approved -> signed and sent, turned down or expired -> not sent)

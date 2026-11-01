@@ -8,6 +8,7 @@ import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrIns
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 import { tradingTraderService } from "../services/trading-trader.js";
 import { logActivity } from "../services/activity-log.js";
+import { tradingEvaluatorService } from "../services/trading-evaluator.js";
 
 /**
  * DUR-4153/DUR-4171: the trading agent is board-only, both reading and
@@ -36,6 +37,7 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const db = createRequestScopedDb(rawDb);
   const trading = tradingService(db, { rawDb, ...deps });
   const trader = tradingTraderService(db, rawDb);
+  const evaluator = tradingEvaluatorService(db, { marketData: deps.marketData });
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -162,6 +164,17 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.get("/companies/:companyId/trading/strategies/:strategyId/orders", readScope(), async (req, res) => {
     res.json(await trading.listOrders(req.params.companyId as string, req.params.strategyId as string));
+  });
+
+  // DUR-5010: the prediction scoreboard. Read-only; while a version is still collecting it shows
+  // "x of N" and no hit rate. ?version= picks an older version; the default is the active one.
+  router.get("/companies/:companyId/trading/strategies/:strategyId/scoreboard", readScope(), async (req, res) => {
+    const version = req.query.version === undefined ? undefined : Number(req.query.version);
+    if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
+      res.status(400).json({ error: "version must be a positive whole number" });
+      return;
+    }
+    res.json(await evaluator.scoreboard(req.params.companyId as string, req.params.strategyId as string, version));
   });
 
   return router;
