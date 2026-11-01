@@ -78,7 +78,10 @@ const NOT_ALLOWED_CELLS: readonly TradingMatrixCellValue[] = ["no", "cash_only"]
 /** The market trends a family may trade in, according to a matrix. */
 export function matrixAllowedTrends(matrix: TradingEligibilityMatrix, family: (typeof TRADING_STRATEGY_FAMILIES)[number]): Array<"up" | "range" | "down"> {
   const cells = matrix.rows[family]!.cells;
-  return (["up", "range", "down"] as const).filter((trend) => !NOT_ALLOWED_CELLS.includes(cells[trend]));
+  return (["up", "range", "down"] as const).filter((trend) => {
+    const cell = cells[trend];
+    return cell !== undefined && !NOT_ALLOWED_CELLS.includes(cell);
+  });
 }
 
 // ─── Wording ────────────────────────────────────────────────────────────────
