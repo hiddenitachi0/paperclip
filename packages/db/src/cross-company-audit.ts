@@ -109,6 +109,9 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:marketWeather",
   // DUR-5008: looks at the past-data test queue and starts a worker thread; routine per-tick mechanics.
   "heartbeat-scheduler:tradingBacktest",
+  // DUR-5017: 10-minute sweep that raises trading vigilance alerts (breaker trips,
+  // paused strategies, weather flips, big moves); routine per-tick mechanics.
+  "heartbeat-scheduler:tradingVigilance",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
