@@ -222,6 +222,15 @@ d("agent trading routes (DUR-5004)", () => {
     });
   });
 
+  describe("malformed ids", () => {
+    it("answers 404, not a server error, to a strategy id that is not a uuid", async () => {
+      const a = await seed();
+      const app = agentApp(a.companyId, a.traderId);
+      expect((await request(app).get("/api/agent-trading/strategies/not-a-uuid")).status).toBe(404);
+      expect((await request(app).post("/api/agent-trading/strategies/not-a-uuid/proposals").send(proposal())).status).toBe(404);
+    });
+  });
+
   describe("agent tokens cannot write through /companies/:id/trading", () => {
     it("every non-GET trading route answers 403 to an agent, even the designated Trader, and changes nothing", async () => {
       const a = await seed();
@@ -370,6 +379,16 @@ d("agent trading routes (DUR-5004)", () => {
       const none = await request(boardApp(a.companyId, "owner")).post(`/api/companies/${a.companyId}/trading/analyst/ask`).send({ question: "hello there" });
       expect(none.status).toBe(422);
       expect(none.body.error).toMatch(/No Trader agent/);
+    });
+
+    it("gives the same plain answer, and opens no task, when the chosen Trader has been terminated", async () => {
+      const a = await seed();
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, a.traderId));
+      const before = await db.select().from(issues).where(eq(issues.companyId, a.companyId));
+      const res = await request(boardApp(a.companyId, "owner")).post(`/api/companies/${a.companyId}/trading/analyst/ask`).send({ question: "hello there" });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toMatch(/No Trader agent/);
+      expect(await db.select().from(issues).where(eq(issues.companyId, a.companyId))).toHaveLength(before.length);
     });
   });
 });

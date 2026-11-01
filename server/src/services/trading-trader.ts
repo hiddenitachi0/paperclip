@@ -29,6 +29,7 @@ import { tradingVersionsService, type ProposeVersionResult } from "./trading-ver
  * so every call is checked against the designation first.
  */
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECENT_LEDGER_ROWS = 40;
 const RECENT_DAYS = 30;
 const RECENT_VERSIONS = 10;
@@ -51,6 +52,8 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
   }
 
   async function requireStrategy(companyId: string, strategyId: string) {
+    // A malformed id is "not found", not a database error.
+    if (!UUID_RE.test(strategyId)) throw notFound("Trading strategy not found.");
     const [row] = await db.select().from(tradingStrategies).where(and(eq(tradingStrategies.id, strategyId), eq(tradingStrategies.companyId, companyId)));
     if (!row) throw notFound("Trading strategy not found.");
     return row;
@@ -138,6 +141,7 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
       });
     }
     const { spec, guidelines, summary, reasons } = parsed.data;
+    if (!UUID_RE.test(strategyId)) throw notFound("Trading strategy not found.");
     return versions.proposeVersion(
       companyId,
       strategyId,
@@ -153,9 +157,10 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
       .select({ traderAgentId: companyCryptoSettings.traderAgentId })
       .from(companyCryptoSettings)
       .where(eq(companyCryptoSettings.companyId, companyId));
-    if (!settings?.traderAgentId) {
-      throw unprocessable("No Trader agent has been chosen for this company yet. The owner can choose one in the crypto settings.");
-    }
+    const noTrader = () => unprocessable("No Trader agent has been chosen for this company yet. The owner can choose one in the crypto settings.");
+    if (!settings?.traderAgentId) throw noTrader();
+    const [trader] = await db.select({ status: agents.status }).from(agents).where(and(eq(agents.id, settings.traderAgentId), eq(agents.companyId, companyId)));
+    if (!trader || trader.status === "terminated") throw noTrader();
     let strategyLine = "";
     if (input.strategyId) {
       const strategy = await requireStrategy(companyId, input.strategyId);

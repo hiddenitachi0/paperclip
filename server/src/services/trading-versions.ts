@@ -393,6 +393,13 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         .where(and(eq(tradingStrategyVersions.strategyId, strategyId), eq(tradingStrategyVersions.status, "draft")));
       const same = openDrafts.find((d) => d.specDigest === digest);
       if (same) return { outcome: "already_pending" as const, version: same, approvalId: same.approvalId };
+      // An agent may only replace an agent's draft. A person's open proposal (and its card) is never cancelled
+      // by an agent; a person can still replace the agent's. Checked under the strategy row's lock.
+      if (proposer.type === "agent" && openDrafts.some((d) => d.proposedByType !== "agent")) {
+        throw conflict("A person's proposal for this strategy is waiting for a decision. Wait for it to be approved or rejected before proposing another change.", {
+          reason: "person_proposal_pending",
+        });
+      }
       const at = nowOf();
       // Counted under the strategy row's lock, so two proposals at once cannot both slip under the cap.
       if (proposer.type === "agent" && options.agentProposalsPerDay !== undefined) {
