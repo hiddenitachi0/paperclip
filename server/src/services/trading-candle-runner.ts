@@ -62,18 +62,40 @@ const WORKER_HEAP_MB = 768;
 const CONTINUE_PAUSE_MS = 15_000;
 const STOPPED_SOURCE_RETRY_MS = 15 * 60_000;
 
-function resolveWorker(): { url: URL; execArgv: string[] } {
-  const compiled = new URL("./trading-candle-worker.js", import.meta.url);
-  if (existsSync(compiled)) return { url: compiled, execArgv: [] };
+export interface CandleWorkerLaunch {
+  url: URL;
+  /** Left undefined for the compiled worker so the thread inherits the parent's flags. */
+  execArgv?: string[];
+}
+
+/**
+ * Where the worker thread starts, and with which Node flags.
+ *
+ * Compiled worker: `execArgv` is deliberately left out. An explicit array,
+ * even an empty one, replaces Node's default of inheriting the parent's
+ * flags, and the server is started with `--import tsx` (the workspace packages
+ * are loaded from `.ts` source) and `--require node-module-guard.cjs` (the
+ * trusted-code module guard, DUR-3994). Passing `[]` made the worker lose both
+ * (DUR-5129): it could not resolve `./client.js` to `client.ts`, and it would
+ * have run outside the module guard.
+ */
+export function resolveCandleWorker(compiledExists: boolean = existsSync(new URL("./trading-candle-worker.js", import.meta.url))): CandleWorkerLaunch {
+  if (compiledExists) return { url: new URL("./trading-candle-worker.js", import.meta.url) };
   // Source run (tsx / vitest): load the .ts worker through tsx.
   const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
   return { url: new URL("./trading-candle-worker.ts", import.meta.url), execArgv: ["--import", tsx] };
 }
 
-export function spawnCandleWorker(job: CandleWorkerJob, onMessage: (message: CandleWorkerMessage) => void, limitMs: number): Promise<CandleCycleResult> {
-  const { url, execArgv } = resolveWorker();
+/** `launch` is for tests; production always resolves the real worker. */
+export function spawnCandleWorker(
+  job: CandleWorkerJob,
+  onMessage: (message: CandleWorkerMessage) => void,
+  limitMs: number,
+  launch: CandleWorkerLaunch = resolveCandleWorker(),
+): Promise<CandleCycleResult> {
+  const { url, execArgv } = launch;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(url, { workerData: job, execArgv, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+    const worker = new Worker(url, { workerData: job, ...(execArgv ? { execArgv } : {}), resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     let settled = false;
     const finish = (settle: () => void) => {
       if (settled) return;
