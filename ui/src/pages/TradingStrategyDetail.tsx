@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, Pause, Play, Pencil, XCircle } from "lucide-react";
 import { describeTradingPauseReason } from "@paperclipai/shared";
@@ -17,6 +17,8 @@ import { StatusBadge } from "../components/StatusBadge";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { TradingDisclaimer } from "../components/TradingDisclaimer";
 import { TradingStrategyVersions } from "../components/TradingStrategyVersions";
+import { TradingPastDataCard } from "../components/TradingPastDataCard";
+import { startGateRefusal } from "../lib/tradingBacktestWords";
 import { describeStrategyInWords } from "../lib/tradingSpecWords";
 import { parseStoredSpec } from "../lib/tradingRuleBook";
 
@@ -65,6 +67,9 @@ export function TradingStrategyDetail() {
   const queryClient = useQueryClient();
   const role = useCompanyRole(selectedCompanyId);
   const canManage = role.canManageConnections;
+  // Only the owner (or an instance admin) may start a strategy that has not passed the past-data test; the server checks this again.
+  const canOverride = role.role === "owner" || role.isInstanceAdmin;
+  const [blockedReason, setBlockedReason] = useState<string | null>(null);
 
   const strategiesQuery = useQuery({
     queryKey: selectedCompanyId ? queryKeys.trading.list(selectedCompanyId) : ["trading-strategies", "__none__"],
@@ -106,11 +111,24 @@ export function TradingStrategyDetail() {
   }, [dashboardQuery.data, strategy, ordersQuery.data]);
 
   const setStatus = useMutation({
-    mutationFn: (status: "running" | "paused") => tradingApi.setStatus(selectedCompanyId!, strategyId!, status),
+    mutationFn: ({ status, overrideReason }: { status: "running" | "paused"; overrideReason?: string }) =>
+      tradingApi.setStatus(selectedCompanyId!, strategyId!, status, overrideReason),
     onSuccess: () => {
-      if (selectedCompanyId) queryClient.invalidateQueries({ queryKey: queryKeys.trading.list(selectedCompanyId) });
+      setBlockedReason(null);
+      if (selectedCompanyId && strategyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.trading.list(selectedCompanyId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.trading.startGate(selectedCompanyId, strategyId) });
+      }
     },
-    onError: (error) => pushToast({ title: "Could not change the strategy", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error) => {
+      const refusal = startGateRefusal(error);
+      if (refusal) {
+        // The server's own reason is shown on the page, next to the test button, instead of a toast that disappears.
+        setBlockedReason(refusal.reason);
+        return;
+      }
+      pushToast({ title: "Could not change the strategy", body: errorMessage(error, ""), tone: "error" });
+    },
   });
 
   if (strategiesQuery.isLoading || dashboardQuery.isLoading) {
@@ -142,7 +160,7 @@ export function TradingStrategyDetail() {
         {canManage ? (
           <Button
             variant={running ? "outline" : "default"}
-            onClick={() => setStatus.mutate(running ? "paused" : "running")}
+            onClick={() => setStatus.mutate({ status: running ? "paused" : "running" })}
             disabled={setStatus.isPending}
           >
             {running ? (
@@ -195,6 +213,18 @@ export function TradingStrategyDetail() {
           </div>
         ) : null}
       </div>
+
+      {selectedCompanyId && strategyId ? (
+        <TradingPastDataCard
+          companyId={selectedCompanyId}
+          strategyId={strategyId}
+          canManage={canManage}
+          blockedReason={blockedReason}
+          canOverride={canOverride}
+          overrideBusy={setStatus.isPending}
+          onOverride={(overrideReason) => setStatus.mutate({ status: "running", overrideReason })}
+        />
+      ) : null}
 
       {dashboardQuery.error ? (
         <div className="py-6 text-sm text-destructive">{errorMessage(dashboardQuery.error, "Could not load the dashboard.")}</div>

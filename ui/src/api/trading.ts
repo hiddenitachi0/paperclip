@@ -91,6 +91,62 @@ export type TradingStrategyUpdateResult = TradingStrategySummary & {
   pendingVersion?: { outcome: "drafted" | "already_pending"; versionId: string; versionNumber: number; approvalId: string | null };
 };
 
+export type TradingBacktestStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+/** Where the strategy's current rules stand against the start check (the server decides; the page only shows it). */
+export interface TradingStartGate {
+  cleared: boolean;
+  basis: "grandfathered" | "passed" | "override" | "inherited" | null;
+  versionId: string;
+  versionNumber: number;
+  latestRun: { id: string; status: TradingBacktestStatus; gatePassed: boolean | null; summary: string | null; finishedAt: string | null } | null;
+  queuedRunId: string | null;
+  overrides: Array<{ versionId: string; reason: string; overriddenByUserId: string; createdAt: string }>;
+  /** How many different versions of the rules were ever tried against the past data. */
+  variantsTried: number;
+  /** How many times the hidden final stretch has been looked at. */
+  holdoutReads: number;
+}
+
+/** One line of the server's checklist. `passed: null` means it could not be judged. */
+export interface TradingBacktestGateItem {
+  key: string;
+  label: string;
+  passed: boolean | null;
+  detail: string;
+}
+
+export interface TradingBacktestRunListItem {
+  id: string;
+  versionId: string;
+  purpose: "explore" | "gate";
+  status: TradingBacktestStatus;
+  gatePassed: boolean | null;
+  gate: { passed: boolean | null; summary: string | null } | null;
+  variantsTried: number | null;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** The full stored run. `report` and `gate` are read defensively by `lib/tradingBacktestWords`. */
+export interface TradingBacktestRun {
+  id: string;
+  strategyId: string;
+  versionId: string;
+  purpose: "explore" | "gate";
+  status: TradingBacktestStatus;
+  gatePassed: boolean | null;
+  gate: { passed?: boolean; summary?: string; items?: TradingBacktestGateItem[] } | null;
+  report: unknown;
+  variantsTried: number | null;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
 export const tradingApi = {
   list: (companyId: string) => api.get<TradingStrategySummary[]>(`/companies/${companyId}/trading/strategies`),
   create: (companyId: string, input: Partial<CreateTradingStrategyInput>) =>
@@ -108,8 +164,20 @@ export const tradingApi = {
   /** Files the rules as a draft version and an approval card. Nothing changes for a running strategy until the card is approved. */
   proposeVersion: (companyId: string, strategyId: string, book: TradingRuleBookInput) =>
     api.post<ProposeVersionResult>(`/companies/${companyId}/trading/strategies/${strategyId}/versions`, book),
-  setStatus: (companyId: string, strategyId: string, status: "running" | "paused") =>
-    api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies/${strategyId}/status`, { status }),
+  /** `overrideReason` is the owner's written reason for starting without a passed past-data test; the server checks who may use it. */
+  setStatus: (companyId: string, strategyId: string, status: "running" | "paused", overrideReason?: string) =>
+    api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies/${strategyId}/status`, overrideReason ? { status, overrideReason } : { status }),
+  startGate: (companyId: string, strategyId: string) =>
+    api.get<TradingStartGate>(`/companies/${companyId}/trading/strategies/${strategyId}/start-gate`),
+  backtests: (companyId: string, strategyId: string) =>
+    api.get<TradingBacktestRunListItem[]>(`/companies/${companyId}/trading/strategies/${strategyId}/backtests`),
+  backtest: (companyId: string, strategyId: string, runId: string) =>
+    api.get<TradingBacktestRun>(`/companies/${companyId}/trading/strategies/${strategyId}/backtests/${runId}`),
+  /** Files a past-data test for the strategy's current rules. It runs later on the server; this only queues it. */
+  queueBacktest: (companyId: string, strategyId: string) =>
+    api.post<{ id: string; status: TradingBacktestStatus }>(`/companies/${companyId}/trading/strategies/${strategyId}/backtests`, {}),
+  cancelBacktest: (companyId: string, strategyId: string, runId: string) =>
+    api.post<TradingBacktestRun>(`/companies/${companyId}/trading/strategies/${strategyId}/backtests/${runId}/cancel`, {}),
   dashboard: (companyId: string, strategyId: string) =>
     api.get<TradingDashboardSummary>(`/companies/${companyId}/trading/strategies/${strategyId}/dashboard`),
   orders: (companyId: string, strategyId: string) =>
