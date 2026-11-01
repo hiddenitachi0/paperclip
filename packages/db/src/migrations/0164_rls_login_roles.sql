@@ -505,6 +505,10 @@ DECLARE
     'trading_fifo_lots',
     'trading_ledger_entries',
     'trading_orders',
+    -- DUR-5013 market weather. Created (and granted on) in
+    -- 0269_trading_regimes.sql; instance-wide public market data with no
+    -- company_id, so it is in the login-role list ONLY.
+    'trading_regimes',
     'trading_strategies',
     -- DUR-5010: created, granted on and policed in 0267_trading_predictions.sql. trading_evaluator_state is instance-wide (login-role list only); the other two are company-scoped (both lists).
     'trading_evaluator_state',

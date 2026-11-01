@@ -127,6 +127,24 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     expect(rows).toHaveLength(0); // refused before any write, not just a misleading response code
   });
 
+  it("lets any active member read market weather (DUR-5013) but not a company they do not belong to", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const app = createApp(companyId, "viewer");
+
+    const current = await request(app).get(`/api/companies/${companyId}/trading/market-weather`);
+    expect(current.status).toBe(200);
+    expect(current.body).toEqual({ items: [] });
+
+    const history = await request(app).get(`/api/companies/${companyId}/trading/market-weather/BTC`);
+    expect(history.status).toBe(200);
+    expect(history.body).toMatchObject({ asset: "BTC", name: "Bitcoin", current: null, spells: [] });
+
+    expect((await request(app).get(`/api/companies/${companyId}/trading/market-weather/NOPE`)).status).toBe(400);
+    expect((await request(app).get(`/api/companies/${otherCompanyId}/trading/market-weather`)).status).toBe(403);
+    expect((await request(app).post(`/api/companies/${companyId}/trading/market-weather`).send({})).status).toBe(404);
+  });
+
   it("refuses a non-owner/admin pulling the kill switch (status route) with 403", async () => {
     const companyId = await seedCompany();
     const ownerApp = createApp(companyId, "owner");
