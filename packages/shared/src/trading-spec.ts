@@ -1016,3 +1016,37 @@ export function describeTradingSpec(spec: TradingStrategySpec): string[] {
   lines.push(`What it predicts: ${p.kind === "direction" ? "direction" : "target before stop"} over ${p.horizonBars} bars (flat band ${p.flatBandPct}%, measured in ${p.rUnit === "stop_distance" ? "stop distances" : "1 ATR at entry"}).`);
   return lines;
 }
+
+// ─── The Trader agent's proposals (DUR-5004) ────────────────────────────────
+
+/** How many rule changes the Trader may propose for one strategy in 24 hours. */
+export const TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY = 5;
+
+/** What the card says about a proposal that has no past-data test behind it. */
+export const TRADING_NOT_TESTED_ON_PAST_DATA = "not yet tested on past data";
+
+/**
+ * The Trader's request to change a strategy's rules. `.strict()` on purpose:
+ * a field this schema does not know (an `experimentId` before the experiment
+ * runner exists, a `status`, a `mode`, a wallet) is refused with its name
+ * rather than silently dropped. The summary and reasons are the Trader's own
+ * words; the card also shows the rules as stored, which are what count.
+ */
+export const traderProposeChangeSchema = z
+  .object({
+    spec: tradingStrategySpecSchema,
+    guidelines: z.string().max(TRADING_GUIDELINES_MAX).default(""),
+    summary: z.string().trim().min(3).max(500),
+    reasons: z.string().trim().min(3).max(2_000),
+  })
+  .strict();
+export type TraderProposeChangeInput = z.input<typeof traderProposeChangeSchema>;
+
+/** "Ask the analyst": a board member's question to the Trader, opened as a task. */
+export const askTraderSchema = z
+  .object({
+    question: z.string().trim().min(3).max(2_000),
+    strategyId: z.string().uuid().optional(),
+  })
+  .strict();
+export type AskTraderInput = z.infer<typeof askTraderSchema>;

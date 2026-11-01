@@ -56,6 +56,7 @@ import { codeRenderRoutes } from "./routes/code-renders.js";
 import { tradingRoutes } from "./routes/trading.js";
 import { tradingCandleRoutes } from "./routes/trading-candles.js";
 import { cryptoWalletRoutes } from "./routes/crypto-wallets.js";
+import { agentTradingRoutes } from "./routes/agent-trading.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -398,6 +399,7 @@ export async function createApp(
   api.use(tradingRoutes(db));
   api.use(tradingCandleRoutes(db));
   api.use(cryptoWalletRoutes(db));
+  api.use(agentTradingRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));

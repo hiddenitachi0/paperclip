@@ -4,6 +4,7 @@ import { PaperclipApiClient } from "./client.js";
 import { readConfigFromEnv, type PaperclipMcpConfig } from "./config.js";
 import { createContractToolDefinitions } from "./contract-tools.js";
 import { createToolDefinitions } from "./tools.js";
+import { createTradingToolDefinitions } from "./trading-tools.js";
 import { createWalletToolDefinitions } from "./wallet-tools.js";
 
 export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfigFromEnv()) {
@@ -19,6 +20,8 @@ export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfig
   const tools = [
     ...createToolDefinitions(client),
     ...createWalletToolDefinitions(client),
+    // Trading tools: registered for every agent, usable only by the company's designated Trader (the server answers 403 to the rest).
+    ...createTradingToolDefinitions(client),
     ...createContractToolDefinitions(client),
   ];
   for (const tool of tools) {
