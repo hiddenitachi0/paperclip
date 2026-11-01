@@ -22,6 +22,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { inheritStartClearance, isVersionStartCleared } from "./trading-backtest-store.js";
 
 /**
  * DUR-5002: the versions of a strategy's rule book.
@@ -467,6 +468,17 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
       }
       const active = strategy.activeVersionId ? await loadVersion(tx, companyId, strategy.activeVersionId) : null;
       assertFitsStrategy(strategy, spec, active ? parseSpec(active) : null, { type: version.proposedByType });
+      // The start gate (DUR-5008) is for the rules that will run. New rules that have not passed a past-data test must not start trading just
+      // because a card switched a RUNNING strategy to them: the owner pauses it first (approving is fine while it is paused), and the strategy
+      // then has to clear the gate, or be started by an owner with a written reason, before it runs.
+      // A version that only tightens the risk limits takes over the clearance of the one it replaces, so ordinary safety edits never need a new test.
+      if (!(await isVersionStartCleared(tx, companyId, version))) await inheritStartClearance(tx, companyId, active, version, userId);
+      if (strategy.status !== "paused" && !(await isVersionStartCleared(tx, companyId, version))) {
+        throw unprocessable(
+          `Strategy "${strategy.name}" is running, and these new rules have not passed the past-data test. Pause the strategy first; it can start on the new rules once they pass the test (or an owner starts it with a written reason).`,
+          { code: "trading_version_needs_start_gate", strategyId: strategy.id, versionId: version.id },
+        );
+      }
       await writeActivation(tx, strategy, version, userId, nowOf(), "approved on its approval card");
       const [reloaded] = await tx.select().from(tradingStrategies).where(eq(tradingStrategies.id, strategy.id));
       return { strategy: reloaded!, version: (await loadVersion(tx, companyId, version.id))! };

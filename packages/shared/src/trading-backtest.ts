@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { canonicalTradingJson, deriveTradingRiskConfig, tradingRiskLoosenings, type TradingStrategySpec } from "./trading-spec.js";
+
 /**
  * DUR-5008: the past-data test ("backtest") — everything that is pure maths or
  * pure rules, shared by the worker that runs it, the start gate that reads it
@@ -42,6 +45,8 @@ export const TRADING_BACKTEST_WALK_FORWARD = {
 /** Compute caps: a past-data test never runs away (plan section 5, item 12). */
 export const TRADING_BACKTEST_LIMITS = {
   maxVariants: 25,
+  /** Tests waiting or running for one company at once. */
+  maxActiveRunsPerCompany: 10,
   /** Wall-clock limit for one run in its worker. */
   maxWallMs: 20 * 60_000,
   /** Random-entry runs per coin for the baseline. */
@@ -67,6 +72,19 @@ export const TRADING_START_GATE = {
 
 export const TRADING_BACKTEST_PURPOSES = ["explore", "gate"] as const;
 export type TradingBacktestPurpose = (typeof TRADING_BACKTEST_PURPOSES)[number];
+
+export const queueTradingBacktestSchema = z
+  .object({
+    /** Defaults to the strategy's active version. */
+    versionId: z.string().uuid().optional(),
+    /** 'gate' (default) reads the holdout and can clear the start gate; 'explore' never does. */
+    purpose: z.enum(TRADING_BACKTEST_PURPOSES).optional(),
+    /** 'base' tests the rules as written (the only choice for a gate run); 'best_in_sample' re-picks the best variant per window. */
+    selection: z.enum(["base", "best_in_sample"]).optional(),
+    maxVariants: z.number().int().min(1).max(TRADING_BACKTEST_LIMITS.maxVariants).optional(),
+  })
+  .strict();
+export type QueueTradingBacktestInput = z.infer<typeof queueTradingBacktestSchema>;
 
 export const TRADING_BACKTEST_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 export type TradingBacktestStatus = (typeof TRADING_BACKTEST_STATUSES)[number];
@@ -588,3 +606,26 @@ export function isHeadlineCoin(coin: string): boolean {
 }
 
 export const TRADING_HINDSIGHT_FLAG = "coin chosen with hindsight";
+
+/**
+ * Does the new version change nothing but make the strategy safer? True when
+ * the entry and exit logic, the indicators, the regime gate, the stay-out
+ * rules, the prediction and the universe are exactly the same, the risk limits
+ * only tighten, and the order size is not larger. Such a version takes over
+ * the earlier version's clearance for the start gate (plan section 8: changes
+ * "that only make the strategy safer can skip" the past-data test).
+ */
+export function tradingVersionOnlyTightens(previous: TradingStrategySpec, next: TradingStrategySpec): boolean {
+  const strip = (spec: TradingStrategySpec) => {
+    const { neverDo: _neverDo, sizing: _sizing, ...rest } = spec;
+    void _neverDo;
+    void _sizing;
+    return canonicalTradingJson(rest);
+  };
+  if (strip(previous) !== strip(next)) return false;
+  if (tradingRiskLoosenings(deriveTradingRiskConfig(previous), deriveTradingRiskConfig(next)).length > 0) return false;
+  if (previous.sizing.kind !== next.sizing.kind) return false;
+  if (previous.sizing.kind === "fraction_of_cash" && next.sizing.kind === "fraction_of_cash") return next.sizing.fraction <= previous.sizing.fraction;
+  if (previous.sizing.kind === "risk_per_trade" && next.sizing.kind === "risk_per_trade") return next.sizing.riskPerTradePct <= previous.sizing.riskPerTradePct;
+  return false;
+}

@@ -17,8 +17,10 @@ import { tradingStrategies, tradingStrategyVersions } from "./trading.js";
  *   * trading_backtest_holdout_reads: one row per read of the holdout, with
  *     the strategy and (when there is one) the template it came from, so a
  *     later read can be labelled "holdout already seen k times".
- *   * trading_start_gate_overrides: an owner's written reason for starting a
- *     version that has not passed (decision 7). Append-only.
+ *   * trading_start_gate_overrides: why a version may start without a past-data
+ *     test of its own: an owner's written reason (decision 7), or the earlier
+ *     version's clearance carried over because only risk limits got tighter
+ *     (plan section 8). Append-only.
  *
  * All four are company-scoped (RLS in both lists of 0164). Rollback: see
  * 0267_trading_backtest.sql.
@@ -124,6 +126,8 @@ export const tradingStartGateOverrides = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     strategyId: uuid("strategy_id").notNull().references(() => tradingStrategies.id, { onDelete: "cascade" }),
     versionId: uuid("version_id").notNull().references(() => tradingStrategyVersions.id, { onDelete: "cascade" }),
+    /** 'owner_override': an owner started it without a past-data test. 'tightening_inherited': only the risk limits got tighter, so the earlier version's clearance carries over. */
+    kind: text("kind").notNull().default("owner_override"),
     reason: text("reason").notNull(),
     overriddenByUserId: text("overridden_by_user_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -132,5 +136,6 @@ export const tradingStartGateOverrides = pgTable(
     versionUq: uniqueIndex("trading_start_gate_overrides_version_uq").on(table.versionId),
     companyIdx: index("trading_start_gate_overrides_company_idx").on(table.companyId),
     reasonCheck: check("trading_start_gate_overrides_reason_check", sql`char_length(btrim(${table.reason})) >= 10`),
+    kindCheck: check("trading_start_gate_overrides_kind_check", sql`${table.kind} IN ('owner_override', 'tightening_inherited')`),
   }),
 );

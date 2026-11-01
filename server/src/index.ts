@@ -87,6 +87,8 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
+import { tradingBacktestStore } from "./services/trading-backtest-store.js";
+import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
@@ -1116,6 +1118,14 @@ export async function startServer(): Promise<StartedServer> {
       enabled: config.tradingCandleStoreEnabled,
     });
     registerCandleRunner(candleStore);
+    // DUR-5008: past-data tests (walk-forward backtests). One at a time, in a worker
+    // thread with its own database connection, on its own chain: never in the trading tick.
+    const tradingBacktests = tradingBacktestRunner({
+      databaseUrl: config.databaseBypassUrl || activeDatabaseConnectionString,
+      queue: tradingBacktestStore(bypassDb as any),
+      logger,
+      enabled: config.tradingCandleStoreEnabled,
+    });
     const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1851,6 +1861,26 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "candle store tick failed");
+          }),
+      );
+
+      // DUR-5008: past-data tests. tick() only looks at the queue and starts a
+      // worker thread; it returns at once and shares nothing with the trading tick above.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingBacktest, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tradingBacktest",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tradingBacktest",
+          },
+          async () => tradingBacktests.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.started) logger.debug("past-data test queue checked");
+          })
+          .catch((err) => {
+            logger.error({ err }, "past-data test tick failed");
           }),
       );
 

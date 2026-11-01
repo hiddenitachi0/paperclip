@@ -1,5 +1,5 @@
 {
-  "id": "c85d1de5-fef7-4986-a6d7-41e2aa3f388f",
+  "id": "6bf414cc-9416-4137-95e1-677ff199b3f0",
   "prevId": "3ac0269e-5d30-48fd-bc2c-1429cefd107f",
   "version": "7",
   "dialect": "postgresql",
@@ -44573,6 +44573,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'owner_override'"
+        },
         "reason": {
           "name": "reason",
           "type": "text",
@@ -44673,6 +44680,10 @@
         "trading_start_gate_overrides_reason_check": {
           "name": "trading_start_gate_overrides_reason_check",
           "value": "char_length(btrim(\"trading_start_gate_overrides\".\"reason\")) >= 10"
+        },
+        "trading_start_gate_overrides_kind_check": {
+          "name": "trading_start_gate_overrides_kind_check",
+          "value": "\"trading_start_gate_overrides\".\"kind\" IN ('owner_override', 'tightening_inherited')"
         }
       },
       "isRLSEnabled": false

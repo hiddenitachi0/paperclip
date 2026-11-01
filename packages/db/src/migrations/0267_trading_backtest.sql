@@ -13,8 +13,10 @@
 --     edited (an UPDATE trigger refuses every change).
 --   * trading_backtest_holdout_reads: one row per read of the holdout, with the
 --     strategy and the template it came from. Append-only.
---   * trading_start_gate_overrides: an owner's written reason (at least 10
---     characters) for starting a version that has not passed. Append-only.
+--   * trading_start_gate_overrides: why a version may start without a past-data
+--     test of its own: an owner's written reason (at least 10 characters), or
+--     the earlier version's clearance carried over because only the risk limits
+--     got tighter. Append-only.
 --
 -- All four tables are company-scoped: RLS policy and grants below, and all four
 -- are in both arrays of 0164, the same shape as 0251/0252/0266.
@@ -97,10 +99,12 @@ CREATE TABLE IF NOT EXISTS "trading_start_gate_overrides" (
 	"company_id" uuid NOT NULL,
 	"strategy_id" uuid NOT NULL,
 	"version_id" uuid NOT NULL,
+	"kind" text DEFAULT 'owner_override' NOT NULL,
 	"reason" text NOT NULL,
 	"overridden_by_user_id" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "trading_start_gate_overrides_reason_check" CHECK (char_length(btrim("trading_start_gate_overrides"."reason")) >= 10)
+	CONSTRAINT "trading_start_gate_overrides_reason_check" CHECK (char_length(btrim("trading_start_gate_overrides"."reason")) >= 10),
+	CONSTRAINT "trading_start_gate_overrides_kind_check" CHECK ("trading_start_gate_overrides"."kind" IN ('owner_override', 'tightening_inherited'))
 );
 --> statement-breakpoint
 DO $$ BEGIN

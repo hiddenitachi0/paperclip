@@ -38,6 +38,7 @@ import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rate
 import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
 import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
+import { isVersionStartCleared, tradingBacktestStore } from "./trading-backtest-store.js";
 import { tradingVersionsService, tradingVersionLabel, type ProposeVersionResult, type TradingProposer, type TradingStrategyVersionRow } from "./trading-versions.js";
 
 /**
@@ -54,6 +55,12 @@ import { tradingVersionsService, tradingVersionLabel, type ProposeVersionResult,
  */
 
 export type TradingStrategyRow = typeof tradingStrategies.$inferSelect;
+
+/** An owner's written reason for starting a strategy that has not passed the past-data test (DUR-5008, decision 7). */
+export interface StatusOverride {
+  reason: string;
+  userId: string;
+}
 
 export interface TradingServiceDeps {
   now?: () => Date;
@@ -134,6 +141,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
   const ledger = tradingLedgerService(db);
   const approvalsSvc = approvalService(db);
   const versions = tradingVersionsService(db, { rawDb: deps.rawDb, now: deps.now });
+  const backtests = tradingBacktestStore(db, { now: deps.now });
 
   /** The strategy as the tick must see it: the risk config comes from the active version, never from the cache column. */
   function readingVersion<T extends TradingStrategyRow>(row: T, spec: TradingStrategySpec): T {
@@ -272,17 +280,60 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return pendingVersion ? { ...row!, pendingVersion } : row!;
   }
 
+  /**
+   * The start gate (DUR-5008, decision 7). A strategy whose active version is
+   * new (not a grandfathered legacy conversion) may only be started once a
+   * past-data test of exactly that version passed, or an owner started it with
+   * a written reason. A version that has once cleared is never blocked again
+   * on resume. Returns what let it through, for the ledger.
+   *
+   * This is the one place the rule lives: the UI button, the CLI, pause-all's
+   * counterpart and Telegram's /resume all arrive here through setStatus.
+   */
+  async function assertStartGate(existing: TradingStrategyRow, override: StatusOverride | undefined): Promise<{ basis: "grandfathered" | "passed" | "override" | "inherited" | "unconverted_legacy"; versionId: string | null }> {
+    let active: Awaited<ReturnType<typeof versions.ensureActiveVersion>>;
+    try {
+      active = await versions.ensureActiveVersion(existing);
+    } catch (err) {
+      // A legacy strategy whose old settings cannot be converted has never had a version: it is exactly what the grandfathering is for, and resuming it must keep working as before.
+      if (!existing.activeVersionId) return { basis: "unconverted_legacy", versionId: null };
+      throw err;
+    }
+    const basis = await isVersionStartCleared(db, existing.companyId, active.version);
+    if (basis) return { basis, versionId: active.version.id };
+    if (override) {
+      await backtests.recordOverride(existing.companyId, existing.id, active.version.id, override.reason, override.userId);
+      return { basis: "override", versionId: active.version.id };
+    }
+    throw unprocessable(
+      `Strategy "${existing.name}" (rules version ${active.version.version}) has not passed the past-data test yet, so it cannot start. Ask for a past-data test of these rules; an owner can also start it with a written reason.`,
+      { code: "trading_start_gate_not_passed", strategyId: existing.id, versionId: active.version.id, versionNumber: active.version.version },
+    );
+  }
+
   /** The kill switch, both directions -- UI and Telegram call this same function (see routes/trading.ts). */
-  async function setStatus(companyId: string, strategyId: string, target: "running" | "paused"): Promise<TradingStrategyRow> {
+  async function setStatus(companyId: string, strategyId: string, target: "running" | "paused", override?: StatusOverride): Promise<TradingStrategyRow> {
     const existing = await requireStrategy(companyId, strategyId);
     const now = nowOf();
     if (target === "running") {
+      const cleared = await assertStartGate(existing, override);
       const [row] = await db
         .update(tradingStrategies)
         .set({ status: "running", pauseReason: null, nextCheckAt: now, checkLeaseUntil: null, consecutiveErrors: 0, updatedAt: now })
         .where(eq(tradingStrategies.id, strategyId))
         .returning();
-      await ledger.writeLedgerEntry({ companyId, strategyId, eventType: "kill_switch", detail: { action: "resume", fromStatus: existing.status } });
+      await ledger.writeLedgerEntry({
+        companyId,
+        strategyId,
+        strategyVersionId: cleared.versionId ?? undefined,
+        eventType: "kill_switch",
+        detail: {
+          action: "resume",
+          fromStatus: existing.status,
+          startGate: cleared.basis,
+          ...(cleared.basis === "override" && override ? { overrideReason: override.reason, overriddenByUserId: override.userId } : {}),
+        },
+      });
       return row!;
     }
     const [row] = await db
@@ -1107,6 +1158,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     createStrategy,
     updateStrategy,
     versions,
+    backtests,
     setStatus,
     reconcileOnBoot,
     noteEngineVersion,

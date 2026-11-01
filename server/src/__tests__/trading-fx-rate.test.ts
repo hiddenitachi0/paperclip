@@ -17,6 +17,9 @@ import { fxRatesService, parseNorgesBankObservations, type FxRateFetcher } from 
 import { tradingService } from "../services/trading.ts";
 import { fakeTradingMarketData } from "../services/trading-market-data.ts";
 
+/** DUR-5008: these tests are about the tick, not the start gate; an owner override lets their brand-new strategies start (the gate itself is tested in trading-start-gate.test.ts). */
+const START_GATE_TEST_OVERRIDE = { reason: "test setup: the past-data test is not what this test is about", userId: "test-owner" };
+
 /**
  * DUR-5001: a real USD/NOK rate on every fill, and strategies scored in USD so
  * the NOK rate creates no fake profit or loss. Market data is the fake from
@@ -113,7 +116,7 @@ d("trading USD/NOK rate (DUR-5001)", () => {
 
   async function runningStrategy(svc: ReturnType<typeof tradingService>, companyId: string) {
     const strategy = await svc.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await svc.setStatus(companyId, strategy.id, "running");
+    await svc.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     return strategy;
   }
 

@@ -6,7 +6,6 @@ import {
   TRADING_ESTIMATED_USD_NOK_RATE,
   TRADING_HINDSIGHT_FLAG,
   TRADING_START_GATE,
-  addUtcMonths,
   canonicalTradingJson,
   deflatedSharpe,
   deriveTradingRiskConfig,
@@ -602,12 +601,3 @@ export async function executeBacktest(input: BacktestInputs): Promise<BacktestOu
   const resultDigest = createHash("sha256").update(canonicalTradingJson(report)).digest("hex");
   return { report, gate, resultDigest, trials, holdoutRead, variantsTried: variants.length };
 }
-
-/** Where the walk-forward windows of a coin would fall; for the report page and tests. */
-export function previewWindows(input: { firstBarAt: Date; dataEnd: Date; priorReads: readonly HoldoutRead[]; warmupBars: number; timeframeMs: number; horizonMs: number }) {
-  const plan = planHoldout({ dataEnd: input.dataEnd, priorReads: input.priorReads });
-  const dataStart = new Date(input.firstBarAt.getTime() + input.warmupBars * input.timeframeMs);
-  return { plan, windows: walkForwardWindows({ dataStart, walkForwardEnd: new Date(plan.start), horizonMs: input.horizonMs }) };
-}
-
-export { addUtcMonths };

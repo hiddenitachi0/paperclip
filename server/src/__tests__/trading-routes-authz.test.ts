@@ -277,4 +277,87 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     expect(crossed.status).toBe(404);
     expect(await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.strategyId, strategy.id))).toHaveLength(1);
   });
+
+  describe("the start gate and past-data tests (DUR-5008)", () => {
+    async function newStrategyAs(companyId: string) {
+      const created = await request(createApp(companyId, "owner")).post(`/api/companies/${companyId}/trading/strategies`).send(strategyBody);
+      expect(created.status).toBe(201);
+      return created.body as { id: string };
+    }
+    const reason = "Paper money only; I watched these rules by hand for a week.";
+
+    it.each(["owner", "admin"] as const)("an %s cannot start a brand-new version without the past-data test: 422, still paused", async (role) => {
+      const companyId = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const res = await request(createApp(companyId, role)).post(`/api/companies/${companyId}/trading/strategies/${strategy.id}/status`).send({ status: "running" });
+      expect(res.status).toBe(422);
+      expect(res.body.details).toMatchObject({ code: "trading_start_gate_not_passed" });
+      const [row] = await db.select().from(tradingStrategies).where(eq(tradingStrategies.id, strategy.id));
+      expect(row?.status).toBe("paused");
+    });
+
+    it("only an owner can start it with a written reason; an admin is refused with 403 and nothing is written", async () => {
+      const companyId = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const url = `/api/companies/${companyId}/trading/strategies/${strategy.id}/status`;
+      const asAdmin = await request(createApp(companyId, "admin")).post(url).send({ status: "running", overrideReason: reason });
+      expect(asAdmin.status).toBe(403);
+      expect((await db.select().from(tradingStrategies).where(eq(tradingStrategies.id, strategy.id)))[0]?.status).toBe("paused");
+      const asOwner = await request(createApp(companyId, "owner")).post(url).send({ status: "running", overrideReason: reason });
+      expect(asOwner.status).toBe(200);
+      expect(asOwner.body.status).toBe("running");
+      const state = await request(createApp(companyId, "viewer")).get(`/api/companies/${companyId}/trading/strategies/${strategy.id}/start-gate`);
+      expect(state.status).toBe(200);
+      expect(state.body).toMatchObject({ cleared: true, basis: "override", overrides: [{ reason }] });
+    });
+
+    it("a reason that is too short, or sent with 'paused', is a 400", async () => {
+      const companyId = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const url = `/api/companies/${companyId}/trading/strategies/${strategy.id}/status`;
+      expect((await request(createApp(companyId, "owner")).post(url).send({ status: "running", overrideReason: "ok" })).status).toBe(400);
+      expect((await request(createApp(companyId, "owner")).post(url).send({ status: "paused", overrideReason: reason })).status).toBe(400);
+    });
+
+    it("pausing is never gated", async () => {
+      const companyId = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const url = `/api/companies/${companyId}/trading/strategies/${strategy.id}/status`;
+      await request(createApp(companyId, "owner")).post(url).send({ status: "running", overrideReason: reason });
+      const paused = await request(createApp(companyId, "admin")).post(url).send({ status: "paused" });
+      expect(paused.status).toBe(200);
+      expect(paused.body.status).toBe("paused");
+    });
+
+    it("an admin can queue a past-data test (202); a viewer cannot; every member can read it; a second one for the same version is a 409", async () => {
+      const companyId = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const base = `/api/companies/${companyId}/trading/strategies/${strategy.id}/backtests`;
+      expect((await request(createApp(companyId, "viewer")).post(base).send({})).status).toBe(403);
+      const queued = await request(createApp(companyId, "admin")).post(base).send({ purpose: "gate" });
+      expect(queued.status).toBe(202);
+      expect(queued.body).toMatchObject({ status: "queued", purpose: "gate" });
+      expect((await request(createApp(companyId, "admin")).post(base).send({})).status).toBe(409);
+      const list = await request(createApp(companyId, "viewer")).get(base);
+      expect(list.status).toBe(200);
+      expect(list.body).toHaveLength(1);
+      const one = await request(createApp(companyId, "viewer")).get(`${base}/${queued.body.id}`);
+      expect(one.status).toBe(200);
+      expect(one.body).toMatchObject({ id: queued.body.id, status: "queued", gatePassed: null });
+      expect((await request(createApp(companyId, "admin")).post(`${base}/${queued.body.id}/cancel`)).body.status).toBe("cancelled");
+    });
+
+    it("refuses what the request must not choose (unknown fields, a gate run that re-tunes) and another company's strategy", async () => {
+      const companyId = await seedCompany();
+      const other = await seedCompany();
+      const strategy = await newStrategyAs(companyId);
+      const base = `/api/companies/${companyId}/trading/strategies/${strategy.id}/backtests`;
+      expect((await request(createApp(companyId, "owner")).post(base).send({ costs: { feeRatePct: 0 } })).status).toBe(400);
+      expect((await request(createApp(companyId, "owner")).post(base).send({ asOf: "2020-01-01T00:00:00Z" })).status).toBe(400);
+      expect((await request(createApp(companyId, "owner")).post(base).send({ purpose: "gate", selection: "best_in_sample" })).status).toBe(422);
+      expect((await request(createApp(other, "owner")).post(base).send({})).status).toBe(403);
+      expect((await request(createApp(other, "owner")).post(`/api/companies/${other}/trading/strategies/${strategy.id}/backtests`).send({})).status).toBe(404);
+      expect((await request(createApp(other, "owner")).get(`/api/companies/${other}/trading/strategies/${strategy.id}/start-gate`)).status).toBe(404);
+    });
+  });
 });
