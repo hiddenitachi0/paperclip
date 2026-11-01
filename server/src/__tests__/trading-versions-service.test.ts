@@ -19,6 +19,9 @@ import { tradingService } from "../services/trading.ts";
 import { fakeTradingMarketData } from "../services/trading-market-data.ts";
 import { tradingRuleBookDigest } from "../services/trading-versions.ts";
 
+/** DUR-5008: these tests are about the tick, not the start gate; an owner override lets their brand-new strategies start (the gate itself is tested in trading-start-gate.test.ts). */
+const START_GATE_TEST_OVERRIDE = { reason: "test setup: the past-data test is not what this test is about", userId: "test-owner" };
+
 /**
  * DUR-5002: the rule-book versions, end to end against a real database.
  *
@@ -205,7 +208,7 @@ d("trading rule-book versions", () => {
       const companyId = await seedCompany();
       const trading = service(T_BUY);
       const strategy = await trading.createStrategy(companyId, INPUT, USER);
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
       const patched = await trading.updateStrategy(companyId, strategy.id, { name: "Renamed", ruleConfig: { ...RULE, fastPeriod: 5, slowPeriod: 9 } }, USER);
       expect(patched.name).toBe("Renamed"); // a name edit stays direct
@@ -282,6 +285,35 @@ d("trading rule-book versions", () => {
       expect((await cardOf(b.approvalId)).status).toBe("pending");
       await expect(trading.versions.approveFromCard(companyId, a.approvalId, "owner-1")).rejects.toThrow(/replaced by a newer proposal|no open approval/);
       await expectCacheEqualsActiveVersion(strategy.id);
+    });
+
+    it("an agent can never cancel a person's open proposal, but a person can replace the agent's", async () => {
+      const companyId = await seedCompany();
+      const trading = service(T_BUY);
+      const agent = { type: "agent" as const, id: randomUUID() };
+      await db.insert(agents).values({ id: agent.id, companyId, name: "Trader", role: "analyst" });
+      const tighter = (n: number) => ({ spec: stopSpec({ neverDo: riskConfig({ maxPositionNok: n }) }), guidelines: "" });
+
+      // a person's open draft: the agent is refused with a 409 and nothing changes
+      const s1 = await trading.createStrategy(companyId, { ...INPUT, riskConfig: riskConfig({ maxPositionNok: 1_000 }) }, USER);
+      const person = await trading.versions.proposeVersion(companyId, s1.id, tighter(800), { type: "user", id: "u1" });
+      if (person.outcome !== "drafted") throw new Error("expected a person draft");
+      await expect(trading.versions.proposeVersion(companyId, s1.id, tighter(500), agent)).rejects.toMatchObject({ status: 409 });
+      const rows1 = await versionRows(s1.id);
+      expect(rows1.map((r) => [r.version, r.status])).toEqual([[1, "approved"], [2, "draft"]]);
+      expect((await cardOf(person.approvalId)).status).toBe("pending");
+
+      // an agent may replace its own earlier draft; a person may replace the agent's
+      const s2 = await trading.createStrategy(companyId, { ...INPUT, riskConfig: riskConfig({ maxPositionNok: 1_000 }) }, USER);
+      const first = await trading.versions.proposeVersion(companyId, s2.id, tighter(800), agent);
+      const second = await trading.versions.proposeVersion(companyId, s2.id, tighter(700), agent);
+      if (first.outcome !== "drafted" || second.outcome !== "drafted") throw new Error("expected agent drafts");
+      expect((await cardOf(first.approvalId)).status).toBe("cancelled");
+      const replaced = await trading.versions.proposeVersion(companyId, s2.id, tighter(600), { type: "user", id: "u1" });
+      expect(replaced.outcome).toBe("drafted");
+      expect((await cardOf(second.approvalId)).status).toBe("cancelled");
+      // now a person's draft is open again, so the agent is refused
+      await expect(trading.versions.proposeVersion(companyId, s2.id, tighter(500), agent)).rejects.toMatchObject({ status: 409 });
     });
 
     it("refuses rules for another coin or timeframe, and invalid rules, without storing anything", async () => {
@@ -456,7 +488,7 @@ d("trading rule-book versions", () => {
       const companyId = await seedCompany();
       const trading = service(T_BUY);
       const strategy = await trading.createStrategy(companyId, INPUT, USER);
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       // somebody scribbles over the cache: a rule that never trades and a position cap of 1 NOK
       await db
         .update(tradingStrategies)
@@ -472,7 +504,7 @@ d("trading rule-book versions", () => {
       const companyId = await seedCompany();
       const trading = service(T_BUY);
       const strategy = await trading.createStrategy(companyId, INPUT, USER);
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       expect(await trading.tick(T_BUY)).toMatchObject({ filled: 1 });
       const v1 = strategy.activeVersionId!;
       const orders = await db.select().from(tradingOrders).where(eq(tradingOrders.strategyId, strategy.id));
@@ -484,7 +516,7 @@ d("trading rule-book versions", () => {
       const patched = await trading.updateStrategy(companyId, strategy.id, { riskConfig: riskConfig({ maxOrdersPerDay: 10 }) }, USER);
       const { version: v2 } = await trading.versions.approveFromCard(companyId, patched.pendingVersion!.approvalId!, "owner-1");
       await trading.setStatus(companyId, strategy.id, "paused");
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       const later = (await db.select().from(tradingLedgerEntries).where(eq(tradingLedgerEntries.strategyId, strategy.id))).filter((e) => e.eventType === "kill_switch");
       expect(later.map((e) => e.strategyVersionId)).toEqual(expect.arrayContaining([v1, v2.id]));
       await trading.setStatus(companyId, strategy.id, "paused");
@@ -501,7 +533,7 @@ d("trading rule-book versions", () => {
       expect(live.ruleConfig).toMatchObject({ type: "strategy_spec", specVersion: 2, versionId: version.id, versionNumber: 2 });
       await expectCacheEqualsActiveVersion(strategy.id);
 
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       expect(await trading.tick(T_BUY)).toMatchObject({ filled: 1 });
       const opened = await trading.requireStrategy(companyId, strategy.id);
       expect(opened.positionQuantity).toBeGreaterThan(0);
@@ -528,12 +560,14 @@ d("trading rule-book versions", () => {
       const companyId = await seedCompany();
       const trading = service(T_BUY);
       const strategy = await trading.createStrategy(companyId, INPUT, USER); // plain crossover: no stop
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       expect(await trading.tick(T_BUY)).toMatchObject({ filled: 1 });
       expect((await trading.requireStrategy(companyId, strategy.id)).positionLevels).toMatchObject({ stopPrice: null });
 
       const proposed = await trading.versions.proposeVersion(companyId, strategy.id, { spec: stopSpec(), guidelines: "" }, { type: "user", id: "u1" });
       if (proposed.outcome !== "drafted") throw new Error("expected a draft");
+      // New entry/exit rules on a running strategy need the start gate cleared first (DUR-5008): an owner override stands in for the past-data test here.
+      await trading.backtests.recordOverride(companyId, strategy.id, proposed.version.id, START_GATE_TEST_OVERRIDE.reason, "owner-1");
       const { version } = await trading.versions.approveFromCard(companyId, proposed.approvalId, "owner-1");
       // The next tick, with a bar that dips under 5% below the entry price, must apply the NEW stop to the position that is already open.
       const t2 = new Date(T_BUY.getTime() + FOUR_H);

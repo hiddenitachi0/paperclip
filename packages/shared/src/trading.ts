@@ -88,6 +88,8 @@ export const TRADING_LEDGER_EVENT_TYPES = [
   "wallet_kill_switch",
   "wallet_reconciliation",
   "wallet_settings_changed",
+  // DUR-5010: a stretch of time the prediction evaluator was not running (detail: from, to, seconds).
+  "evaluator_gap",
 ] as const;
 export type TradingLedgerEventType = (typeof TRADING_LEDGER_EVENT_TYPES)[number];
 
@@ -432,8 +434,15 @@ export const setTradingStrategyStatusSchema = z
   .object({
     /** Only "running" or "paused" -- an operator can never directly set "halted_risk" (that's the system's own verdict) or clear it without addressing the cause; resuming from halted_risk goes through the same "running" transition once the operator has reviewed why. */
     status: z.enum(["running", "paused"]),
+    /**
+     * DUR-5008 (decision 7): only an owner may start a strategy whose rules have
+     * not passed the past-data test, and only with a written reason. Ignored
+     * (and refused if present) when pausing.
+     */
+    overrideReason: z.string().trim().min(10, "Write at least a sentence on why this may start without the past-data test.").max(1000).optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.overrideReason === undefined || value.status === "running", { message: "A reason for overriding the start gate only makes sense when starting a strategy.", path: ["overrideReason"] });
 export type SetTradingStrategyStatusInput = z.infer<typeof setTradingStrategyStatusSchema>;
 
 export interface TradingDashboardSummary {

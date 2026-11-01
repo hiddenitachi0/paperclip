@@ -492,6 +492,10 @@ DECLARE
     -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
+    -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
+    'trading_backtest_holdout_reads',
+    'trading_backtest_runs',
+    'trading_backtest_trials',
     -- DUR-5007 candle store. Created (and granted on) in
     -- 0265_trading_candle_store.sql; instance-wide public market data with no
     -- company_id, so these two are in the login-role list ONLY.
@@ -502,12 +506,18 @@ DECLARE
     'trading_ledger_entries',
     'trading_orders',
     -- DUR-5013 market weather. Created (and granted on) in
-    -- 0267_trading_regimes.sql; instance-wide public market data with no
+    -- 0269_trading_regimes.sql; instance-wide public market data with no
     -- company_id, so it is in the login-role list ONLY.
     'trading_regimes',
     'trading_strategies',
+    -- DUR-5010: created, granted on and policed in 0267_trading_predictions.sql. trading_evaluator_state is instance-wide (login-role list only); the other two are company-scoped (both lists).
+    'trading_evaluator_state',
+    'trading_prediction_verdicts',
+    'trading_predictions',
     -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
+    -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
+    'trading_start_gate_overrides',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
     -- is in this list only, not in the company-scoped one below.
@@ -878,13 +888,22 @@ DECLARE
     -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
+    -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
+    'trading_backtest_holdout_reads',
+    'trading_backtest_runs',
+    'trading_backtest_trials',
     'trading_daily_stats',
     'trading_fifo_lots',
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
+    -- DUR-5010: created, granted on and policed in 0267_trading_predictions.sql; company-scoped, so in both lists.
+    'trading_prediction_verdicts',
+    'trading_predictions',
     -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
+    -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
+    'trading_start_gate_overrides',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.

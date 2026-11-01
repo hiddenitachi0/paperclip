@@ -2948,7 +2948,12 @@ def handle_message(state, bot, m):
         # never interpolated straight into the shell command string.
         updated = cli_env({"SID": strategy_id}, "trading", "status", '"$SID"', "-C", company_id, "--status", "running")
         if updated is None:
-            send_plain(token, chat_id, "Couldn't resume that strategy — check the id with /trading.")
+            # DUR-5008: the server also refuses to start rules that have not passed the past-data test
+            # (a strategy that was already running before rule books existed is never refused). The
+            # bridge cannot tell which refusal it was, so it names both.
+            send_plain(token, chat_id, "Couldn't resume that strategy — check the id with /trading. "
+                                       "If the id is right, its rules may not have passed the past-data test yet: "
+                                       "an owner can start it from the app with a written reason.")
             return
         send_plain(token, chat_id, f"▶️ Resumed {updated.get('name') or strategy_id}.")
         return

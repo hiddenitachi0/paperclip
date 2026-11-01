@@ -178,6 +178,8 @@ export { mediaLoras, mediaModelSetups, mediaProjectDefaults } from "./media_mode
 export { mediaModelSetupTrials } from "./media_model_setup_trials.js";
 export { tradingCandles, tradingCandleIngestEvents } from "./trading_candles.js";
 export { tradingRegimes } from "./trading_regimes.js";
+export { tradingBacktestRuns, tradingBacktestTrials, tradingBacktestHoldoutReads, tradingStartGateOverrides } from "./trading_backtest.js";
+export { tradingPredictions, tradingPredictionVerdicts, tradingEvaluatorState } from "./trading_predictions.js";
 export { fxRates } from "./fx_rates.js";
 export {
   tradingStrategies,

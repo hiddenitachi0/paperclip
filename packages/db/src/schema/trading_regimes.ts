@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { boolean, check, date, doublePrecision, integer, pgTable, primaryKey, smallint, text, timestamp } from "drizzle-orm/pg-core";
 
 /**
- * Market weather (DUR-5013, migration 0267): one label per coin per day,
+ * Market weather (DUR-5013, migration 0269): one label per coin per day,
  * computed from the closed 1d bars in the candle store (trading_candles).
  * The rules live in packages/shared/src/trading-regimes.ts.
  *

@@ -3092,6 +3092,7 @@ export {
 } from "./trading.js";
 
 export * from "./trading-spec.js";
+export * from "./trading-backtest.js";
 export * from "./trading-indicators.js";
 
 export {
@@ -3310,3 +3311,4 @@ export {
 export * from "./env-file-refused.js";
 export * from "./trading-candles.js";
 export * from "./trading-regimes.js";
+export * from "./trading-scoring.js";
