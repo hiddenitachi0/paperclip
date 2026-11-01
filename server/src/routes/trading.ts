@@ -2,13 +2,16 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { TRADING_ASSETS, createTradingStrategySchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { TRADING_ASSETS, askTraderSchema, createTradingStrategySchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 import { currentMarketWeather, marketWeatherHistory } from "../services/trading-regimes.js";
+import { tradingTraderService } from "../services/trading-trader.js";
+import { logActivity } from "../services/activity-log.js";
+import { tradingEvaluatorService } from "../services/trading-evaluator.js";
 
 /**
  * DUR-4153/DUR-4171: the trading agent is board-only, both reading and
@@ -21,6 +24,11 @@ import { currentMarketWeather, marketWeatherHistory } from "../services/trading-
  * (assertCompanyOwnerAdminOrInstanceAdmin); reading is open to any active
  * company member.
  *
+ * DUR-5004: every write checks who is asking BEFORE it looks at the body, so an
+ * agent token gets a plain 403 whatever it sends. The Trader agent's own tools live in
+ * routes/agent-trading.ts; the one write here that concerns it ("Ask the analyst") is a
+ * person's action.
+ *
  * DUR-5002: changing a strategy's rules or limits (PATCH, or POST .../versions)
  * only ever files a draft version and an approval card; no route here
  * activates one. Approving happens on the card (routes/approvals.ts).
@@ -31,6 +39,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const trading = tradingService(db, { rawDb, ...deps });
+  const trader = tradingTraderService(db, rawDb);
+  const evaluator = tradingEvaluatorService(db, { marketData: deps.marketData });
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -51,8 +61,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.post(
     "/companies/:companyId/trading/strategies",
-    validate(createTradingStrategySchema),
     writeScope(),
+    validate(createTradingStrategySchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       // writeScope() enforces board-only (assertCompanyOwnerAdminOrInstanceAdmin), so actor is always a board user here.
@@ -68,8 +78,8 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.patch(
     "/companies/:companyId/trading/strategies/:strategyId",
-    validate(updateTradingStrategySchema),
     writeScope(),
+    validate(updateTradingStrategySchema),
     async (req, res) => {
       // writeScope() enforces board-only, so the actor is always a person here.
       const actor = { actorType: "user" as const, actorId: req.actor.userId ?? "board" };
@@ -114,11 +124,33 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     res.json(await trading.versions.getCardSource(req.params.companyId as string, req.params.approvalId as string));
   });
 
+  /**
+   * "Ask the analyst": opens a task for the company's Trader agent with a
+   * person's question. Owner/admin only, like every other write here. It
+   * changes no strategy; the Trader answers by proposing a change (a card) or
+   * by commenting on the task.
+   */
+  router.post("/companies/:companyId/trading/analyst/ask", writeScope(), validate(askTraderSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const userId = req.actor.userId ?? "board";
+    const result = await trader.askTrader(companyId, { userId }, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userId,
+      action: "trading.trader_asked",
+      entityType: "issue",
+      entityId: result.issueId,
+      details: { strategyId: req.body.strategyId ?? null },
+    });
+    res.status(201).json(result);
+  });
+
   /** The kill switch -- the one route the UI's pause/resume button and the Telegram bridge's command both call. */
   router.post(
     "/companies/:companyId/trading/strategies/:strategyId/status",
-    validate(setTradingStrategyStatusSchema),
     writeScope(),
+    validate(setTradingStrategyStatusSchema),
     async (req, res) => {
       res.json(await trading.setStatus(req.params.companyId as string, req.params.strategyId as string, req.body.status));
     },
@@ -155,6 +187,17 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     const query = weatherHistoryQuery.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid market weather query.", query.error.flatten());
     res.json(await marketWeatherHistory(db, asset, new Date(), { from: query.data.from, to: query.data.to, spellLimit: query.data.spells }));
+  });
+
+  // DUR-5010: the prediction scoreboard. Read-only; while a version is still collecting it shows
+  // "x of N" and no hit rate. ?version= picks an older version; the default is the active one.
+  router.get("/companies/:companyId/trading/strategies/:strategyId/scoreboard", readScope(), async (req, res) => {
+    const version = req.query.version === undefined ? undefined : Number(req.query.version);
+    if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
+      res.status(400).json({ error: "version must be a positive whole number" });
+      return;
+    }
+    res.json(await evaluator.scoreboard(req.params.companyId as string, req.params.strategyId as string, version));
   });
 
   return router;

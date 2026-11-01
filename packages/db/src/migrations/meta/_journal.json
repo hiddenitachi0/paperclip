@@ -1867,8 +1867,15 @@
     {
       "idx": 267,
       "version": "7",
-      "when": 1793559759967,
-      "tag": "0267_trading_regimes",
+      "when": 1793556466417,
+      "tag": "0267_trading_predictions",
+      "breakpoints": true
+    },
+    {
+      "idx": 269,
+      "version": "7",
+      "when": 1793564000000,
+      "tag": "0269_trading_regimes",
       "breakpoints": true
     }
   ]

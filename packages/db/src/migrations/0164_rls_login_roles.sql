@@ -502,10 +502,14 @@ DECLARE
     'trading_ledger_entries',
     'trading_orders',
     -- DUR-5013 market weather. Created (and granted on) in
-    -- 0267_trading_regimes.sql; instance-wide public market data with no
+    -- 0269_trading_regimes.sql; instance-wide public market data with no
     -- company_id, so it is in the login-role list ONLY.
     'trading_regimes',
     'trading_strategies',
+    -- DUR-5010: created, granted on and policed in 0267_trading_predictions.sql. trading_evaluator_state is instance-wide (login-role list only); the other two are company-scoped (both lists).
+    'trading_evaluator_state',
+    'trading_prediction_verdicts',
+    'trading_predictions',
     -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
     -- DUR-3994 Stage 2. Created (and granted on) in
@@ -883,6 +887,9 @@ DECLARE
     'trading_ledger_entries',
     'trading_orders',
     'trading_strategies',
+    -- DUR-5010: created, granted on and policed in 0267_trading_predictions.sql; company-scoped, so in both lists.
+    'trading_prediction_verdicts',
+    'trading_predictions',
     -- DUR-5002: created, granted on and policed in 0266_trading_strategy_versions.sql; company-scoped, so in both lists.
     'trading_strategy_versions',
     'untracked_write_incidents',

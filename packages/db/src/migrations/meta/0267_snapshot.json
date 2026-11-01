@@ -1,5 +1,5 @@
 {
-  "id": "812e02c9-7457-4ba5-a40a-5bd76bbd378f",
+  "id": "30239d63-b69c-4ad2-9bac-eff879bb3afc",
   "prevId": "3ac0269e-5d30-48fd-bc2c-1429cefd107f",
   "version": "7",
   "dialect": "postgresql",
@@ -43249,6 +43249,50 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.trading_evaluator_state": {
+      "name": "trading_evaluator_state",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "'evaluator'"
+        },
+        "last_heartbeat_at": {
+          "name": "last_heartbeat_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "boot_at": {
+          "name": "boot_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_evaluator_state_singleton_check": {
+          "name": "trading_evaluator_state_singleton_check",
+          "value": "\"trading_evaluator_state\".\"id\" = 'evaluator'"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.trading_fifo_lots": {
       "name": "trading_fifo_lots",
       "schema": "",
@@ -43623,7 +43667,7 @@
       "checkConstraints": {
         "trading_ledger_entries_event_type_check": {
           "name": "trading_ledger_entries_event_type_check",
-          "value": "\"trading_ledger_entries\".\"event_type\" IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation', 'wallet_created', 'wallet_tx_requested', 'wallet_tx_blocked', 'wallet_tx_approval_requested', 'wallet_tx_submitted', 'wallet_tx_confirmed', 'wallet_tx_failed', 'wallet_tx_rejected', 'wallet_kill_switch', 'wallet_reconciliation', 'wallet_settings_changed')"
+          "value": "\"trading_ledger_entries\".\"event_type\" IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation', 'wallet_created', 'wallet_tx_requested', 'wallet_tx_blocked', 'wallet_tx_approval_requested', 'wallet_tx_submitted', 'wallet_tx_confirmed', 'wallet_tx_failed', 'wallet_tx_rejected', 'wallet_kill_switch', 'wallet_reconciliation', 'wallet_settings_changed', 'evaluator_gap')"
         },
         "trading_ledger_entries_owner_check": {
           "name": "trading_ledger_entries_owner_check",
@@ -43863,103 +43907,68 @@
       },
       "isRLSEnabled": false
     },
-    "public.trading_regimes": {
-      "name": "trading_regimes",
+    "public.trading_prediction_verdicts": {
+      "name": "trading_prediction_verdicts",
       "schema": "",
       "columns": {
-        "asset": {
-          "name": "asset",
-          "type": "text",
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "rules_version": {
-          "name": "rules_version",
-          "type": "smallint",
+        "strategy_id": {
+          "name": "strategy_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "day": {
-          "name": "day",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "available_at": {
-          "name": "available_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "trend": {
-          "name": "trend",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "volatility": {
-          "name": "volatility",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "squeeze": {
-          "name": "squeeze",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "close": {
-          "name": "close",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sma200": {
-          "name": "sma200",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "adx": {
-          "name": "adx",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "atr_pct": {
-          "name": "atr_pct",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "atr_pct_percentile": {
-          "name": "atr_pct_percentile",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "bb_width_percentile": {
-          "name": "bb_width_percentile",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "spell_no": {
-          "name": "spell_no",
+        "spec_version": {
+          "name": "spec_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
-        "spell_start_day": {
-          "name": "spell_start_day",
-          "type": "date",
+        "forecaster_key": {
+          "name": "forecaster_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_samples": {
+          "name": "target_samples",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "min_running_days": {
+          "name": "min_running_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "samples_counted": {
+          "name": "samples_counted",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "running_ms": {
+          "name": "running_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "calendar_ms": {
+          "name": "calendar_ms",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": true
         },
@@ -43970,48 +43979,484 @@
           "notNull": true,
           "default": "now()"
         },
-        "updated_at": {
-          "name": "updated_at",
+        "verdict": {
+          "name": "verdict",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "trading_prediction_verdicts_once_uq": {
+          "name": "trading_prediction_verdicts_once_uq",
+          "columns": [
+            {
+              "expression": "strategy_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "spec_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "forecaster_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_prediction_verdicts_company_idx": {
+          "name": "trading_prediction_verdicts_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "trading_prediction_verdicts_company_id_companies_id_fk": {
+          "name": "trading_prediction_verdicts_company_id_companies_id_fk",
+          "tableFrom": "trading_prediction_verdicts",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "trading_prediction_verdicts_strategy_id_trading_strategies_id_fk": {
+          "name": "trading_prediction_verdicts_strategy_id_trading_strategies_id_fk",
+          "tableFrom": "trading_prediction_verdicts",
+          "tableTo": "trading_strategies",
+          "columnsFrom": [
+            "strategy_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_prediction_verdicts_target_check": {
+          "name": "trading_prediction_verdicts_target_check",
+          "value": "\"trading_prediction_verdicts\".\"target_samples\" >= 1 AND \"trading_prediction_verdicts\".\"min_running_days\" >= 0"
+        },
+        "trading_prediction_verdicts_reached_check": {
+          "name": "trading_prediction_verdicts_reached_check",
+          "value": "\"trading_prediction_verdicts\".\"samples_counted\" >= \"trading_prediction_verdicts\".\"target_samples\" AND \"trading_prediction_verdicts\".\"running_ms\" >= \"trading_prediction_verdicts\".\"min_running_days\"::bigint * 86400000 AND \"trading_prediction_verdicts\".\"running_ms\" <= \"trading_prediction_verdicts\".\"calendar_ms\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.trading_predictions": {
+      "name": "trading_predictions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "strategy_id": {
+          "name": "strategy_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "spec_version": {
+          "name": "spec_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "forecaster_kind": {
+          "name": "forecaster_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "forecaster_key": {
+          "name": "forecaster_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "asset": {
+          "name": "asset",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "timeframe": {
+          "name": "timeframe",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "bar_close_at": {
+          "name": "bar_close_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "data_cutoff_at": {
+          "name": "data_cutoff_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "horizon_bars": {
+          "name": "horizon_bars",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resolves_at": {
+          "name": "resolves_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'direction'"
+        },
+        "direction": {
+          "name": "direction",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "probability": {
+          "name": "probability",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "probability_source": {
+          "name": "probability_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reference_price": {
+          "name": "reference_price",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_price": {
+          "name": "target_price",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stop_price": {
+          "name": "stop_price",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "flat_band_pct": {
+          "name": "flat_band_pct",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "r_distance": {
+          "name": "r_distance",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "regime": {
+          "name": "regime",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "indicator_snapshot": {
+          "name": "indicator_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "realized_return": {
+          "name": "realized_return",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mfe": {
+          "name": "mfe",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mae": {
+          "name": "mae",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolver_version": {
+          "name": "resolver_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "independent": {
+          "name": "independent",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "trading_regimes_pk": {
-          "name": "trading_regimes_pk",
+      "indexes": {
+        "trading_predictions_one_per_bar_uq": {
+          "name": "trading_predictions_one_per_bar_uq",
           "columns": [
-            "asset",
-            "rules_version",
-            "day"
-          ]
+            {
+              "expression": "forecaster_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "strategy_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "spec_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "asset",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "bar_close_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_predictions_series_idx": {
+          "name": "trading_predictions_series_idx",
+          "columns": [
+            {
+              "expression": "strategy_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "spec_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "forecaster_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "bar_close_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_predictions_unresolved_idx": {
+          "name": "trading_predictions_unresolved_idx",
+          "columns": [
+            {
+              "expression": "resolves_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"trading_predictions\".\"resolved_at\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_predictions_company_idx": {
+          "name": "trading_predictions_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "bar_close_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
+      "foreignKeys": {
+        "trading_predictions_company_id_companies_id_fk": {
+          "name": "trading_predictions_company_id_companies_id_fk",
+          "tableFrom": "trading_predictions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "trading_predictions_strategy_id_trading_strategies_id_fk": {
+          "name": "trading_predictions_strategy_id_trading_strategies_id_fk",
+          "tableFrom": "trading_predictions",
+          "tableTo": "trading_strategies",
+          "columnsFrom": [
+            "strategy_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "trading_regimes_source_check": {
-          "name": "trading_regimes_source_check",
-          "value": "\"trading_regimes\".\"source\" IN ('kraken', 'binance', 'coinbase')"
+        "trading_predictions_kind_check": {
+          "name": "trading_predictions_kind_check",
+          "value": "\"trading_predictions\".\"forecaster_kind\" IN ('rule', 'shadow_template', 'baseline', 'model', 'llm')"
         },
-        "trading_regimes_trend_check": {
-          "name": "trading_regimes_trend_check",
-          "value": "\"trading_regimes\".\"trend\" IN ('uptrend', 'downtrend', 'ranging')"
+        "trading_predictions_type_check": {
+          "name": "trading_predictions_type_check",
+          "value": "\"trading_predictions\".\"kind\" IN ('direction', 'target_before_stop')"
         },
-        "trading_regimes_volatility_check": {
-          "name": "trading_regimes_volatility_check",
-          "value": "\"trading_regimes\".\"volatility\" IN ('low', 'normal', 'high')"
+        "trading_predictions_direction_check": {
+          "name": "trading_predictions_direction_check",
+          "value": "\"trading_predictions\".\"direction\" IN ('up', 'down', 'flat')"
         },
-        "trading_regimes_percentile_check": {
-          "name": "trading_regimes_percentile_check",
-          "value": "\"trading_regimes\".\"atr_pct_percentile\" BETWEEN 0 AND 100 AND \"trading_regimes\".\"bb_width_percentile\" BETWEEN 0 AND 100"
+        "trading_predictions_outcome_check": {
+          "name": "trading_predictions_outcome_check",
+          "value": "\"trading_predictions\".\"outcome\" IS NULL OR \"trading_predictions\".\"outcome\" IN ('hit', 'miss', 'flat', 'void')"
         },
-        "trading_regimes_spell_check": {
-          "name": "trading_regimes_spell_check",
-          "value": "\"trading_regimes\".\"spell_no\" >= 1 AND \"trading_regimes\".\"spell_start_day\" <= \"trading_regimes\".\"day\""
+        "trading_predictions_probability_check": {
+          "name": "trading_predictions_probability_check",
+          "value": "(\"trading_predictions\".\"probability\" IS NULL) = (\"trading_predictions\".\"probability_source\" IS NULL) AND (\"trading_predictions\".\"probability\" IS NULL OR (\"trading_predictions\".\"probability\" >= 0 AND \"trading_predictions\".\"probability\" <= 1)) AND (\"trading_predictions\".\"probability_source\" IS NULL OR \"trading_predictions\".\"probability_source\" IN ('model', 'llm', 'fitted_out_of_sample'))"
+        },
+        "trading_predictions_horizon_check": {
+          "name": "trading_predictions_horizon_check",
+          "value": "\"trading_predictions\".\"horizon_bars\" >= 1 AND \"trading_predictions\".\"spec_version\" >= 1"
+        },
+        "trading_predictions_price_check": {
+          "name": "trading_predictions_price_check",
+          "value": "\"trading_predictions\".\"reference_price\" > 0 AND \"trading_predictions\".\"flat_band_pct\" >= 0 AND (\"trading_predictions\".\"r_distance\" IS NULL OR \"trading_predictions\".\"r_distance\" > 0)"
+        },
+        "trading_predictions_cutoff_check": {
+          "name": "trading_predictions_cutoff_check",
+          "value": "\"trading_predictions\".\"data_cutoff_at\" <= \"trading_predictions\".\"bar_close_at\" AND \"trading_predictions\".\"data_cutoff_at\" < \"trading_predictions\".\"decided_at\""
+        },
+        "trading_predictions_before_outcome_check": {
+          "name": "trading_predictions_before_outcome_check",
+          "value": "\"trading_predictions\".\"bar_close_at\" < \"trading_predictions\".\"resolves_at\" AND \"trading_predictions\".\"decided_at\" < \"trading_predictions\".\"resolves_at\""
+        },
+        "trading_predictions_resolution_pair_check": {
+          "name": "trading_predictions_resolution_pair_check",
+          "value": "(\"trading_predictions\".\"resolved_at\" IS NULL) = (\"trading_predictions\".\"outcome\" IS NULL) AND (\"trading_predictions\".\"resolved_at\" IS NULL) = (\"trading_predictions\".\"resolver_version\" IS NULL)"
         }
       },
       "isRLSEnabled": false
