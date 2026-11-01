@@ -28,6 +28,7 @@ import { Watchers } from "./pages/Watchers";
 import { Overlaps } from "./pages/Overlaps";
 import { Trading } from "./pages/Trading";
 import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
+import { TradingStrategyEdit } from "./pages/TradingStrategyEdit";
 import { ProductGrabber } from "./pages/ProductGrabber";
 import { Email } from "./pages/Email";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
@@ -202,6 +203,8 @@ function boardRoutes() {
       <Route path="legal/:contractId" element={<ContractPage />} />
       <Route path="overlaps" element={<Overlaps />} />
       <Route path="trading" element={<Trading />} />
+      <Route path="trading/new" element={<TradingStrategyEdit />} />
+      <Route path="trading/:strategyId/edit" element={<TradingStrategyEdit />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route path="product-grabber" element={<ProductGrabber />} />
       <Route path="email" element={<Email />} />
