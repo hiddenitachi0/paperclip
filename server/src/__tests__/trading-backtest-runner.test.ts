@@ -138,3 +138,84 @@ describe("past-data test supervisor", () => {
     expect(Math.max(...gaps)).toBeLessThan(150); // a blocked event loop would show a gap of a second or more
   });
 });
+
+describe("template reports share the supervisor (DUR-5014)", () => {
+  function withReports(companyRuns: Array<{ id: string; companyId: string }>, reports: string[]) {
+    const order: string[] = [];
+    const failedReports: Array<{ id: string; message: string }> = [];
+    const prepare = vi.fn(async () => undefined);
+    const queue: BacktestQueue = {
+      claimNextRun: vi.fn(async () => companyRuns.shift() ?? null),
+      failInterrupted: vi.fn(async () => 0),
+      failRun: vi.fn(async () => undefined),
+      templateReports: {
+        claimNextReport: vi.fn(async () => {
+          const id = reports.shift();
+          return id ? { id } : null;
+        }),
+        failInterrupted: vi.fn(async () => 1),
+        failReport: vi.fn(async (id: string, message: string) => {
+          failedReports.push({ id, message });
+        }),
+        prepare,
+      },
+    };
+    let now = new Date("2026-10-30T12:00:00Z");
+    const runner = tradingBacktestRunner({
+      databaseUrl: "postgres://not-used",
+      queue,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      pollEveryMs: 15_000,
+      now: () => now,
+      runWorker: async (job) => {
+        order.push(`run:${job.runId}`);
+        return OK;
+      },
+      runTemplateWorker: async (job) => {
+        order.push(`report:${job.reportId}`);
+        if (job.reportId === "bad") throw new Error("worker died");
+        return { type: "result", ok: true, gatePassed: false, message: "report done" };
+      },
+    });
+    return { runner, queue, order, failedReports, prepare, advance: (ms: number) => (now = new Date(now.getTime() + ms)), now: () => now };
+  }
+
+  it("runs a company test before a template report, and a template report when no test is waiting", async () => {
+    const s = withReports([{ id: "r1", companyId: "c1" }], ["t1"]);
+    s.runner.tick(s.now());
+    await settle();
+    s.advance(60_000);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.order).toEqual(["run:r1", "report:t1"]);
+    expect(s.runner.status().lastMessage).toBe("report done");
+  });
+
+  it("marks a template report failed when its worker dies, and carries on", async () => {
+    const s = withReports([], ["bad", "t2"]);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.failedReports).toEqual([{ id: "bad", message: "worker died" }]);
+    s.advance(60_000);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.order).toEqual(["report:bad", "report:t2"]);
+  });
+
+  it("prepares the library at most every ten minutes, and fails interrupted reports once at start", async () => {
+    const s = withReports([], []);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.prepare).toHaveBeenCalledTimes(1);
+    expect(s.queue.templateReports!.failInterrupted).toHaveBeenCalledTimes(1);
+    s.advance(60_000);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.prepare).toHaveBeenCalledTimes(1);
+    s.advance(11 * 60_000);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.prepare).toHaveBeenCalledTimes(2);
+    expect(s.queue.templateReports!.failInterrupted).toHaveBeenCalledTimes(1);
+  });
+});
