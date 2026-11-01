@@ -1,8 +1,8 @@
 import { useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Pause, Play, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, Pause, Play, Pencil, XCircle } from "lucide-react";
 import { describeTradingPauseReason } from "@paperclipai/shared";
-import { useParams } from "@/lib/router";
+import { Link, useParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -15,6 +15,10 @@ import { evaluateTradingVerdict } from "../lib/tradingVerdict";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "../components/StatusBadge";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { TradingDisclaimer } from "../components/TradingDisclaimer";
+import { TradingStrategyVersions } from "../components/TradingStrategyVersions";
+import { describeStrategyInWords } from "../lib/tradingSpecWords";
+import { parseStoredSpec } from "../lib/tradingRuleBook";
 
 /**
  * One strategy's dashboard: its current paper balances, the pass/fail
@@ -86,6 +90,16 @@ export function TradingStrategyDetail() {
     enabled: Boolean(selectedCompanyId && strategyId),
   });
 
+  const versionsQuery = useQuery({
+    queryKey: selectedCompanyId && strategyId ? queryKeys.trading.versions(selectedCompanyId, strategyId) : ["trading-versions", "__none__"],
+    queryFn: () => tradingApi.versions(selectedCompanyId!, strategyId!),
+    enabled: Boolean(selectedCompanyId && strategyId),
+  });
+  const versions = versionsQuery.data ?? [];
+  const liveVersion = versions.find((v) => v.status === "approved") ?? null;
+  const waitingVersion = versions.find((v) => v.status === "draft") ?? null;
+  const liveSpec = liveVersion ? parseStoredSpec(liveVersion.spec) : null;
+
   const verdict = useMemo(() => {
     if (!dashboardQuery.data || !strategy || !ordersQuery.data) return null;
     return evaluateTradingVerdict(dashboardQuery.data, strategy.riskConfig, strategy.createdAt, ordersQuery.data);
@@ -123,6 +137,7 @@ export function TradingStrategyDetail() {
             Trades {strategy.asset} with play money — checks every {strategy.checkEveryMinutes} minutes.
           </p>
           {pauseText ? <p className="text-xs text-muted-foreground">{pauseText}</p> : null}
+          <TradingDisclaimer />
         </div>
         {canManage ? (
           <Button
@@ -142,6 +157,42 @@ export function TradingStrategyDetail() {
               </>
             )}
           </Button>
+        ) : null}
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-border p-4" data-testid="strategy-rules">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">The rules it follows now</h2>
+          {canManage ? (
+            <Button asChild variant="outline" size="sm">
+              <Link to={`/trading/${strategy.id}/edit`}>
+                <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                Change the rules
+              </Link>
+            </Button>
+          ) : null}
+        </div>
+        {liveSpec ? (
+          <p className="text-sm text-muted-foreground" data-testid="strategy-live-read-back">
+            {describeStrategyInWords(liveSpec)}
+          </p>
+        ) : versionsQuery.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">The rules could not be shown.</p>
+        )}
+        {waitingVersion ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/60 p-3 text-sm" data-testid="strategy-waiting-banner">
+            <Clock className="h-4 w-4 shrink-0" />
+            <span>
+              Waiting for approval: version {waitingVersion.version}. The strategy keeps using the rules above until it is approved.
+            </span>
+            {waitingVersion.approvalId ? (
+              <Link to={`/approvals/${waitingVersion.approvalId}`} className="font-medium underline">
+                Open the approval card
+              </Link>
+            ) : null}
+          </div>
         ) : null}
       </div>
 
@@ -195,6 +246,8 @@ export function TradingStrategyDetail() {
           </div>
         </>
       ) : null}
+
+      <TradingStrategyVersions versions={versions} orders={ordersQuery.data ?? []} />
 
       <div className="rounded-lg border border-border">
         <div className="border-b border-border px-4 py-3">
