@@ -126,6 +126,7 @@ export interface Config {
   mergePrAutomationEnabled: boolean;
   // DUR-5007: the candle store's backfill and top-up (public market data downloads, run in a worker thread). On unless switched off.
   tradingCandleStoreEnabled: boolean;
+  tradingEvaluatorEnabled: boolean;
   // DUR-134: the scheduler pass that publishes queued/approved persona posts.
   // Off only via env; the operator-facing controls are the kill switches.
   personaPublishingSweepEnabled: boolean;
@@ -481,6 +482,8 @@ export function loadConfig(): Config {
     // all, following the same convention as heartbeatSchedulerEnabled).
     mergePrAutomationEnabled: process.env.PAPERCLIP_MERGE_PR_AUTOMATION_ENABLED !== "false",
     tradingCandleStoreEnabled: process.env.PAPERCLIP_TRADING_CANDLE_STORE_ENABLED !== "false",
+    // DUR-5010: the prediction evaluator places no orders; on by default, and it starts by itself after a restart.
+    tradingEvaluatorEnabled: process.env.PAPERCLIP_TRADING_EVALUATOR_ENABLED !== "false",
     personaPublishingSweepEnabled: process.env.PAPERCLIP_PERSONA_PUBLISHING_SWEEP_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     // DUR-273: per-agent timer jitter so heartbeat wakes spread out instead of
