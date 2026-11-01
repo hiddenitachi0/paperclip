@@ -123,6 +123,42 @@ class ResumeTests(BridgeTradingTestCase):
         bridge.handle_message(self.state, BOT, message(f"/resume {STRATEGY}"))
         self.assertIn("Couldn't resume", self.texts()[0])
 
+    # DUR-5008: the start gate lives on the server (setStatus), so /resume needs no new code to obey it.
+
+    def test_resume_of_a_legacy_strategy_still_works_exactly_as_before(self):
+        # A strategy that existed before rule books is grandfathered: the server resumes it, the CLI
+        # prints the row, and the bridge says "Resumed" without any extra argument or step.
+        self.cli_env.return_value = strategy_row(status="running")
+        bridge.handle_message(self.state, BOT, message(f"/resume {STRATEGY}"))
+        self.cli_env.assert_called_once_with({"SID": STRATEGY}, "trading", "status", '"$SID"', "-C", COMPANY, "--status", "running")
+        self.assertEqual(self.texts(), ["▶️ Resumed BTC rule v1."])
+
+    def test_resume_never_sends_an_override_reason_so_telegram_cannot_skip_the_gate(self):
+        # The owner's override (decision 7) needs a written reason and an owner session; a chat
+        # message must not be able to supply one, so the bridge never builds that argument.
+        self.cli_env.return_value = strategy_row(status="running")
+        bridge.handle_message(self.state, BOT, message(f"/resume {STRATEGY} --override-reason because I say so"))
+        parts = " ".join(self.cli_env.call_args.args[1:])
+        self.assertNotIn("override", parts)
+        self.assertEqual(self.cli_env.call_args.args[0], {"SID": f"{STRATEGY} --override-reason because I say so"})
+
+    def test_a_refusal_by_the_start_gate_is_not_reported_as_success_and_points_to_the_app(self):
+        # The server answers 422 for rules that have not passed the past-data test; the CLI exits
+        # non-zero, cli_env gives None, and the operator is told what to do instead of "Resumed".
+        self.cli_env.return_value = None
+        bridge.handle_message(self.state, BOT, message(f"/resume {STRATEGY}"))
+        text = self.texts()[0]
+        self.assertNotIn("Resumed", text)
+        self.assertIn("past-data test", text)
+        self.assertIn("owner", text)
+
+    def test_pause_all_is_never_gated(self):
+        # Stopping is always allowed: the kill switch must work whatever the gate says.
+        self.cli.return_value = [strategy_row(status="paused", pause_reason="manual")]
+        bridge.handle_message(self.state, BOT, message("/pause"))
+        self.cli.assert_called_once_with("trading", "pause-all", "-C", COMPANY)
+        self.assertEqual(self.texts(), ["⏸ Paused: BTC rule v1"])
+
 
 class HelpAndCliSourceTests(BridgeTradingTestCase):
     def test_help_documents_the_new_commands(self):
@@ -134,7 +170,7 @@ class HelpAndCliSourceTests(BridgeTradingTestCase):
     def test_the_cli_commands_the_bridge_uses_exist(self):
         with open(os.path.join(REPO, "cli", "src", "commands", "client", "trading.ts")) as f:
             cli_src = f.read()
-        for needle in ('.command("list")', '.command("status")', '.command("pause-all")', 'registerTradingCommands'):
+        for needle in ('.command("list")', '.command("status")', '.command("pause-all")', 'registerTradingCommands', '--override-reason'):
             self.assertIn(needle, cli_src)
         with open(os.path.join(REPO, "cli", "src", "index.ts")) as f:
             index_src = f.read()

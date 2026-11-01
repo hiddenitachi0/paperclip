@@ -42,6 +42,20 @@ function rollbackStatements(): string[] {
     .map((line) => line.replace(/^--\s+/, "").trim());
 }
 
+/**
+ * DUR-5008: 0268 adds tables that point at trading_strategy_versions, so 0266
+ * can only be rolled back after 0268 has been (newest first, as always). The
+ * rehearsal below puts the database back into its pre-0266 shape, so it takes
+ * 0268 off first, using the rollback written in that migration's own header.
+ */
+const LATER_MIGRATION_PATH = fileURLToPath(new URL("./migrations/0268_trading_backtest.sql", import.meta.url));
+function laterRollbackStatements(): string[] {
+  return readFileSync(LATER_MIGRATION_PATH, "utf8")
+    .split("\n")
+    .filter((line) => /^--\s{3}(DROP|ALTER)/.test(line))
+    .map((line) => line.replace(/^--\s+/, "").trim());
+}
+
 d("migration 0266_trading_strategy_versions", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -91,6 +105,7 @@ d("migration 0266_trading_strategy_versions", () => {
 
   it("upgrades a database that already holds trading rows without touching them, and a second run changes nothing", async () => {
     // Put the database back into its pre-0266 shape, with real rows in it.
+    for (const statement of laterRollbackStatements()) await db.execute(sql.raw(statement));
     for (const statement of rollbackStatements()) await db.execute(sql.raw(statement));
     const orderId = randomUUID();
     await db.execute(sql`

@@ -107,6 +107,8 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // rows). Fires every tick but only works about once an hour; failures are
   // logged and backed off.
   "heartbeat-scheduler:marketWeather",
+  // DUR-5008: looks at the past-data test queue and starts a worker thread; routine per-tick mechanics.
+  "heartbeat-scheduler:tradingBacktest",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

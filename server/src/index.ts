@@ -88,6 +88,8 @@ import { videoStorylineRenderService } from "./services/video-storyline-render.j
 import { tradingService } from "./services/trading.js";
 import { registerCandleRunner, tradingCandleRunner } from "./services/trading-candle-runner.js";
 import { tradingRegimeRunner } from "./services/trading-regime-runner.js";
+import { tradingBacktestStore } from "./services/trading-backtest-store.js";
+import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
 import { tradingEvaluatorService } from "./services/trading-evaluator.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
@@ -1120,6 +1122,14 @@ export async function startServer(): Promise<StartedServer> {
     registerCandleRunner(candleStore);
     // DUR-5013: the daily market-weather labels, recomputed from the candle store.
     const marketWeather = tradingRegimeRunner({ db: schedulerDb as any, logger, enabled: config.tradingMarketWeatherEnabled });
+    // DUR-5008: past-data tests (walk-forward backtests). One at a time, in a worker
+    // thread with its own database connection, on its own chain: never in the trading tick.
+    const tradingBacktests = tradingBacktestRunner({
+      databaseUrl: config.databaseBypassUrl || activeDatabaseConnectionString,
+      queue: tradingBacktestStore(bypassDb as any),
+      logger,
+      enabled: config.tradingCandleStoreEnabled,
+    });
     // DUR-5010: the prediction evaluator. Its own chain, never in the paper order
     // path: it places no orders and files no cards, so it starts by itself on
     // every boot even though the order path pauses on restart (DUR-4171).
@@ -1891,6 +1901,26 @@ export async function startServer(): Promise<StartedServer> {
         ).catch((err) => {
           logger.error({ err }, "market weather tick failed");
         }),
+      );
+
+      // DUR-5008: past-data tests. tick() only looks at the queue and starts a
+      // worker thread; it returns at once and shares nothing with the trading tick above.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingBacktest, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tradingBacktest",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tradingBacktest",
+          },
+          async () => tradingBacktests.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.started) logger.debug("past-data test queue checked");
+          })
+          .catch((err) => {
+            logger.error({ err }, "past-data test tick failed");
+          }),
       );
       // DUR-5010: the prediction evaluator and resolver. A separate chain from
       // the trading tick above: it only reads strategies, writes the append-only
