@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, sql } from "drizzle-orm";
 import {
   tradingEvaluatorState,
   tradingLedgerEntries,
@@ -50,7 +50,7 @@ import {
 } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { notFound } from "../errors.js";
-import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
+import { ccxtTradingMarketData, isTradingMarketDataError, type TradingMarketDataSource } from "./trading-market-data.js";
 import { tradingLedgerService } from "./trading-ledger.js";
 import { listCandles } from "./trading-candle-store.js";
 
@@ -665,7 +665,7 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
       status,
       time: { runningMs: time.runningMs, calendarMs: time.calendarMs, gapMs: time.gapMs },
       forecasters,
-      trades: status.status === "ready" || trips.length > 0 ? { ...trades, ...riskAdjustedReturns([...daily.values()]), vsBuyAndHold: strategy.startingQuoteUsd ? returnVsBuyAndHold(trades.netPnlUsd / startingEquityUsd, strategy.startingQuoteUsd, strategy.startingQuoteUsd) : null } : null,
+      trades: status.status === "ready" || trips.length > 0 ? { ...trades, ...riskAdjustedReturns([...daily.values()]), vsBuyAndHold: rows.length > 0 ? returnVsBuyAndHold(trades.netPnlUsd / startingEquityUsd, rows[0]!.referencePrice, rows[rows.length - 1]!.referencePrice) : null } : null,
       verdict: verdictRow ? { computedAt: verdictRow.computedAt, samplesCounted: verdictRow.samplesCounted, ...(verdictRow.verdict as Record<string, unknown>) } : null,
     };
   }
