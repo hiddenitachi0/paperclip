@@ -177,6 +177,7 @@ export { videoStorylineWriterMessages } from "./video_storyline_writer_messages.
 export { mediaLoras, mediaModelSetups, mediaProjectDefaults } from "./media_model_setups.js";
 export { mediaModelSetupTrials } from "./media_model_setup_trials.js";
 export { tradingCandles, tradingCandleIngestEvents } from "./trading_candles.js";
+export { tradingBacktestRuns, tradingBacktestTrials, tradingBacktestHoldoutReads, tradingStartGateOverrides } from "./trading_backtest.js";
 export { tradingPredictions, tradingPredictionVerdicts, tradingEvaluatorState } from "./trading_predictions.js";
 export { fxRates } from "./fx_rates.js";
 export {

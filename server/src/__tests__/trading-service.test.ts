@@ -18,6 +18,9 @@ import { approvalService } from "../services/approvals.ts";
 import { tradingService } from "../services/trading.ts";
 import { fakeTradingMarketData } from "../services/trading-market-data.ts";
 
+/** DUR-5008: these tests are about the tick, not the start gate; an owner override lets their brand-new strategies start (the gate itself is tested in trading-start-gate.test.ts). */
+const START_GATE_TEST_OVERRIDE = { reason: "test setup: the past-data test is not what this test is about", userId: "test-owner" };
+
 /**
  * DUR-4171: end-to-end coverage for the tick loop (services/trading.ts),
  * the piece the pure rule-engine (packages/shared/src/trading.test.ts) and
@@ -132,7 +135,7 @@ d("tradingService", () => {
     });
 
     const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running"); // writes a kill_switch ledger entry -- accounted for below.
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE); // writes a kill_switch ledger entry -- accounted for below.
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 1, blocked: 0, approvalRequested: 0, halted: 0 });
@@ -167,7 +170,7 @@ d("tradingService", () => {
       marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: buyNow } } }),
     });
     const strategy = await buyTrading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await buyTrading.setStatus(companyId, strategy.id, "running");
+    await buyTrading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await buyTrading.tick(buyNow);
     const afterBuy = await buyTrading.requireStrategy(companyId, strategy.id);
 
@@ -216,7 +219,7 @@ d("tradingService", () => {
       { ...STRATEGY_INPUT, ruleConfig: { ...RULE, orderSizeFraction: 1 }, riskConfig: riskConfig({ maxPositionNok: 10 }) },
       { actorType: "user", actorId: "u1" },
     );
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 0, blocked: 1 });
@@ -245,7 +248,7 @@ d("tradingService", () => {
       marketData: fakeTradingMarketData({ candles: { BTC: jumpCandles }, quotes: { BTC: { bidUsd: 30, askUsd: 30, at: now } } }),
     });
     const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 0, blocked: 1, halted: 0 });
@@ -279,7 +282,7 @@ d("tradingService", () => {
       { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
       { actorType: "user", actorId: "u1" },
     );
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 0, approvalRequested: 1 });
@@ -310,7 +313,7 @@ d("tradingService", () => {
       { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
       { actorType: "user", actorId: "u1" },
     );
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await trading.tick(now);
     const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
     expect(pending.status).toBe("pending_approval");
@@ -345,7 +348,7 @@ d("tradingService", () => {
       { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
       { actorType: "user", actorId: "u1" },
     );
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await trading.tick(now);
     const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
 
@@ -377,7 +380,7 @@ d("tradingService", () => {
       { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
       { actorType: "user", actorId: "u1" },
     );
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await trading.tick(now);
 
     // TRADING_TRADE_APPROVAL_EXPIRY_MS is 5 minutes -- nobody decided the card, so it's expired by the time the next tick runs.
@@ -403,7 +406,7 @@ d("tradingService", () => {
     const trading = tradingService(db, { now: () => now, marketData: fakeTradingMarketData({}) });
 
     const running = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, running.id, "running");
+    await trading.setStatus(companyId, running.id, "running", START_GATE_TEST_OVERRIDE);
     const stillPaused = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, name: "Paused strategy" }, { actorType: "user", actorId: "u1" });
 
     const { pausedCount } = await trading.reconcileOnBoot();
@@ -427,7 +430,7 @@ d("tradingService", () => {
     const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
     expect(strategy.status).toBe("paused"); // every strategy is created paused
 
-    const resumed = await trading.setStatus(companyId, strategy.id, "running");
+    const resumed = await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     expect(resumed.status).toBe("running");
     expect(resumed.pauseReason).toBeNull();
 
@@ -439,7 +442,7 @@ d("tradingService", () => {
     expect(ledgerEntries.map((e) => e.eventType)).toEqual(["kill_switch", "kill_switch"]);
     expect(ledgerEntries.map((e) => e.detail)).toEqual([
       { action: "pause", fromStatus: "running" },
-      { action: "resume", fromStatus: "paused" },
+      { action: "resume", fromStatus: "paused", startGate: "override", overrideReason: START_GATE_TEST_OVERRIDE.reason, overriddenByUserId: START_GATE_TEST_OVERRIDE.userId },
     ]);
   });
 
@@ -496,7 +499,7 @@ d("tradingService", () => {
     const forming: TradingCandle = { openTime: new Date("2026-01-01T00:00:00Z"), open: 20, high: 21, low: 20, close: 21, volume: 1 };
     const trading = stubbed(now, [...closed, forming], 21);
     const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 0, blocked: 0, halted: 0 });
@@ -515,7 +518,7 @@ d("tradingService", () => {
     const trading = stubbed(now, barsEndingAt([20, 20, 20, 21], new Date("2026-01-01T12:00:00Z"), "4h"), 21);
     const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe: "4h" }, { actorType: "user", actorId: "u1" });
     expect(strategy.timeframe).toBe("4h");
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 1, halted: 0 });
@@ -532,7 +535,7 @@ d("tradingService", () => {
     // 4h bar that closed at 16:00 the day before: 20h old, far past one timeframe + 10 minutes.
     const trading = stubbed(now, barsEndingAt([20, 20, 20, 21], new Date("2026-01-01T12:00:00Z"), "4h"), 21);
     const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe: "4h" }, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
 
     const result = await trading.tick(now);
     expect(result).toMatchObject({ checked: 1, filled: 0, halted: 1 });
@@ -551,7 +554,7 @@ d("tradingService", () => {
     // At t0: flat. By t1 four more 15m bars closed; the cross (20 -> 21 on the 01:00-minus-45 bar) was not seen live, and 21 -> 22 -> 23 keeps fast above slow.
     const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
     const strategy = await first.createStrategy(companyId, { ...STRATEGY_INPUT, checkEveryMinutes: 60 }, { actorType: "user", actorId: "u1" });
-    await first.setStatus(companyId, strategy.id, "running");
+    await first.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     expect(await first.tick(t0)).toMatchObject({ checked: 1, filled: 0 });
 
     const second = stubbed(t1, barsEndingAt([20, 20, 20, 20, 21, 22, 22.5, 23], new Date("2026-01-01T00:45:00Z")), 23);
@@ -575,7 +578,7 @@ d("tradingService", () => {
     const t1 = new Date("2026-01-01T01:00:00Z");
     const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
     const strategy = await first.createStrategy(companyId, { ...STRATEGY_INPUT, checkEveryMinutes: 60 }, { actorType: "user", actorId: "u1" });
-    await first.setStatus(companyId, strategy.id, "running");
+    await first.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await first.tick(t0);
 
     // Up-cross on the 21 bar, then the price falls back below where the averages cross again: the buy is old news by the latest bar.
@@ -597,7 +600,7 @@ d("tradingService", () => {
     const t0 = new Date("2026-01-01T00:00:00Z");
     const first = stubbed(t0, barsEndingAt([20, 20, 20, 20], new Date("2025-12-31T23:45:00Z")), 20);
     const strategy = await first.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await first.setStatus(companyId, strategy.id, "running");
+    await first.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await first.tick(t0);
 
     // 60 more 15m bars closed (15h); a cross sits in the middle but must not trade.
@@ -658,7 +661,7 @@ d("tradingService", () => {
     const buyBars = barsEndingAt([100, 100, 100, 101], new Date(buyAt.getTime() - tradingTimeframeMs(timeframe)), timeframe);
     const buyer = stubbed(buyAt, buyBars, 101);
     const strategy = await buyer.createStrategy(companyId, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(risk) }, { actorType: "user", actorId: "u1" });
-    await buyer.setStatus(companyId, strategy.id, "running");
+    await buyer.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     expect(await buyer.tick(buyAt)).toMatchObject({ filled: 1 });
     return { strategy, buyer };
   }
@@ -755,7 +758,7 @@ d("tradingService", () => {
       const buyCompany = await seedCompany();
       const jumpBuyer = stubbed(buyAt, barsEndingAt([100, 100, 100, 100 + jumpUp], new Date(buyAt.getTime() - step), timeframe), 100 + jumpUp);
       const buyStrategy = await jumpBuyer.createStrategy(buyCompany, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
-      await jumpBuyer.setStatus(buyCompany, buyStrategy.id, "running");
+      await jumpBuyer.setStatus(buyCompany, buyStrategy.id, "running", START_GATE_TEST_OVERRIDE);
       expect(await jumpBuyer.tick(buyAt)).toMatchObject({ filled: 0, blocked: 1 });
       const haltedRow = await jumpBuyer.requireStrategy(buyCompany, buyStrategy.id);
       expect(haltedRow).toMatchObject({ status: "running", pauseReason: "circuit_breaker", positionQuantity: 0 });
@@ -765,7 +768,7 @@ d("tradingService", () => {
       const calmUp = thresholdPct - 1;
       const calmBuyer = stubbed(buyAt, barsEndingAt([100, 100, 100, 100 + calmUp], new Date(buyAt.getTime() - step), timeframe), 100 + calmUp);
       const calmStrategy = await calmBuyer.createStrategy(calmCompany, { ...STRATEGY_INPUT, timeframe, riskConfig: riskConfig(wide) }, { actorType: "user", actorId: "u1" });
-      await calmBuyer.setStatus(calmCompany, calmStrategy.id, "running");
+      await calmBuyer.setStatus(calmCompany, calmStrategy.id, "running", START_GATE_TEST_OVERRIDE);
       expect(await calmBuyer.tick(buyAt)).toMatchObject({ filled: 1, blocked: 0 });
       expect((await calmBuyer.requireStrategy(calmCompany, calmStrategy.id)).pauseReason).toBeNull();
 
@@ -804,7 +807,7 @@ d("tradingService", () => {
     expect(await buyer.tick(t3)).toMatchObject({ filled: 0, blocked: 1 });
     // The operator resume clears the halt.
     await buyer.setStatus(companyId, strategy.id, "paused");
-    const resumed = await buyer.setStatus(companyId, strategy.id, "running");
+    const resumed = await buyer.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     expect(resumed.pauseReason).toBeNull();
     await buyer.setStatus(companyId, strategy.id, "paused");
   });
@@ -814,7 +817,7 @@ d("tradingService", () => {
     const day1 = new Date("2026-01-01T12:00:00Z");
     const buyer = stubbed(day1, barsEndingAt([100, 100, 100, 100], new Date(day1.getTime() - 15 * 60_000)), 100);
     const strategy = await buyer.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await buyer.setStatus(companyId, strategy.id, "running");
+    await buyer.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await db.update(tradingStrategies).set({ ordersTodayDate: "2026-01-01", realizedPnlTodayDate: "2026-01-01", realizedPnlTodayNok: -5_000 }).where(eq(tradingStrategies.id, strategy.id));
     await buyer.tick(day1);
     expect((await buyer.requireStrategy(companyId, strategy.id)).pauseReason).toBe("daily_loss_limit");
@@ -834,7 +837,7 @@ d("tradingService", () => {
       marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
     });
     const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) }, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await trading.tick(now);
     const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
     expect((await db.select().from(approvals).where(eq(approvals.id, pending.approvalId!)))[0]!.status).toBe("pending");
@@ -863,7 +866,7 @@ d("tradingService", () => {
       marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
     });
     const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) }, { actorType: "user", actorId: "u1" });
-    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await trading.tick(now);
     const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
     await trading.setStatus(companyId, strategy.id, "paused");
@@ -882,7 +885,7 @@ d("tradingService", () => {
     const t1 = new Date("2026-01-01T23:15:00Z");
     const flat = stubbed(t1, barsEndingAt([100, 100, 100, 100], new Date(t1.getTime() - 15 * 60_000)), 100);
     const strategy = await flat.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
-    await flat.setStatus(companyId, strategy.id, "running");
+    await flat.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
     await db.update(tradingStrategies).set({ ordersTodayDate: "2026-01-01", realizedPnlTodayDate: "2026-01-01", realizedPnlTodayNok: -5_000 }).where(eq(tradingStrategies.id, strategy.id));
     await flat.tick(t1);
     expect((await flat.requireStrategy(companyId, strategy.id)).pauseReason).toBe("daily_loss_limit");
@@ -918,7 +921,7 @@ d("tradingService", () => {
         marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
       });
       const strategy = await trading.createStrategy(companyId, { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) }, { actorType: "user", actorId: "u1" });
-      await trading.setStatus(companyId, strategy.id, "running");
+      await trading.setStatus(companyId, strategy.id, "running", START_GATE_TEST_OVERRIDE);
       await trading.tick(now);
       const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
       expect(pending.status).toBe("pending_approval");

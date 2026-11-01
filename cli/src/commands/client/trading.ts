@@ -64,10 +64,11 @@ export function registerTradingCommands(program: Command): void {
       .argument("<strategyId>", "Trading strategy ID")
       .requiredOption("-C, --company-id <id>", "Company ID")
       .requiredOption("--status <status>", "running|paused")
-      .action(async (strategyId: string, opts: BaseClientOptions & { status: string }) => {
+      .option("--override-reason <text>", "Owner only: start a strategy whose rules have not passed the past-data test, with a written reason")
+      .action(async (strategyId: string, opts: BaseClientOptions & { status: string; overrideReason?: string }) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
-          const payload = setTradingStrategyStatusSchema.parse({ status: opts.status });
+          const payload = setTradingStrategyStatusSchema.parse({ status: opts.status, ...(opts.overrideReason ? { overrideReason: opts.overrideReason } : {}) });
           const updated = await ctx.api.post<TradingStrategySummary>(
             apiPath`/api/companies/${ctx.companyId}/trading/strategies/${strategyId}/status`,
             payload,
