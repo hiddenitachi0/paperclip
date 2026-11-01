@@ -101,6 +101,8 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // every tick; every error and source stop is recorded in
   // trading_candle_ingest_events.
   "heartbeat-scheduler:candleStore",
+  // DUR-5008: looks at the past-data test queue and starts a worker thread; routine per-tick mechanics.
+  "heartbeat-scheduler:tradingBacktest",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
