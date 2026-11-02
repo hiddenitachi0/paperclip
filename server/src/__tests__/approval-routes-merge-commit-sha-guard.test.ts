@@ -17,7 +17,7 @@
 
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockApprovalService = vi.hoisted(() => ({
@@ -161,6 +161,16 @@ const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const FORGED_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
+  // The first import of routes/approvals.js pulls in the route, service (incl. the trading
+  // template catalog) and db-schema graph and transforms it cold, which can exceed the 5 s
+  // default test timeout on CI. Pay that cost once here under the hook timeout; the per-test
+  // vi.resetModules() below keeps the transform cache, so each test then only re-evaluates
+  // already-transformed modules.
+  beforeAll(async () => {
+    registerModuleMocks();
+    await createAgentApp();
+  }, 60_000);
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../services/index.js");

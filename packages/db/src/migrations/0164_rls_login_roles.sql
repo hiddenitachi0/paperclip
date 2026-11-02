@@ -520,6 +520,12 @@ DECLARE
     'trading_strategy_versions',
     -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
     'trading_start_gate_overrides',
+    -- DUR-5014 strategy templates. Created (and granted on) in
+    -- 0271; instance-wide global tables with no company_id, so they are in the
+    -- login-role list ONLY.
+    'trading_eligibility_matrices',
+    'trading_template_reports',
+    'trading_template_trials',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
     -- is in this list only, not in the company-scoped one below.

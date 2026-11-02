@@ -29,6 +29,7 @@ import {
   type TradingRiskConfig,
   type TradingStrategySpec,
   type TradingStrategyStatus,
+  type TradingTemplate,
   type UpdateTradingStrategyInput,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -166,7 +167,13 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     return db.select().from(tradingStrategies).where(eq(tradingStrategies.companyId, companyId)).orderBy(asc(tradingStrategies.createdAt));
   }
 
-  async function createStrategy(companyId: string, input: CreateTradingStrategyInput, actor: { actorType: "user" | "agent"; actorId: string }): Promise<TradingStrategyRow> {
+  async function createStrategy(
+    companyId: string,
+    input: CreateTradingStrategyInput,
+    actor: { actorType: "user" | "agent"; actorId: string },
+    /** DUR-5014: create it from a library template: the template's rule book becomes version 1 and its key is remembered for the lineage. */
+    template?: TradingTemplate,
+  ): Promise<TradingStrategyRow> {
     const now = nowOf();
     // One symbol map, checked against the exchange's market list: a strategy
     // for a market that is not there could only ever fail its price check.
@@ -192,10 +199,16 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     // The owner/admin who creates it approves its first version by creating it:
     // the rules go in as version 1 and the strategy's cache columns are written
     // from that version in the same transaction.
-    const book = {
-      spec: legacySmaCrossoverSpec({ name: input.name, asset: input.asset, timeframe: input.timeframe, rule: input.ruleConfig, risk: input.riskConfig }),
-      guidelines: "",
-    };
+    const book = template
+      ? {
+          // The template's rules as written, for the one coin chosen and under the strategy's own name. Nothing else is changed.
+          spec: tradingStrategySpecSchema.parse({ ...template.spec, meta: { ...template.spec.meta, name: input.name }, universe: { ...template.spec.universe, assets: [input.asset] } }),
+          guidelines: template.guidelines,
+        }
+      : {
+          spec: legacySmaCrossoverSpec({ name: input.name, asset: input.asset, timeframe: input.timeframe, rule: input.ruleConfig, risk: input.riskConfig }),
+          guidelines: "",
+        };
     return versions.inTransaction(companyId, async (tx) => {
       const [created] = await tx
         .insert(tradingStrategies)
@@ -206,6 +219,8 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
           mode: "paper",
           status: "paused",
           timeframe: input.timeframe,
+          templateKey: template?.key ?? null,
+          templateVersion: template?.templateVersion ?? null,
           checkEveryMinutes: input.checkEveryMinutes,
           nextCheckAt: now,
           ruleConfig: input.ruleConfig,

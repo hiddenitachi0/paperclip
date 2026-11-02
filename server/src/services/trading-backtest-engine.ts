@@ -153,7 +153,7 @@ const MAX_LOGGED = 50;
 function longestPeriod(spec: TradingStrategySpec): number {
   let longest = 1;
   for (const def of Object.values(spec.indicators)) {
-    const period = "period" in def ? def.period : def.kind === "vwap" ? (def.anchor === "swing" ? def.lookback : 1) : def.lookback;
+    const period = "period" in def ? def.period : def.kind === "vwap" ? (def.anchor === "swing" ? def.lookback : 1) : def.kind === "session_range" ? def.sessionBars : def.lookback;
     if (period > longest) longest = period;
   }
   return longest;

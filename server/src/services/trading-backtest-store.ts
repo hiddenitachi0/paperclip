@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   tradingBacktestHoldoutReads,
@@ -7,6 +7,8 @@ import {
   tradingStartGateOverrides,
   tradingStrategies,
   tradingStrategyVersions,
+  tradingTemplateReports,
+  tradingTemplateTrials,
 } from "@paperclipai/db";
 import {
   TRADING_BACKTEST_COSTS,
@@ -198,7 +200,7 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
           versionId,
           purpose,
           specDigest: version.specDigest,
-          templateKey: input.templateKey ?? null,
+          templateKey: input.templateKey ?? strategy.templateKey ?? null,
           params: params as unknown as Record<string, unknown>,
           requestedByType: actor.type,
           requestedById: actor.id,
@@ -306,6 +308,24 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
       .where(and(eq(tradingBacktestRuns.id, runId), eq(tradingBacktestRuns.companyId, companyId), inArray(tradingBacktestRuns.status, ["queued", "running"])));
   }
 
+  /** The holdout reads and variants the template library itself made for a template (global tables, no company). */
+  async function templateLineage(templateKey: string) {
+    const reads = await db
+      .select({ id: tradingTemplateReports.id, holdoutStart: tradingTemplateReports.holdoutStart, holdoutEnd: tradingTemplateReports.holdoutEnd })
+      .from(tradingTemplateReports)
+      .where(and(eq(tradingTemplateReports.templateKey, templateKey), isNotNull(tradingTemplateReports.holdoutStart)));
+    const trials = await db.select({ variantDigest: tradingTemplateTrials.variantDigest, oosSharpe: tradingTemplateTrials.oosSharpe }).from(tradingTemplateTrials).where(eq(tradingTemplateTrials.templateKey, templateKey));
+    return {
+      reads: reads.filter((r) => r.holdoutStart && r.holdoutEnd).map((r): HoldoutRead => ({ runId: r.id, holdoutStart: r.holdoutStart!.toISOString(), holdoutEnd: r.holdoutEnd!.toISOString() })),
+      trials,
+    };
+  }
+
+  async function strategyTemplateKey(companyId: string, strategyId: string): Promise<string | null> {
+    const [row] = await db.select({ templateKey: tradingStrategies.templateKey }).from(tradingStrategies).where(and(eq(tradingStrategies.id, strategyId), eq(tradingStrategies.companyId, companyId)));
+    return row?.templateKey ?? null;
+  }
+
   async function loadContext(companyId: string, runId: string) {
     const [run] = await db.select().from(tradingBacktestRuns).where(and(eq(tradingBacktestRuns.id, runId), eq(tradingBacktestRuns.companyId, companyId)));
     if (!run) throw notFound("Past-data test not found.");
@@ -321,8 +341,15 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
       .select({ variantDigest: tradingBacktestTrials.variantDigest, oosSharpe: tradingBacktestTrials.oosSharpe })
       .from(tradingBacktestTrials)
       .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(run.strategyId, run.templateKey, tradingBacktestTrials)));
-    const priorReads: HoldoutRead[] = reads.filter((r) => r.runId !== run.id).map((r) => ({ runId: r.runId, holdoutStart: r.holdoutStart.toISOString(), holdoutEnd: r.holdoutEnd.toISOString() }));
-    return { run, spec: parsed.data, params: run.params as unknown as BacktestRunParams, priorReads, priorTrials: trials };
+    // DUR-5014: what the template itself read and tried counts toward every strategy created from it.
+    const fromTemplate = run.templateKey ? await templateLineage(run.templateKey) : { reads: [], trials: [] };
+    const priorReads: HoldoutRead[] = [
+      ...reads.filter((r) => r.runId !== run.id).map((r) => ({ runId: r.runId, holdoutStart: r.holdoutStart.toISOString(), holdoutEnd: r.holdoutEnd.toISOString() })),
+      ...fromTemplate.reads,
+    ];
+    const seen = new Set(trials.map((t) => t.variantDigest));
+    const priorTrials = [...trials, ...fromTemplate.trials.filter((t) => !seen.has(t.variantDigest))];
+    return { run, spec: parsed.data, params: run.params as unknown as BacktestRunParams, priorReads, priorTrials };
   }
 
   /**
@@ -380,21 +407,25 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
     });
   }
 
-  /** How many distinct variants were ever tried for the strategy (and its template). */
+  /** How many distinct variants were ever tried for the strategy (and its template: the strategy's own, and the library's). */
   async function trialCount(companyId: string, strategyId: string, templateKey: string | null = null): Promise<number> {
-    const [row] = await db
-      .select({ n: sql<number>`count(*)::int` })
+    const key = templateKey ?? (await strategyTemplateKey(companyId, strategyId));
+    const rows = await db
+      .select({ variantDigest: tradingBacktestTrials.variantDigest })
       .from(tradingBacktestTrials)
-      .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(strategyId, templateKey, tradingBacktestTrials)));
-    return row?.n ?? 0;
+      .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(strategyId, key, tradingBacktestTrials)));
+    const digests = new Set(rows.map((r) => r.variantDigest));
+    if (key) for (const t of (await templateLineage(key)).trials) digests.add(t.variantDigest);
+    return digests.size;
   }
 
   async function holdoutReadCount(companyId: string, strategyId: string, templateKey: string | null = null): Promise<number> {
+    const key = templateKey ?? (await strategyTemplateKey(companyId, strategyId));
     const [row] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(tradingBacktestHoldoutReads)
-      .where(and(eq(tradingBacktestHoldoutReads.companyId, companyId), lineageOf(strategyId, templateKey, tradingBacktestHoldoutReads)));
-    return row?.n ?? 0;
+      .where(and(eq(tradingBacktestHoldoutReads.companyId, companyId), lineageOf(strategyId, key, tradingBacktestHoldoutReads)));
+    return (row?.n ?? 0) + (key ? (await templateLineage(key)).reads.length : 0);
   }
 
   return {

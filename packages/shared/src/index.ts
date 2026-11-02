@@ -3093,6 +3093,7 @@ export {
 
 export * from "./trading-spec.js";
 export * from "./trading-backtest.js";
+export * from "./trading-templates.js";
 export * from "./trading-indicators.js";
 
 export {
