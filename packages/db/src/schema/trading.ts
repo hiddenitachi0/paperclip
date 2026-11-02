@@ -97,7 +97,7 @@ export const tradingStrategies = pgTable(
     // Stop / target / highest price of the open position, set when the position
     // is opened (and re-derived when a new version goes live). Null when flat.
     positionLevels: jsonb("position_levels"),
-    // DUR-5014 (migration 0270): the library template this strategy was created
+    // DUR-5014 (migration 0271): the library template this strategy was created
     // from, written once at creation. Holdout reads and variants tried by the
     // template count toward this strategy's lineage.
     templateKey: text("template_key"),

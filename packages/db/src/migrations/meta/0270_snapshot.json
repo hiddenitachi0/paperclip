@@ -1,5 +1,5 @@
 {
-  "id": "e8e38c6f-9d68-471d-aadc-87e1d6d2919c",
+  "id": "e4d00e84-a930-4d97-b1c5-615129aa91c3",
   "prevId": "ad646017-dce2-4648-b61c-04bbb09f82cf",
   "version": "7",
   "dialect": "postgresql",
@@ -13769,6 +13769,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "dedupe_key": {
+          "name": "dedupe_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -13807,6 +13813,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "trading_alerts_dedupe_uq": {
+          "name": "trading_alerts_dedupe_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "dedupe_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"trading_alerts\".\"dedupe_key\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -42907,6 +42935,111 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.trading_alert_settings": {
+      "name": "trading_alert_settings",
+      "schema": "",
+      "columns": {
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "weather_flips_on": {
+          "name": "weather_flips_on",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "big_moves_on": {
+          "name": "big_moves_on",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "breaker_trips_on": {
+          "name": "breaker_trips_on",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "paused_after_restart_on": {
+          "name": "paused_after_restart_on",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "daily_summary_on": {
+          "name": "daily_summary_on",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "big_move_atr_k": {
+          "name": "big_move_atr_k",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 3
+        },
+        "paused_after_restart_hours": {
+          "name": "paused_after_restart_hours",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 2
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "trading_alert_settings_company_id_companies_id_fk": {
+          "name": "trading_alert_settings_company_id_companies_id_fk",
+          "tableFrom": "trading_alert_settings",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "trading_alert_settings_big_move_check": {
+          "name": "trading_alert_settings_big_move_check",
+          "value": "\"trading_alert_settings\".\"big_move_atr_k\" >= 1 AND \"trading_alert_settings\".\"big_move_atr_k\" <= 10"
+        },
+        "trading_alert_settings_paused_hours_check": {
+          "name": "trading_alert_settings_paused_hours_check",
+          "value": "\"trading_alert_settings\".\"paused_after_restart_hours\" >= 1 AND \"trading_alert_settings\".\"paused_after_restart_hours\" <= 72"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.trading_backtest_holdout_reads": {
       "name": "trading_backtest_holdout_reads",
       "schema": "",
@@ -43928,59 +44061,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.trading_eligibility_matrices": {
-      "name": "trading_eligibility_matrices",
-      "schema": "",
-      "columns": {
-        "version": {
-          "name": "version",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "matrix": {
-          "name": "matrix",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "digest": {
-          "name": "digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "note": {
-          "name": "note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_eligibility_matrices_version_check": {
-          "name": "trading_eligibility_matrices_version_check",
-          "value": "\"trading_eligibility_matrices\".\"version\" >= 1"
-        },
-        "trading_eligibility_matrices_digest_check": {
-          "name": "trading_eligibility_matrices_digest_check",
-          "value": "\"trading_eligibility_matrices\".\"digest\" ~ '^[0-9a-f]{64}$'"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.trading_evaluator_state": {
@@ -45617,18 +45697,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "template_key": {
-          "name": "template_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "template_version": {
-          "name": "template_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "starting_cash_nok": {
           "name": "starting_cash_nok",
           "type": "integer",
@@ -46095,377 +46163,6 @@
         "trading_strategy_versions_approval_pair_check": {
           "name": "trading_strategy_versions_approval_pair_check",
           "value": "\"trading_strategy_versions\".\"status\" <> 'approved' OR (\"trading_strategy_versions\".\"approved_at\" IS NOT NULL AND (\"trading_strategy_versions\".\"approved_by_user_id\" IS NOT NULL OR \"trading_strategy_versions\".\"grandfathered\"))"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.trading_template_reports": {
-      "name": "trading_template_reports",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "template_key": {
-          "name": "template_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "template_version": {
-          "name": "template_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "spec_digest": {
-          "name": "spec_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "matrix_version": {
-          "name": "matrix_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'queued'"
-        },
-        "params": {
-          "name": "params",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "report": {
-          "name": "report",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "gate": {
-          "name": "gate",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "gate_passed": {
-          "name": "gate_passed",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "result_digest": {
-          "name": "result_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "variants_tried": {
-          "name": "variants_tried",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "holdout_start": {
-          "name": "holdout_start",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "holdout_end": {
-          "name": "holdout_end",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "holdout_seen_count": {
-          "name": "holdout_seen_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "requested_by_type": {
-          "name": "requested_by_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requested_by_id": {
-          "name": "requested_by_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "trading_template_reports_template_idx": {
-          "name": "trading_template_reports_template_idx",
-          "columns": [
-            {
-              "expression": "template_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "template_version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_template_reports_one_active_uq": {
-          "name": "trading_template_reports_one_active_uq",
-          "columns": [
-            {
-              "expression": "template_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "template_version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"trading_template_reports\".\"status\" IN ('queued', 'running')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_template_reports_holdout_idx": {
-          "name": "trading_template_reports_holdout_idx",
-          "columns": [
-            {
-              "expression": "template_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"trading_template_reports\".\"holdout_start\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "trading_template_reports_matrix_version_trading_eligibility_matrices_version_fk": {
-          "name": "trading_template_reports_matrix_version_trading_eligibility_matrices_version_fk",
-          "tableFrom": "trading_template_reports",
-          "tableTo": "trading_eligibility_matrices",
-          "columnsFrom": [
-            "matrix_version"
-          ],
-          "columnsTo": [
-            "version"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_template_reports_status_check": {
-          "name": "trading_template_reports_status_check",
-          "value": "\"trading_template_reports\".\"status\" IN ('queued', 'running', 'succeeded', 'failed', 'not_testable')"
-        },
-        "trading_template_reports_requester_check": {
-          "name": "trading_template_reports_requester_check",
-          "value": "\"trading_template_reports\".\"requested_by_type\" IN ('user', 'agent', 'system')"
-        },
-        "trading_template_reports_digest_check": {
-          "name": "trading_template_reports_digest_check",
-          "value": "\"trading_template_reports\".\"spec_digest\" ~ '^[0-9a-f]{64}$'"
-        },
-        "trading_template_reports_gate_passed_check": {
-          "name": "trading_template_reports_gate_passed_check",
-          "value": "\"trading_template_reports\".\"gate_passed\" IS NULL OR \"trading_template_reports\".\"status\" = 'succeeded'"
-        },
-        "trading_template_reports_holdout_check": {
-          "name": "trading_template_reports_holdout_check",
-          "value": "(\"trading_template_reports\".\"holdout_start\" IS NULL AND \"trading_template_reports\".\"holdout_end\" IS NULL AND \"trading_template_reports\".\"holdout_seen_count\" IS NULL) OR (\"trading_template_reports\".\"holdout_start\" IS NOT NULL AND \"trading_template_reports\".\"holdout_end\" IS NOT NULL AND \"trading_template_reports\".\"holdout_seen_count\" IS NOT NULL AND \"trading_template_reports\".\"holdout_end\" > \"trading_template_reports\".\"holdout_start\" AND \"trading_template_reports\".\"holdout_seen_count\" >= 0)"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.trading_template_trials": {
-      "name": "trading_template_trials",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "template_key": {
-          "name": "template_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "report_id": {
-          "name": "report_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "variant_digest": {
-          "name": "variant_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "variant_label": {
-          "name": "variant_label",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "oos_sharpe": {
-          "name": "oos_sharpe",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "oos_observations": {
-          "name": "oos_observations",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "trading_template_trials_variant_uq": {
-          "name": "trading_template_trials_variant_uq",
-          "columns": [
-            {
-              "expression": "template_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "variant_digest",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "trading_template_trials_report_idx": {
-          "name": "trading_template_trials_report_idx",
-          "columns": [
-            {
-              "expression": "report_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "trading_template_trials_report_id_trading_template_reports_id_fk": {
-          "name": "trading_template_trials_report_id_trading_template_reports_id_fk",
-          "tableFrom": "trading_template_trials",
-          "tableTo": "trading_template_reports",
-          "columnsFrom": [
-            "report_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "trading_template_trials_digest_check": {
-          "name": "trading_template_trials_digest_check",
-          "value": "\"trading_template_trials\".\"variant_digest\" ~ '^[0-9a-f]{64}$'"
         }
       },
       "isRLSEnabled": false

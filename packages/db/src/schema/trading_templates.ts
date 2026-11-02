@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { boolean, check, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 /**
- * DUR-5014 (migration 0270): the strategy template library's stored facts.
+ * DUR-5014 (migration 0271): the strategy template library's stored facts.
  *
  *   * trading_eligibility_matrices: the weather eligibility matrix, one
  *     immutable row per version (plan section 7: "written in advance and
@@ -23,7 +23,7 @@ import { boolean, check, doublePrecision, index, integer, jsonb, pgTable, text, 
  * Also adds trading_strategies.template_key / template_version: the template a
  * strategy was created from, written once at creation.
  *
- * Rollback: see 0270_trading_template_library.sql.
+ * Rollback: see 0271_trading_template_library.sql.
  */
 export const tradingEligibilityMatrices = pgTable(
   "trading_eligibility_matrices",

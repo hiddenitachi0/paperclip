@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { TRADING_ASSETS, askTraderSchema, createStrategyFromTemplateSchema, createTradingStrategySchema, findTradingTemplate, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { TRADING_ASSETS, askTraderSchema, createStrategyFromTemplateSchema, createTradingStrategySchema, findTradingTemplate, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingAlertSettingsSchema, updateTradingStrategySchema } from "@paperclipai/shared";
 import { badRequest, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
@@ -13,6 +13,7 @@ import { currentMarketWeather, marketWeatherHistory } from "../services/trading-
 import { tradingTraderService } from "../services/trading-trader.js";
 import { logActivity } from "../services/activity-log.js";
 import { tradingEvaluatorService } from "../services/trading-evaluator.js";
+import { tradingVigilanceService } from "../services/trading-vigilance.js";
 
 /**
  * DUR-4153/DUR-4171: the trading agent is board-only, both reading and
@@ -42,6 +43,7 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const trading = tradingService(db, { rawDb, ...deps });
   const trader = tradingTraderService(db, rawDb);
   const evaluator = tradingEvaluatorService(db, { marketData: deps.marketData });
+  const vigilance = tradingVigilanceService(db, { now: deps.now });
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -273,6 +275,27 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     const query = weatherHistoryQuery.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid market weather query.", query.error.flatten());
     res.json(await marketWeatherHistory(db, asset, new Date(), { from: query.data.from, to: query.data.to, spellLimit: query.data.spells }));
+  });
+
+  // DUR-5017: which vigilance alerts reach Telegram. Owner/admin only, for reading too:
+  // the alerts go to the owners and admins, and so does the say over them.
+  router.get("/companies/:companyId/trading/alert-settings", writeScope(), async (req, res) => {
+    res.json(await vigilance.getSettings(req.params.companyId as string));
+  });
+
+  router.patch("/companies/:companyId/trading/alert-settings", writeScope(), validate(updateTradingAlertSettingsSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const settings = await vigilance.updateSettings(companyId, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "trading.alert_settings_changed",
+      entityType: "company",
+      entityId: companyId,
+      details: { changed: Object.keys(req.body) },
+    });
+    res.json(settings);
   });
 
   // DUR-5010: the prediction scoreboard. Read-only; while a version is still collecting it shows

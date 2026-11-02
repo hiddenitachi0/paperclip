@@ -18,12 +18,18 @@ const OUTBOX_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** What the wallet service needs to queue an alert; swapped for a recorder in tests. */
 export interface TradingAlertSink {
-  write(input: { companyId: string; walletId: string | null; kind: TradingAlertKind; text: string }): Promise<void>;
+  write(input: { companyId: string; walletId: string | null; kind: TradingAlertKind; text: string; dedupeKey?: string }): Promise<boolean | void>;
 }
 
 export function tradingAlertsService(db: Db) {
-  async function write(input: { companyId: string; walletId: string | null; kind: TradingAlertKind; text: string }): Promise<void> {
-    await db.insert(tradingAlerts).values({ companyId: input.companyId, walletId: input.walletId, kind: input.kind, status: "ready", text: input.text });
+  /** Queue one alert. With a `dedupeKey` the same occurrence is queued at most once per company (DUR-5017); returns false when it already was. */
+  async function write(input: { companyId: string; walletId: string | null; kind: TradingAlertKind; text: string; dedupeKey?: string }): Promise<boolean> {
+    const inserted = await db
+      .insert(tradingAlerts)
+      .values({ companyId: input.companyId, walletId: input.walletId, kind: input.kind, status: "ready", text: input.text, dedupeKey: input.dedupeKey ?? null })
+      .onConflictDoNothing()
+      .returning({ id: tradingAlerts.id });
+    return inserted.length > 0;
   }
 
   async function outbox(companyId: string): Promise<TradingAlertOutboxItem[]> {

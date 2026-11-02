@@ -264,11 +264,16 @@ export const tradingAlerts = pgTable(
     status: text("status").notNull().default("ready"),
     text: text("text").notNull(),
     note: text("note"),
+    // DUR-5017 (migration 0270): names one occurrence of a vigilance event
+    // ("big_move:BTC:<bar open time>"), so a re-run of the same check cannot
+    // queue it twice. Null for the wallet alerts, which have no such key.
+    dedupeKey: text("dedupe_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   },
   (table) => ({
     companyStatusIdx: index("trading_alerts_company_status_idx").on(table.companyId, table.status, table.createdAt),
+    dedupeUq: uniqueIndex("trading_alerts_dedupe_uq").on(table.companyId, table.dedupeKey).where(sql`${table.dedupeKey} IS NOT NULL`),
     statusCheck: check("trading_alerts_status_check", sql`${table.status} IN ('ready', 'delivered', 'failed', 'expired')`),
   }),
 );

@@ -7,7 +7,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * DUR-5014, migration 0270_trading_template_library: the rehearsal. It runs on
+ * DUR-5014, migration 0271_trading_template_library: the rehearsal. It runs on
  * a database that already holds a strategy, proves the upgrade keeps it (and
  * leaves template_key NULL), that a second run changes nothing, that the
  * documented rollback removes only the new objects, and that the matrix is
@@ -16,9 +16,9 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
-if (!support.supported) console.warn(`Skipping migration 0270 test: ${support.reason ?? "unsupported environment"}`);
+if (!support.supported) console.warn(`Skipping migration 0271 test: ${support.reason ?? "unsupported environment"}`);
 
-const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0270_trading_template_library.sql", import.meta.url));
+const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0271_trading_template_library.sql", import.meta.url));
 const DIGEST = "b".repeat(64);
 const TABLES = ["trading_eligibility_matrices", "trading_template_reports", "trading_template_trials"];
 
@@ -38,7 +38,7 @@ function rollbackStatements(): string[] {
     .map((line) => line.replace(/^--\s+/, "").trim());
 }
 
-d("migration 0270_trading_template_library", () => {
+d("migration 0271_trading_template_library", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const companyId = randomUUID();
@@ -49,7 +49,7 @@ d("migration 0270_trading_template_library", () => {
   }
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0270-template-library-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0271-template-library-");
     db = createDb(tempDb.connectionString);
     await db.execute(sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Trading', 'TRD')`);
     await db.execute(sql`

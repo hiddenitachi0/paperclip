@@ -489,6 +489,8 @@ DECLARE
     -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
+    -- DUR-5017: created, granted on and policed in 0270_trading_alert_settings.sql; company-scoped, so in both lists.
+    'trading_alert_settings',
     -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',
@@ -519,7 +521,7 @@ DECLARE
     -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
     'trading_start_gate_overrides',
     -- DUR-5014 strategy templates. Created (and granted on) in
-    -- 0270; instance-wide global tables with no company_id, so they are in the
+    -- 0271; instance-wide global tables with no company_id, so they are in the
     -- login-role list ONLY.
     'trading_eligibility_matrices',
     'trading_template_reports',
@@ -891,6 +893,8 @@ DECLARE
     'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
+    -- DUR-5017: created, granted on and policed in 0270_trading_alert_settings.sql; company-scoped, so in both lists.
+    'trading_alert_settings',
     -- DUR-5026. Created, granted on and policed in 0263_trading_routine_wallets.sql;
     -- company-scoped, so it is in both lists.
     'trading_alerts',

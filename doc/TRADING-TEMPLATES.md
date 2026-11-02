@@ -3,7 +3,7 @@
 The template library of the trading rebuild (DUR-5014, plan DUR-4889 section 7).
 Crypto-adapted versions of the daytradelab styles, plus three controls. Code:
 `packages/shared/src/trading-templates.ts`. Stored facts: migration
-`0270_trading_template_library.sql`.
+`0271_trading_template_library.sql`.
 
 ## What a template is
 
@@ -104,6 +104,6 @@ route needs an instance admin whatever company id the path carries:
 
 ## Rollback
 
-See the header of `0270_trading_template_library.sql`: drop the three tables, the
+See the header of `0271_trading_template_library.sql`: drop the three tables, the
 two functions and the two `trading_strategies` columns. No strategy, order or
 ledger row is touched. Old code ignores the columns.

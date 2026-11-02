@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { approvals, companies, createDb, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
+import { activityLog, approvals, companies, createDb, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
 import { DEFAULT_TRADING_RISK_CONFIG, DEFAULT_TRADING_RULE_CONFIG } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { fakeTradingMarketData } from "../services/trading-market-data.js";
@@ -54,6 +54,7 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
   afterEach(async () => {
     await db.delete(tradingStrategies); // its versions go with it
     await db.delete(approvals);
+    await db.delete(activityLog); // the alert-settings route writes an audit row
     await db.delete(companies);
   });
 
@@ -143,6 +144,32 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     expect((await request(app).get(`/api/companies/${companyId}/trading/market-weather/NOPE`)).status).toBe(400);
     expect((await request(app).get(`/api/companies/${otherCompanyId}/trading/market-weather`)).status).toBe(403);
     expect((await request(app).post(`/api/companies/${companyId}/trading/market-weather`).send({})).status).toBe(404);
+  });
+
+  it("alert settings (DUR-5017): owners and admins read and change them, everyone else gets 403, and a bad value is refused before any write", async () => {
+    const companyId = await seedCompany();
+    const url = `/api/companies/${companyId}/trading/alert-settings`;
+    for (const role of ["operator", "viewer"] as const) {
+      const app = createApp(companyId, role);
+      expect((await request(app).get(url)).status).toBe(403);
+      expect((await request(app).patch(url).send({ dailySummary: false })).status).toBe(403);
+    }
+    const owner = createApp(companyId, "owner");
+    const read = await request(owner).get(url);
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({ weatherFlips: true, bigMoves: true, breakerTrips: true, pausedAfterRestart: true, dailySummary: true, bigMoveAtrK: 3, pausedAfterRestartHours: 2 });
+
+    const changed = await request(createApp(companyId, "admin")).patch(url).send({ bigMoves: false, bigMoveAtrK: 4 });
+    expect(changed.status).toBe(200);
+    expect(changed.body).toMatchObject({ bigMoves: false, bigMoveAtrK: 4, dailySummary: true });
+    expect((await request(owner).get(url)).body).toMatchObject({ bigMoves: false, bigMoveAtrK: 4 });
+
+    expect((await request(owner).patch(url).send({ bigMoveAtrK: 50 })).status).toBe(400);
+    expect((await request(owner).patch(url).send({ companyId: randomUUID() })).status).toBe(400);
+    expect((await request(owner).patch(url).send({})).status).toBe(400);
+
+    const otherCompanyId = await seedCompany();
+    expect((await request(owner).get(`/api/companies/${otherCompanyId}/trading/alert-settings`)).status).toBe(403);
   });
 
   it("refuses a non-owner/admin pulling the kill switch (status route) with 403", async () => {
