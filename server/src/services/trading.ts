@@ -38,6 +38,7 @@ import { fxRatesService, type FxRateQuote, type FxRatesService } from "./fx-rate
 import { ccxtTradingMarketData, isTradingMarketDataError, prepareClosedCandles, type TradingMarketDataSource } from "./trading-market-data.js";
 import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
+import { tradingVigilanceService, type TradingVigilanceService } from "./trading-vigilance.js";
 import { isVersionStartCleared, tradingBacktestStore } from "./trading-backtest-store.js";
 import { tradingVersionsService, tradingVersionLabel, type ProposeVersionResult, type TradingProposer, type TradingStrategyVersionRow } from "./trading-versions.js";
 
@@ -69,6 +70,8 @@ export interface TradingServiceDeps {
   fxRates?: FxRatesService;
   /** The raw (non request-scoped) db, for the transactions a version change needs. Defaults to the db passed in. */
   rawDb?: Db;
+  /** The vigilance alerts (DUR-5017). Default: writes to the trading-alerts outbox of the same db. */
+  vigilance?: TradingVigilanceService;
   /** Test seam only: runs between the start-gate check and the write in setStatus, so a test can change the active version in that gap. */
   afterStartGateCheck?: () => Promise<void>;
 }
@@ -141,6 +144,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
   const marketData = deps.marketData ?? ccxtTradingMarketData();
   const fxRates = deps.fxRates ?? fxRatesService(db);
   const ledger = tradingLedgerService(db);
+  const vigilance = deps.vigilance ?? tradingVigilanceService(db, { now: deps.now });
   const approvalsSvc = approvalService(db);
   const versions = tradingVersionsService(db, { rawDb: deps.rawDb, now: deps.now });
   const backtests = tradingBacktestStore(db, { now: deps.now });
@@ -550,15 +554,17 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       .where(eq(tradingStrategies.id, row.id));
     await ledger.writeLedgerEntry({ companyId: row.companyId, strategyId: row.id, eventType: "circuit_breaker", detail });
     logger.warn({ strategyId: row.id, companyId: row.companyId, reason, ...detail }, "trading: strategy halted");
+    // DUR-5017: the data breaker tells the owner. Never throws; a failed alert must not undo the halt.
+    await vigilance.strategyHalted(row, now);
   }
 
   /**
    * "Entries halted" (DUR-5000): a daily-loss, drawdown or price-jump trip. The
    * strategy stays `running` -- buys are blocked by the entry gate, exits keep
    * being evaluated -- and the reason is kept in pauseReason until an operator
-   * resumes it (a daily-loss halt also lifts itself on the next UTC day). Until
-   * the vigilance-alerts card exists the alert is a circuit_breaker ledger row
-   * plus a log line.
+   * resumes it (a daily-loss halt also lifts itself on the next UTC day). The
+   * trip is a circuit_breaker ledger row, a log line and (DUR-5017) a Telegram
+   * alert, queued once per trip.
    */
   async function haltEntries(row: TradingStrategyRow, cause: "daily_loss_limit" | "drawdown_limit" | "circuit_breaker", now: Date, detail: Record<string, unknown>) {
     await db
@@ -572,6 +578,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       detail: { alert: "entries_halted", cause, note: "New buys are stopped; exits for an open position keep being evaluated.", ...detail },
     });
     logger.warn({ strategyId: row.id, companyId: row.companyId, cause, ...detail }, "trading: entries halted");
+    await vigilance.entriesHalted(row, cause, now);
   }
 
   async function clearEntriesHalt(row: TradingStrategyRow, now: Date, detail: Record<string, unknown>) {
