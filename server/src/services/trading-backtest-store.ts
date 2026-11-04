@@ -4,6 +4,7 @@ import {
   tradingBacktestHoldoutReads,
   tradingBacktestRuns,
   tradingBacktestTrials,
+  tradingExperiments,
   tradingStartGateOverrides,
   tradingStrategies,
   tradingStrategyVersions,
@@ -326,6 +327,53 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
     return row?.templateKey ?? null;
   }
 
+  /** DUR-5018: the variants finished experiments tried for the lineage (a finished experiment is final, so its trials never change). */
+  async function experimentLineageTrials(companyId: string, strategyId: string, templateKey: string | null, excludeExperimentId?: string) {
+    const rows = await db
+      .select({ id: tradingExperiments.id, trials: tradingExperiments.trials })
+      .from(tradingExperiments)
+      .where(and(eq(tradingExperiments.companyId, companyId), eq(tradingExperiments.status, "succeeded"), lineageOf(strategyId, templateKey, tradingExperiments)));
+    const out: Array<{ variantDigest: string; oosSharpe: number | null }> = [];
+    for (const row of rows) {
+      if (row.id === excludeExperimentId) continue;
+      for (const t of row.trials ?? []) {
+        if (typeof t.digest === "string") out.push({ variantDigest: t.digest, oosSharpe: typeof t.oosSharpe === "number" ? t.oosSharpe : null });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Everything already read or tried for a lineage (the strategy, and the
+   * template it came from): the holdout reads and the trial registry. A run or
+   * an experiment is judged with these counted, so neither can make itself look
+   * better by forgetting what was tried before.
+   */
+  async function lineage(companyId: string, strategyId: string, templateKey: string | null, exclude: { runId?: string; experimentId?: string } = {}) {
+    const reads = await db
+      .select()
+      .from(tradingBacktestHoldoutReads)
+      .where(and(eq(tradingBacktestHoldoutReads.companyId, companyId), lineageOf(strategyId, templateKey, tradingBacktestHoldoutReads)));
+    const trials = await db
+      .select({ variantDigest: tradingBacktestTrials.variantDigest, oosSharpe: tradingBacktestTrials.oosSharpe })
+      .from(tradingBacktestTrials)
+      .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(strategyId, templateKey, tradingBacktestTrials)));
+    // DUR-5014: what the template itself read and tried counts toward every strategy created from it.
+    const fromTemplate = templateKey ? await templateLineage(templateKey) : { reads: [], trials: [] };
+    const priorReads: HoldoutRead[] = [
+      ...reads.filter((r) => r.runId !== exclude.runId).map((r) => ({ runId: r.runId, holdoutStart: r.holdoutStart.toISOString(), holdoutEnd: r.holdoutEnd.toISOString() })),
+      ...fromTemplate.reads,
+    ];
+    const seen = new Set(trials.map((t) => t.variantDigest));
+    const priorTrials = [...trials];
+    for (const t of [...fromTemplate.trials, ...(await experimentLineageTrials(companyId, strategyId, templateKey, exclude.experimentId))]) {
+      if (seen.has(t.variantDigest)) continue;
+      seen.add(t.variantDigest);
+      priorTrials.push(t);
+    }
+    return { priorReads, priorTrials };
+  }
+
   async function loadContext(companyId: string, runId: string) {
     const [run] = await db.select().from(tradingBacktestRuns).where(and(eq(tradingBacktestRuns.id, runId), eq(tradingBacktestRuns.companyId, companyId)));
     if (!run) throw notFound("Past-data test not found.");
@@ -333,22 +381,7 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
     if (!version) throw notFound("Strategy version not found.");
     const parsed = tradingStrategySpecSchema.safeParse(version.spec);
     if (!parsed.success) throw unprocessable("The stored rules of this version are not a valid rule book.");
-    const reads = await db
-      .select()
-      .from(tradingBacktestHoldoutReads)
-      .where(and(eq(tradingBacktestHoldoutReads.companyId, companyId), lineageOf(run.strategyId, run.templateKey, tradingBacktestHoldoutReads)));
-    const trials = await db
-      .select({ variantDigest: tradingBacktestTrials.variantDigest, oosSharpe: tradingBacktestTrials.oosSharpe })
-      .from(tradingBacktestTrials)
-      .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(run.strategyId, run.templateKey, tradingBacktestTrials)));
-    // DUR-5014: what the template itself read and tried counts toward every strategy created from it.
-    const fromTemplate = run.templateKey ? await templateLineage(run.templateKey) : { reads: [], trials: [] };
-    const priorReads: HoldoutRead[] = [
-      ...reads.filter((r) => r.runId !== run.id).map((r) => ({ runId: r.runId, holdoutStart: r.holdoutStart.toISOString(), holdoutEnd: r.holdoutEnd.toISOString() })),
-      ...fromTemplate.reads,
-    ];
-    const seen = new Set(trials.map((t) => t.variantDigest));
-    const priorTrials = [...trials, ...fromTemplate.trials.filter((t) => !seen.has(t.variantDigest))];
+    const { priorReads, priorTrials } = await lineage(companyId, run.strategyId, run.templateKey, { runId: run.id });
     return { run, spec: parsed.data, params: run.params as unknown as BacktestRunParams, priorReads, priorTrials };
   }
 
@@ -416,6 +449,7 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
       .where(and(eq(tradingBacktestTrials.companyId, companyId), lineageOf(strategyId, key, tradingBacktestTrials)));
     const digests = new Set(rows.map((r) => r.variantDigest));
     if (key) for (const t of (await templateLineage(key)).trials) digests.add(t.variantDigest);
+    for (const t of await experimentLineageTrials(companyId, strategyId, key)) digests.add(t.variantDigest);
     return digests.size;
   }
 
@@ -441,6 +475,8 @@ export function tradingBacktestStore(db: Db, deps: TradingBacktestStoreDeps = {}
     failInterrupted,
     failRun,
     loadContext,
+    lineage,
+    strategyTemplateKey,
     finishRun,
     trialCount,
     holdoutReadCount,

@@ -2,8 +2,10 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companyCryptoSettings, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
 import {
+  TRADING_TRADER_EXPERIMENTS_PER_STRATEGY_PER_DAY,
   TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY,
   describeTradingSpec,
+  queueTradingExperimentSchema,
   traderProposeChangeSchema,
   type AskTraderInput,
   type TradingStrategySpec,
@@ -11,6 +13,7 @@ import {
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { issueService } from "./issues.js";
 import { tradingLedgerService } from "./trading-ledger.js";
+import { tradingExperimentStore, experimentSummary, type TradingExperimentRow } from "./trading-experiment-store.js";
 import { tradingVersionsService, type ProposeVersionResult } from "./trading-versions.js";
 
 /**
@@ -34,9 +37,25 @@ const RECENT_LEDGER_ROWS = 40;
 const RECENT_DAYS = 30;
 const RECENT_VERSIONS = 10;
 
+/** What the approval card shows of the experiment behind a proposal (never compared by the card check). */
+function experimentCardFacts(row: TradingExperimentRow) {
+  const s = experimentSummary(row);
+  return {
+    label: "The experiment this change was recommended by. A suggestion only; the rules above are what count.",
+    experimentId: s.id,
+    trialCount: s.trialCount,
+    registryTrialCount: s.registryTrialCount,
+    deflatedSharpe: s.deflatedSharpe,
+    plateau: s.plateau,
+    holdoutReadsLineage: s.holdoutReadsLineage,
+    resultDigest: s.resultDigest,
+  };
+}
+
 export function tradingTraderService(db: Db, rawDb: Db = db) {
   const versions = tradingVersionsService(db, { rawDb });
   const ledger = tradingLedgerService(db);
+  const experiments = tradingExperimentStore(db);
 
   /** The one place that decides who the Trader is. Same company, same agent, or a plain 403. */
   async function requireTrader(companyId: string, agentId: string): Promise<void> {
@@ -140,14 +159,17 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
         issues: parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.join("."), message: i.message })),
       });
     }
-    const { spec, guidelines, summary, reasons } = parsed.data;
+    const { spec, guidelines, summary, reasons, experimentId } = parsed.data;
     if (!UUID_RE.test(strategyId)) throw notFound("Trading strategy not found.");
+    // DUR-5018: no experiment, no proposal. Checked before anything is stored, so a refused proposal leaves no draft and no card.
+    await requireStrategy(companyId, strategyId); // a strategy of another company is "not found" before anything else is said
+    const experiment = await experiments.requireCitableExperiment(companyId, strategyId, experimentId, spec);
     return versions.proposeVersion(
       companyId,
       strategyId,
       { spec, guidelines },
       { type: "agent", id: agentId },
-      { note: { summary, reasons }, agentProposalsPerDay: TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY },
+      { note: { summary, reasons }, agentProposalsPerDay: TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY, experiment: experimentCardFacts(experiment) },
     );
   }
 
@@ -169,7 +191,7 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
     const title = `Trading question: ${input.question.replace(/\s+/g, " ").slice(0, 80)}`;
     const issue = await issueService(db).create(companyId, {
       title,
-      description: `${strategyLine}${input.question}\n\nYou can read a strategy with trading_get_strategy and propose a rule change with trading_propose_change. A change only takes effect after a person approves its card.`,
+      description: `${strategyLine}${input.question}\n\nYou can read a strategy with trading_get_strategy and propose a rule change with trading_propose_change. A proposal must cite a finished experiment (trading_run_experiment, then trading_get_experiment) that recommended exactly those rules. A change only takes effect after a person approves its card.`,
       status: "todo",
       priority: "medium",
       assigneeAgentId: settings.traderAgentId,
@@ -178,5 +200,27 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
     return { issueId: issue.id, identifier: issue.identifier ?? null };
   }
 
-  return { requireTrader, listStrategies, getStrategy, proposeChange, askTrader };
+  /** The Trader asks for an experiment; it runs later in a worker thread. The strategy is checked in the Trader's own company. */
+  async function requestExperiment(companyId: string, agentId: string, strategyId: string, body: unknown) {
+    const parsed = queueTradingExperimentSchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw unprocessable("This experiment request is not valid.", { issues: parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.join("."), message: i.message })) });
+    }
+    await requireStrategy(companyId, strategyId);
+    return experiments.queueExperiment(companyId, strategyId, parsed.data, { type: "agent", id: agentId }, { agentExperimentsPerDay: TRADING_TRADER_EXPERIMENTS_PER_STRATEGY_PER_DAY });
+  }
+
+  async function listExperiments(companyId: string, strategyId: string) {
+    await requireStrategy(companyId, strategyId);
+    return experiments.listExperiments(companyId, strategyId, 20);
+  }
+
+  /** One experiment in full, including the exact rules it recommended (what a proposal must contain). */
+  async function getExperiment(companyId: string, strategyId: string, experimentId: string) {
+    await requireStrategy(companyId, strategyId);
+    const row = await experiments.getExperiment(companyId, strategyId, experimentId);
+    return { ...experimentSummary(row), params: row.params, report: row.report, recommendation: row.recommendation, recommendedSpec: row.recommendedSpec };
+  }
+
+  return { requireTrader, listStrategies, getStrategy, proposeChange, requestExperiment, listExperiments, getExperiment, askTrader };
 }

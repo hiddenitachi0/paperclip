@@ -219,3 +219,129 @@ describe("template reports share the supervisor (DUR-5014)", () => {
     expect(s.queue.templateReports!.failInterrupted).toHaveBeenCalledTimes(1);
   });
 });
+
+// ─── DUR-5018: experiments share the chain, but never the trading tick ──────
+
+describe("experiments on the past-data chain (DUR-5018)", () => {
+  type ExpResult = import("../services/trading-experiment-worker.js").ExperimentWorkerMessage & { type: "result" };
+  const EXP_OK: ExpResult = { type: "result", ok: true, decision: "no_change", message: "No change: x." };
+
+  function setupExperiments(opts: { runs?: Array<{ id: string; companyId: string }>; experiments?: Array<{ id: string; companyId: string }>; worker?: (id: string) => Promise<ExpResult>; backtestWorker?: () => Promise<Result> } = {}) {
+    const runs = [...(opts.runs ?? [])];
+    const experiments = [...(opts.experiments ?? [{ id: "e1", companyId: "c1" }])];
+    const failed: Array<{ id: string; message: string }> = [];
+    const order: string[] = [];
+    const queue: BacktestQueue = {
+      claimNextRun: vi.fn(async () => runs.shift() ?? null),
+      failInterrupted: vi.fn(async () => 0),
+      failRun: vi.fn(),
+      experiments: {
+        claimNextExperiment: vi.fn(async () => experiments.shift() ?? null),
+        failInterrupted: vi.fn(async () => 1),
+        failExperiment: vi.fn(async (_c: string, id: string, message: string) => {
+          failed.push({ id, message });
+        }),
+      },
+      templateReports: { claimNextReport: vi.fn(async () => null), failInterrupted: vi.fn(async () => 0), failReport: vi.fn() },
+    };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    let now = new Date("2026-11-04T12:00:00Z");
+    const seen: Array<{ experimentId: string; maxWallMs: number; limit: number }> = [];
+    const runner = tradingBacktestRunner({
+      databaseUrl: "postgres://not-used",
+      queue,
+      logger,
+      pollEveryMs: 15_000,
+      now: () => now,
+      runWorker: async (job) => {
+        order.push(job.runId);
+        return opts.backtestWorker ? opts.backtestWorker() : OK;
+      },
+      runExperimentWorker: async (job, limit) => {
+        order.push(job.experimentId);
+        seen.push({ experimentId: job.experimentId, maxWallMs: job.maxWallMs, limit });
+        return opts.worker ? opts.worker(job.experimentId) : EXP_OK;
+      },
+    });
+    return { runner, queue, logger, failed, order, seen, experiments, now: () => now, advance: (ms: number) => (now = new Date(now.getTime() + ms)) };
+  }
+
+  it("returns at once and runs the experiment in the background, never awaiting it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const s = setupExperiments({ worker: async () => (await gate, EXP_OK) });
+    const before = performance.now();
+    expect(s.runner.tick(s.now())).toEqual({ started: true });
+    expect(performance.now() - before).toBeLessThan(25);
+    await settle();
+    expect(s.runner.status()).toMatchObject({ running: true, currentRunId: "e1" });
+    expect(s.runner.tick(s.now())).toEqual({ started: false }); // one heavy job at a time
+    release();
+    await settle();
+    expect(s.runner.status()).toMatchObject({ running: false, currentRunId: null, lastMessage: "No change: x." });
+  });
+
+  it("gives its own, longer time limit to the worker", async () => {
+    const s = setupExperiments();
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.seen).toEqual([{ experimentId: "e1", maxWallMs: 30 * 60_000, limit: 31 * 60_000 }]);
+  });
+
+  it("a company's past-data test goes before an experiment", async () => {
+    const s = setupExperiments({ runs: [{ id: "r1", companyId: "c1" }] });
+    s.runner.tick(s.now());
+    await settle();
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.order).toEqual(["r1", "e1"]);
+  });
+
+  it("marks an experiment that crashed or ran out of time failed, says experiment, and carries on", async () => {
+    const s = setupExperiments({
+      experiments: [{ id: "e1", companyId: "c1" }, { id: "e2", companyId: "c1" }],
+      worker: async (id) => {
+        if (id === "e1") throw new Error("The past-data test ran past its time limit and was stopped.");
+        return EXP_OK;
+      },
+    });
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.failed).toEqual([{ id: "e1", message: "The experiment ran past its time limit and was stopped." }]);
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.order).toEqual(["e1", "e2"]);
+  });
+
+  it("on the first look it marks experiments a restart interrupted as failed", async () => {
+    const s = setupExperiments({ experiments: [] });
+    s.runner.tick(s.now());
+    await settle();
+    expect(s.queue.experiments!.failInterrupted).toHaveBeenCalledTimes(1);
+    expect(s.logger.warn).toHaveBeenCalledWith({ experiments: 1 }, expect.stringContaining("experiments interrupted"));
+  });
+
+  it("keeps the main thread free while an experiment burns CPU in its worker thread: the live tick's timers keep their rhythm", async () => {
+    const burn = () =>
+      new Promise<ExpResult>((resolve, reject) => {
+        const worker = new Worker("const end = Date.now() + 1200; let x = 0; while (Date.now() < end) { x += Math.sqrt(x + 1); } require('node:worker_threads').parentPort.postMessage('done');", { eval: true });
+        worker.once("message", () => resolve(EXP_OK));
+        worker.once("error", reject);
+      });
+    const s = setupExperiments({ worker: async () => burn() });
+    const gaps: number[] = [];
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const t = performance.now();
+      gaps.push(t - last);
+      last = t;
+    }, 10);
+    const startedAt = performance.now();
+    s.runner.tick(s.now());
+    while (s.runner.status().running || performance.now() - startedAt < 100) await new Promise((resolve) => setTimeout(resolve, 20));
+    clearInterval(timer);
+    expect(performance.now() - startedAt).toBeGreaterThan(1000);
+    expect(gaps.length).toBeGreaterThan(50);
+    expect(Math.max(...gaps)).toBeLessThan(150);
+  });
+});

@@ -20,9 +20,9 @@ function tool(name: string) {
 describe("trading MCP tools", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("offers read tools and one proposal tool, and nothing that trades, switches a strategy or touches a wallet", () => {
+  it("offers read tools, experiment tools and one proposal tool, and nothing that trades, switches a strategy or touches a wallet", () => {
     const tools = createTradingToolDefinitions(new PaperclipApiClient(config));
-    expect(tools.map((t) => t.name)).toEqual(["trading_list_strategies", "trading_get_strategy", "trading_propose_change"]);
+    expect(tools.map((t) => t.name)).toEqual(["trading_list_strategies", "trading_get_strategy", "trading_run_experiment", "trading_list_experiments", "trading_get_experiment", "trading_propose_change"]);
     for (const t of tools) {
       expect(Object.keys(t.schema.shape).some((k) => /key|secret|wallet|order|status|mode|side|quantity/i.test(k))).toBe(false);
     }
@@ -40,11 +40,40 @@ describe("trading MCP tools", () => {
   it("posts a proposal to the proposals route with the strategy id in the path, not the body", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ outcome: "drafted" }), { status: 202, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
-    await tool("trading_propose_change").execute({ strategyId, spec: { a: 1 }, summary: "Tighten the stop", reasons: "Losses were deeper than planned" });
+    const experimentId = "6f1c9a52-0b5d-4c7e-9a41-2f4a3a1d7e10";
+    await tool("trading_propose_change").execute({ strategyId, experimentId, spec: { a: 1 }, summary: "Tighten the stop", reasons: "Losses were deeper than planned" });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toBe(`http://localhost:3100/api/agent-trading/strategies/${strategyId}/proposals`);
     expect((init as RequestInit).method).toBe("POST");
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ spec: { a: 1 }, summary: "Tighten the stop", reasons: "Losses were deeper than planned" });
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ experimentId, spec: { a: 1 }, summary: "Tighten the stop", reasons: "Losses were deeper than planned" });
+  });
+
+  it("will not even send a proposal that cites no experiment", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await tool("trading_propose_change").execute({ strategyId, spec: { a: 1 }, summary: "Tighten the stop", reasons: "Losses were deeper than planned" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).toMatch(/experimentId/);
+  });
+
+  it("queues an experiment with the grid in the body and the strategy in the path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "e1", status: "queued" }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const grid = [{ indicator: "slow", param: "period", values: [10, 20] }];
+    await tool("trading_run_experiment").execute({ strategyId, grid });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe(`http://localhost:3100/api/agent-trading/strategies/${strategyId}/experiments`);
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ grid });
+  });
+
+  it("reads one experiment from the agent-trading API", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "e1" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const experimentId = "6f1c9a52-0b5d-4c7e-9a41-2f4a3a1d7e10";
+    await tool("trading_get_experiment").execute({ strategyId, experimentId });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(`http://localhost:3100/api/agent-trading/strategies/${strategyId}/experiments/${experimentId}`);
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).method).toBe("GET");
   });
 
   it("returns the server's refusal as an error result", async () => {

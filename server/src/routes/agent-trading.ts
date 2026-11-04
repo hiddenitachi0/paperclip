@@ -16,7 +16,8 @@ import { tradingTraderService } from "../services/trading-trader.js";
  * not the tool list, is the gate.
  *
  * What the Trader can do: read a strategy (spec, guidelines, recent ledger,
- * scores) and propose a rule change, which becomes a draft version plus an
+ * scores), request and read experiments (DUR-5018), and propose a rule change
+ * that cites the experiment recommending it, which becomes a draft version plus an
  * approval card that only a person can answer. These routes never take a
  * strategy status, a mode, a wallet or an order, and nothing here activates a
  * version.
@@ -53,6 +54,34 @@ export function agentTradingRoutes(rawDb: Db) {
   router.get("/agent-trading/strategies/:strategyId", agentScope(), async (req, res) => {
     const { companyId } = await designated(req);
     res.json(await trader.getStrategy(companyId, req.params.strategyId as string));
+  });
+
+  // DUR-5018: experiments. The Trader asks for one, then reads the result; it can never apply one.
+  router.get("/agent-trading/strategies/:strategyId/experiments", agentScope(), async (req, res) => {
+    const { companyId } = await designated(req);
+    res.json(await trader.listExperiments(companyId, req.params.strategyId as string));
+  });
+
+  router.get("/agent-trading/strategies/:strategyId/experiments/:experimentId", agentScope(), async (req, res) => {
+    const { companyId } = await designated(req);
+    res.json(await trader.getExperiment(companyId, req.params.strategyId as string, req.params.experimentId as string));
+  });
+
+  router.post("/agent-trading/strategies/:strategyId/experiments", agentScope(), async (req, res) => {
+    const { agentId, companyId } = await designated(req);
+    const strategyId = req.params.strategyId as string;
+    const row = await trader.requestExperiment(companyId, agentId, strategyId, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "trading.trader_requested_experiment",
+      entityType: "agent",
+      entityId: agentId,
+      details: { strategyId, experimentId: row.id, versionId: row.versionId, grid: (row.params as { grid?: unknown }).grid ?? null },
+    });
+    res.status(202).json({ id: row.id, status: row.status, versionId: row.versionId, message: "The experiment is queued. It runs in the background; read it again later. Its result is a suggestion only." });
   });
 
   router.post("/agent-trading/strategies/:strategyId/proposals", agentScope(), async (req, res) => {
