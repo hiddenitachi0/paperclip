@@ -1,7 +1,5 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { resolveWorkerLaunch, workerLaunchOptions } from "./worker-launch.js";
 import type { ContractTextStatus } from "@paperclipai/shared";
 import type { ExtractionJob, ExtractionReply } from "./contract-extraction-worker.js";
 import type { ContractFileKind } from "./contract-file-guard.js";
@@ -51,15 +49,6 @@ export function normalizeExtractedText(raw: string): string {
     .trim();
 }
 
-function resolveWorker(): { url: URL; execArgv: string[] } {
-  const compiled = new URL("./contract-extraction-worker.js", import.meta.url);
-  if (existsSync(compiled)) return { url: compiled, execArgv: [] };
-  // Source run (tsx / vitest): load the .ts worker through tsx. Resolve tsx from
-  // this file, not the process cwd: tests run from the repo root, where it is not installed.
-  const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  return { url: new URL("./contract-extraction-worker.ts", import.meta.url), execArgv: ["--import", tsx] };
-}
-
 let active = 0;
 const waiting: Array<() => void> = [];
 
@@ -78,11 +67,12 @@ function releaseSlot() {
 }
 
 function runWorker(job: ExtractionJob, options: ExtractionOptions): Promise<ExtractionReply | { timedOut: true } | { oom: true }> {
-  const { url, execArgv } = resolveWorker();
+  const launch = resolveWorkerLaunch("contract-extraction-worker", import.meta.url);
+  const { url } = launch;
   return new Promise((resolve) => {
     const worker = new Worker(url, {
       workerData: job,
-      execArgv,
+      ...workerLaunchOptions(launch),
       resourceLimits: { maxOldGenerationSizeMb: options.maxHeapMb ?? DEFAULT_MAX_HEAP_MB },
       stdout: true,
       stderr: true,
