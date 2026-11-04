@@ -2,12 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
-import { TRADING_ASSETS, askTraderSchema, createStrategyFromTemplateSchema, createTradingStrategySchema, findTradingTemplate, queueTradingBacktestSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingAlertSettingsSchema, updateTradingStrategySchema } from "@paperclipai/shared";
+import { TRADING_ASSETS, askTraderSchema, createStrategyFromTemplateSchema, createTradingStrategySchema, findTradingTemplate, queueTradingBacktestSchema, queueTradingExperimentSchema, setTradingStrategyStatusSchema, tradingRuleBookSchema, updateTradingAlertSettingsSchema, updateTradingStrategySchema } from "@paperclipai/shared";
 import { badRequest, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin, assertInstanceAdmin } from "./authz.js";
 import { tradingTemplateStore } from "../services/trading-template-store.js";
+import { experimentSummary } from "../services/trading-experiment-store.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 import { currentMarketWeather, marketWeatherHistory } from "../services/trading-regimes.js";
 import { tradingTraderService } from "../services/trading-trader.js";
@@ -242,6 +243,35 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
 
   router.post("/companies/:companyId/trading/strategies/:strategyId/backtests/:runId/cancel", writeScope(), async (req, res) => {
     res.json(await trading.backtests.cancelQueued(req.params.companyId as string, req.params.strategyId as string, req.params.runId as string));
+  });
+
+  // ─── Experiments (DUR-5018) ──────────────────────────────────────────
+  // A suggestion engine, never an editor: nothing here changes a strategy. The result
+  // is a recommended variant or "no change"; a rule change still needs a proposal that
+  // cites the experiment and an approval card a person answers.
+
+  router.get("/companies/:companyId/trading/strategies/:strategyId/experiments", readScope(), async (req, res) => {
+    res.json(await trading.experiments.listExperiments(req.params.companyId as string, req.params.strategyId as string));
+  });
+
+  router.get("/companies/:companyId/trading/strategies/:strategyId/experiments/:experimentId", readScope(), async (req, res) => {
+    const row = await trading.experiments.getExperiment(req.params.companyId as string, req.params.strategyId as string, req.params.experimentId as string);
+    res.json({ ...experimentSummary(row), params: row.params, report: row.report, recommendation: row.recommendation, recommendedSpec: row.recommendedSpec });
+  });
+
+  /** Queue an experiment. It runs later, in a worker thread, one heavy job at a time; this only files the request. */
+  router.post(
+    "/companies/:companyId/trading/strategies/:strategyId/experiments",
+    writeScope(),
+    validate(queueTradingExperimentSchema),
+    async (req, res) => {
+      const row = await trading.experiments.queueExperiment(req.params.companyId as string, req.params.strategyId as string, req.body, { type: "user", id: req.actor.userId ?? "board" });
+      res.status(202).json({ id: row.id, status: row.status, versionId: row.versionId });
+    },
+  );
+
+  router.post("/companies/:companyId/trading/strategies/:strategyId/experiments/:experimentId/cancel", writeScope(), async (req, res) => {
+    res.json(experimentSummary(await trading.experiments.cancelQueued(req.params.companyId as string, req.params.strategyId as string, req.params.experimentId as string)));
   });
 
   router.get("/companies/:companyId/trading/strategies/:strategyId/dashboard", readScope(), async (req, res) => {

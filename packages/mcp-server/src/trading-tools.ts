@@ -52,10 +52,37 @@ export function createTradingToolDefinitions(client: PaperclipApiClient): ToolDe
       ({ strategyId }) => client.requestJson("GET", `/agent-trading/strategies/${enc(strategyId)}`),
     ),
     makeTool(
-      "trading_propose_change",
-      "Propose new rules for a strategy. Send the WHOLE new spec (start from the live spec returned by trading_get_strategy and edit it), the guidelines, a plain summary and your reasons. The server checks it; risk limits may only be tightened, never loosened. A valid proposal is saved as a draft and an approval card is filed for a person: nothing changes until they approve it. It does not place or change any order. Until past-data tests exist, every proposal is shown as 'not yet tested on past data'. At most 5 per strategy per day.",
+      "trading_run_experiment",
+      "Ask for an experiment on a strategy: a small, capped grid of indicator settings (period / lookback / stdDev) on the live rules, tested on past data, walk-forward, at double fees. It runs in the background (check back with trading_get_experiment). The result is a recommended variant or 'no change' and is never applied. Leave `grid` out for the automatic neighbours (each indicator length nudged down and up by a quarter). At most 49 combinations; the rules as written always run too. A rule change can only be proposed by citing a finished experiment that recommended exactly those rules. Every variant counts in the trial count, so do not run grids you do not need.",
       z.object({
         strategyId: z.string().uuid(),
+        grid: z
+          .array(z.object({ indicator: z.string().describe("The indicator's name in the spec"), param: z.enum(["period", "lookback", "stdDev"]), values: z.array(z.number()).min(1).max(15) }))
+          .min(1)
+          .max(3)
+          .optional()
+          .describe("Up to 3 settings to vary together; the combinations are the cross product"),
+      }),
+      ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/experiments`, { body }),
+    ),
+    makeTool(
+      "trading_list_experiments",
+      "List the recent experiments for a strategy with their status, trial count, deflated Sharpe and decision. Read-only.",
+      z.object({ strategyId: z.string().uuid() }),
+      ({ strategyId }) => client.requestJson("GET", `/agent-trading/strategies/${enc(strategyId)}/experiments`),
+    ),
+    makeTool(
+      "trading_get_experiment",
+      "Read one experiment in full: the trial counts, deflated Sharpe, plateau check, holdout reads, every variant's numbers and, when it recommended one, the exact rules (`recommendedSpec`) a proposal must contain. Read-only.",
+      z.object({ strategyId: z.string().uuid(), experimentId: z.string().uuid() }),
+      ({ strategyId, experimentId }) => client.requestJson("GET", `/agent-trading/strategies/${enc(strategyId)}/experiments/${enc(experimentId)}`),
+    ),
+    makeTool(
+      "trading_propose_change",
+      "Propose new rules for a strategy. You must cite `experimentId`: a finished experiment of this strategy, run on its live rules, that recommended exactly these rules (send the `recommendedSpec` from trading_get_experiment unchanged); a proposal without one is refused. Send the WHOLE new spec, the guidelines, a plain summary and your reasons. The server checks it; risk limits may only be tightened, never loosened. A valid proposal is saved as a draft and an approval card is filed for a person: nothing changes until they approve it. It does not place or change any order. The card cites the experiment and still says 'not yet tested on past data' until the rules pass the start gate. At most 5 proposals and 6 experiments per strategy per day.",
+      z.object({
+        strategyId: z.string().uuid(),
+        experimentId: z.string().uuid().describe("The finished experiment that recommended exactly this spec"),
         spec: z.record(z.string(), z.unknown()).describe("The complete strategy spec, in the same shape trading_get_strategy returns it"),
         guidelines: z.string().max(8000).optional().describe("The plain-language guidelines for this version"),
         summary: z.string().min(3).max(500).describe("What changes, in one or two plain sentences. Shown on the card."),

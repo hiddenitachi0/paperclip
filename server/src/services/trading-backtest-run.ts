@@ -108,6 +108,21 @@ export interface BacktestInputs {
   joined?: JoinedInputs;
   /** Throws when the run's time is up. */
   checkpoint?: () => void;
+  /** DUR-5018: the experiment runner supplies its own grid. Variant 0 must be the rules as written. Default: the base's neighbours. */
+  variants?: BacktestVariant[];
+}
+
+/** DUR-5018: what each variant did out of sample (headline coins, 2x fees), for the experiment's recommendation. Not part of the report. */
+export interface VariantStat {
+  digest: string;
+  label: string;
+  trades: number;
+  expectancyR: number | null;
+  meanTradeReturn: number | null;
+  positive: boolean;
+  oosSharpe: number | null;
+  observations: number;
+  deflatedSharpeProbability: number | null;
 }
 
 export interface BacktestOutcome {
@@ -117,6 +132,11 @@ export interface BacktestOutcome {
   trials: TrialRecord[];
   holdoutRead: { start: string; end: string; seenCount: number } | null;
   variantsTried: number;
+  variantStats: VariantStat[];
+  /** Distinct variants in the lineage trial registry after this run (prior trials plus this run's). */
+  registrySize: number;
+  /** Holdout reads of the lineage before this run. */
+  priorHoldoutReads: number;
 }
 
 // ─── Variants ────────────────────────────────────────────────────────────────
@@ -284,7 +304,7 @@ export async function executeBacktest(input: BacktestInputs): Promise<BacktestOu
   const plan: HoldoutPlan = planHoldout({ dataEnd, priorReads: input.priorReads });
   const holdoutStart = new Date(plan.start);
   const readsHoldout = params.purpose === "gate";
-  const variants = buildVariants(spec, params.maxVariants);
+  const variants = input.variants ?? buildVariants(spec, params.maxVariants);
   const base = variants[0]!;
   const deciders = variants.map((v) => makeDecider(v.spec));
 
@@ -523,6 +543,26 @@ export async function executeBacktest(input: BacktestInputs): Promise<BacktestOu
     return { label: v.label, trades: m.trades, expectancyR: m.expectancyR, meanTradeReturn: m.meanTradeReturn, positive: positive(m) };
   });
 
+  const variantStats: VariantStat[] = variants.map((v, k) => {
+    const cells = streams[v.index]!.filter((cell) => sharpeCoins.has(cell.coin));
+    const p = pooled(cells, tfMs);
+    const sharpe = trials[k]!.oosSharpe;
+    return {
+      digest: v.digest,
+      label: v.label,
+      trades: p.metrics.trades,
+      expectancyR: p.metrics.expectancyR,
+      meanTradeReturn: p.metrics.meanTradeReturn,
+      positive: positive(p.metrics),
+      oosSharpe: sharpe,
+      observations: p.returns.length,
+      deflatedSharpeProbability:
+        sharpe === null
+          ? null
+          : deflatedSharpe({ observedSharpe: sharpe, observations: p.returns.length, skew: skewness(p.returns), kurt: kurtosis(p.returns), trials: Math.max(1, registry.size), trialSharpeVariance: trialVariance }).probability,
+    };
+  });
+
   // 9. The headline numbers and the gate.
   const headlineSelected = pooled(headlineCells, tfMs);
   let windowsPositive = 0;
@@ -600,5 +640,5 @@ export async function executeBacktest(input: BacktestInputs): Promise<BacktestOu
     thresholdsNote: "The gate's numbers are the plan's defaults and are assumptions; they are stored with each result.",
   });
   const resultDigest = createHash("sha256").update(canonicalTradingJson(report)).digest("hex");
-  return { report, gate, resultDigest, trials, holdoutRead, variantsTried: variants.length };
+  return { report, gate, resultDigest, trials, holdoutRead, variantsTried: variants.length, variantStats: clean(variantStats), registrySize: registry.size, priorHoldoutReads: input.priorReads.length };
 }

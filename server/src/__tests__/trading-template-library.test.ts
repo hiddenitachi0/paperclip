@@ -33,6 +33,9 @@ function outcome(passed: boolean, over: Partial<BacktestOutcome> = {}): Backtest
     trials: [{ variantDigest: randomUUID().replace(/-/g, "").padEnd(64, "0"), variantLabel: "your rules as written", oosSharpe: 0.01, oosObservations: 100 }],
     holdoutRead: { start: "2025-10-30T12:00:00.000Z", end: "2026-10-30T12:00:00.000Z", seenCount: 0 },
     variantsTried: 1,
+    variantStats: [],
+    registrySize: 1,
+    priorHoldoutReads: 0,
     ...over,
   };
 }
