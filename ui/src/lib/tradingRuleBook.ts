@@ -96,5 +96,5 @@ export function checkRuleBook(spec: TradingStrategySpec, guidelines: string): Ru
 }
 
 export function proposerWords(type: "user" | "agent" | "system"): string {
-  return type === "agent" ? "The Trading Analyst" : type === "system" ? "The system" : "A team member";
+  return type === "agent" ? "The Trader" : type === "system" ? "The system" : "A team member";
 }

@@ -17,6 +17,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { TradingDisclaimer } from "../components/TradingDisclaimer";
 import { TradingStrategyVersions } from "../components/TradingStrategyVersions";
+import { TradingStrategyChat } from "../components/TradingStrategyChat";
 import { TradingPastDataCard } from "../components/TradingPastDataCard";
 import { startGateRefusal } from "../lib/tradingBacktestWords";
 import { describeStrategyInWords } from "../lib/tradingSpecWords";
@@ -275,6 +276,10 @@ export function TradingStrategyDetail() {
             )}
           </div>
         </>
+      ) : null}
+
+      {selectedCompanyId && strategyId ? (
+        <TradingStrategyChat companyId={selectedCompanyId} strategyId={strategyId} canManage={canManage} versions={versions} />
       ) : null}
 
       <TradingStrategyVersions versions={versions} orders={ordersQuery.data ?? []} />
