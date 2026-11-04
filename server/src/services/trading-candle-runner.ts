@@ -1,7 +1,5 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { resolveWorkerLaunch, workerLaunchOptions, type WorkerLaunch } from "./worker-launch.js";
 import type { CandleCycleResult } from "./trading-candle-backfill.js";
 import type { CandleWorkerJob, CandleWorkerMessage } from "./trading-candle-worker.js";
 
@@ -62,28 +60,11 @@ const WORKER_HEAP_MB = 768;
 const CONTINUE_PAUSE_MS = 15_000;
 const STOPPED_SOURCE_RETRY_MS = 15 * 60_000;
 
-export interface CandleWorkerLaunch {
-  url: URL;
-  /** Left undefined for the compiled worker so the thread inherits the parent's flags. */
-  execArgv?: string[];
-}
+export type CandleWorkerLaunch = WorkerLaunch;
 
-/**
- * Where the worker thread starts, and with which Node flags.
- *
- * Compiled worker: `execArgv` is deliberately left out. An explicit array,
- * even an empty one, replaces Node's default of inheriting the parent's
- * flags, and the server is started with `--import tsx` (the workspace packages
- * are loaded from `.ts` source) and `--require node-module-guard.cjs` (the
- * trusted-code module guard, DUR-3994). Passing `[]` made the worker lose both
- * (DUR-5129): it could not resolve `./client.js` to `client.ts`, and it would
- * have run outside the module guard.
- */
-export function resolveCandleWorker(compiledExists: boolean = existsSync(new URL("./trading-candle-worker.js", import.meta.url))): CandleWorkerLaunch {
-  if (compiledExists) return { url: new URL("./trading-candle-worker.js", import.meta.url) };
-  // Source run (tsx / vitest): load the .ts worker through tsx.
-  const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  return { url: new URL("./trading-candle-worker.ts", import.meta.url), execArgv: ["--import", tsx] };
+/** Where the candle worker starts; see `resolveWorkerLaunch` for why `execArgv` is omitted when compiled (DUR-5129). */
+export function resolveCandleWorker(compiledExists?: boolean): CandleWorkerLaunch {
+  return resolveWorkerLaunch("trading-candle-worker", import.meta.url, compiledExists);
 }
 
 /** `launch` is for tests; production always resolves the real worker. */
@@ -93,9 +74,9 @@ export function spawnCandleWorker(
   limitMs: number,
   launch: CandleWorkerLaunch = resolveCandleWorker(),
 ): Promise<CandleCycleResult> {
-  const { url, execArgv } = launch;
+  const { url } = launch;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(url, { workerData: job, ...(execArgv ? { execArgv } : {}), resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+    const worker = new Worker(url, { workerData: job, ...workerLaunchOptions(launch), resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     let settled = false;
     const finish = (settle: () => void) => {
       if (settled) return;

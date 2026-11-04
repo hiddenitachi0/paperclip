@@ -1,7 +1,5 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { resolveWorkerLaunch, workerLaunchOptions, type WorkerLaunch } from "./worker-launch.js";
 import { TRADING_BACKTEST_LIMITS, TRADING_EXPERIMENT_LIMITS } from "@paperclipai/shared";
 import type { BacktestWorkerJob, BacktestWorkerMessage } from "./trading-backtest-worker.js";
 import type { ExperimentWorkerJob, ExperimentWorkerMessage } from "./trading-experiment-worker.js";
@@ -80,12 +78,8 @@ export interface BacktestRunnerStatus {
 const DEFAULT_POLL_EVERY_MS = 15_000;
 const WORKER_HEAP_MB = 1536;
 
-function resolveWorker(name = "trading-backtest-worker"): { url: URL; execArgv: string[] } {
-  const compiled = new URL(`./${name}.js`, import.meta.url);
-  if (existsSync(compiled)) return { url: compiled, execArgv: [] };
-  // Source run (tsx / vitest): load the .ts worker through tsx.
-  const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  return { url: new URL(`./${name}.ts`, import.meta.url), execArgv: ["--import", tsx] };
+function resolveWorker(name = "trading-backtest-worker"): WorkerLaunch {
+  return resolveWorkerLaunch(name, import.meta.url);
 }
 
 export function spawnBacktestWorker(job: BacktestWorkerJob, limitMs: number): Promise<BacktestWorkerMessage & { type: "result" }> {
@@ -102,10 +96,10 @@ export function spawnExperimentWorker(job: ExperimentWorkerJob, limitMs: number)
   return spawnWorker(resolveWorker("trading-experiment-worker"), job, limitMs);
 }
 
-function spawnWorker<M extends { type: string }>(target: { url: URL; execArgv: string[] }, job: unknown, limitMs: number): Promise<M & { type: "result" }> {
-  const { url, execArgv } = target;
+function spawnWorker<M extends { type: string }>(target: WorkerLaunch, job: unknown, limitMs: number): Promise<M & { type: "result" }> {
+  const { url } = target;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(url, { workerData: job, execArgv, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+    const worker = new Worker(url, { workerData: job, ...workerLaunchOptions(target), resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     let settled = false;
     const finish = (settle: () => void) => {
       if (settled) return;
