@@ -522,10 +522,17 @@ DECLARE
     'trading_start_gate_overrides',
     -- DUR-5018: created, granted on and policed in 0272_trading_experiments.sql; company-scoped, so in both lists.
     'trading_experiments',
+    -- DUR-5015: created, granted on and policed in 0273_trading_shadow_selector.sql; company-scoped, so in both lists.
+    'trading_shadow_cells',
+    'trading_shadow_trades',
+    'trading_selector_decisions',
+    'trading_selector_confirmations',
     -- DUR-5014 strategy templates. Created (and granted on) in
     -- 0271; instance-wide global tables with no company_id, so they are in the
     -- login-role list ONLY.
     'trading_eligibility_matrices',
+    -- DUR-5015: the selector rules table (0273), instance-wide, login-role list ONLY.
+    'trading_selector_rules',
     'trading_template_reports',
     'trading_template_trials',
     -- DUR-3994 Stage 2. Created (and granted on) in
@@ -918,6 +925,11 @@ DECLARE
     'trading_start_gate_overrides',
     -- DUR-5018: created, granted on and policed in 0272_trading_experiments.sql; company-scoped, so in both lists.
     'trading_experiments',
+    -- DUR-5015: created, granted on and policed in 0273_trading_shadow_selector.sql; company-scoped, so in both lists.
+    'trading_shadow_cells',
+    'trading_shadow_trades',
+    'trading_selector_decisions',
+    'trading_selector_confirmations',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.

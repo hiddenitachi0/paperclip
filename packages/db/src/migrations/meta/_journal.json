@@ -1905,6 +1905,13 @@
       "when": 1793815000000,
       "tag": "0272_trading_experiments",
       "breakpoints": true
+    },
+    {
+      "idx": 273,
+      "version": "7",
+      "when": 1793860567187,
+      "tag": "0273_trading_shadow_selector",
+      "breakpoints": true
     }
   ]
 }
