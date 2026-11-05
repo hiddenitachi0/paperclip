@@ -1912,6 +1912,13 @@
       "when": 1793860567187,
       "tag": "0273_trading_shadow_selector",
       "breakpoints": true
+    },
+    {
+      "idx": 274,
+      "version": "7",
+      "when": 1793864000000,
+      "tag": "0274_trading_selector_decisions_append_only",
+      "breakpoints": true
     }
   ]
 }

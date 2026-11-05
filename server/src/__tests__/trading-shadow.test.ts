@@ -208,4 +208,38 @@ d("tradingShadowService", () => {
     expect(result.opened).toBe(0);
     expect(await db.select().from(tradingShadowCells).where(eq(tradingShadowCells.companyId, companyId))).toHaveLength(0);
   });
+  it("keeps orphaned open trades out of the resolve window, and gives them up once they are old enough", async () => {
+    const { companyId } = await seedCompany();
+    await seedWeather("uptrend");
+    served = bars(CROSS_UP, signalBarsFirstOpen);
+    const now0 = new Date(signalClose.getTime() + 60_000);
+    await service(now0).tick(now0);
+    const [real] = await db.select().from(tradingShadowTrades).where(eq(tradingShadowTrades.companyId, companyId));
+    expect(real!.status).toBe("open");
+
+    // 2,005 open trades of template versions that no longer compete, all older than the real trade (so oldest-first fills the window) but young.
+    const [{ cellId }] = (await db.execute(sql`INSERT INTO trading_shadow_cells (company_id, template_key, template_version, family, weather, asset) VALUES (${companyId}, 'gone_template', 1, 'trend', 'up', 'ETH') RETURNING id AS "cellId"`)) as unknown as Array<{ cellId: string }>;
+    await db.execute(sql`
+      INSERT INTO trading_shadow_trades (company_id, cell_id, template_key, template_version, asset, timeframe, weather, signal_bar_close_at, weather_label)
+      SELECT ${companyId}, ${cellId}, 'gone_template', v, 'ETH', '4h', 'up', now() - interval '5 days' - v * interval '1 minute', '{}'::jsonb FROM generate_series(1, 2005) AS v`);
+    // And one old enough to be given up (more than 600 bars ago).
+    await db.execute(sql`
+      INSERT INTO trading_shadow_trades (company_id, cell_id, template_key, template_version, asset, timeframe, weather, signal_bar_close_at, weather_label)
+      VALUES (${companyId}, ${cellId}, 'gone_template', 9999, 'ETH', '4h', 'up', now() - interval '200 days', '{}'::jsonb)`);
+
+    served = bars([...CROSS_UP, ...AFTER], signalBarsFirstOpen);
+    const later = new Date(signalClose.getTime() + AFTER.length * TF_MS + 60_000);
+    const result = { companies: 0, cellsRegistered: 0, signals: 0, opened: 0, closed: 0, voided: 0 };
+    await service(later).resolveOpen(later, result);
+
+    expect(result.voided).toBeGreaterThanOrEqual(1);
+    const [after] = await db.select().from(tradingShadowTrades).where(eq(tradingShadowTrades.id, real!.id));
+    expect(after!.status).toBe("closed");
+    const old = await db.select().from(tradingShadowTrades).where(and(eq(tradingShadowTrades.companyId, companyId), eq(tradingShadowTrades.templateVersion, 9999)));
+    expect(old[0]).toMatchObject({ status: "void" });
+    expect(old[0]!.voidReason).toMatch(/no longer run/);
+    // The young orphans are left open (not voided) and nothing real was voided.
+    const openOrphans = await db.select().from(tradingShadowTrades).where(and(eq(tradingShadowTrades.companyId, companyId), eq(tradingShadowTrades.status, "open")));
+    expect(openOrphans).toHaveLength(2005);
+  }, 90_000);
 });
