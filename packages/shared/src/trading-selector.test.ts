@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { seededRandom } from "./trading-scoring.js";
+import { TRADING_ELIGIBILITY_MATRIX_V1, tradingTemplates } from "./trading-templates.js";
 import {
   TRADING_SELECTOR_RULES_V1,
   benjaminiHochberg,
@@ -7,6 +8,7 @@ import {
   estimateCell,
   latestSelectorCheckpoint,
   runSelector,
+  shadowEligibility,
   tradingWeatherKey,
   walkForwardSelector,
   type SelectorConfirmationState,
@@ -218,5 +220,43 @@ describe("a cell that passes only by luck fails at the confirmation window (synt
     expect(promotedAt).toBeDefined();
     expect(report.selectorR).toBeGreaterThan(0);
     expect(report.checkpoints.flatMap((c) => c.promoted).every((k) => k === "real|up|BTC")).toBe(true);
+  });
+});
+
+describe("shadowEligibility", () => {
+  const matrix = TRADING_ELIGIBILITY_MATRIX_V1;
+  const calm = { trend: "uptrend", volatility: "normal", squeeze: false } as const;
+  const named = (key: string) => tradingTemplates().find((t) => t.key === key)!;
+
+  it("controls and templates that need data we do not hold stay out of the tournament", () => {
+    const templates = tradingTemplates();
+    for (const t of templates.filter((x) => x.controlKind || x.spec.meta.family === "control")) expect(shadowEligibility(t, calm, matrix).eligible).toBe(false);
+    for (const t of templates.filter((x) => x.requiresData.length > 0 && !x.controlKind)) expect(shadowEligibility(t, calm, matrix).eligible).toBe(false);
+  });
+  it("every other template is eligible in at least one weather and never in a weather its matrix row forbids", () => {
+    const labels = [
+      { trend: "uptrend", volatility: "normal", squeeze: false },
+      { trend: "ranging", volatility: "normal", squeeze: false },
+      { trend: "downtrend", volatility: "normal", squeeze: false },
+      { trend: "ranging", volatility: "low", squeeze: true },
+      { trend: "uptrend", volatility: "high", squeeze: false },
+    ] as const;
+    const competing = tradingTemplates().filter((t) => !t.controlKind && t.requiresData.length === 0 && t.spec.meta.family !== "control");
+    expect(competing.length).toBeGreaterThan(3);
+    for (const t of competing) {
+      const results = labels.map((l) => shadowEligibility(t, l, matrix));
+      expect(results.some((r) => r.eligible), t.key).toBe(true);
+      for (const r of results) {
+        if (!r.eligible) continue;
+        const cell = matrix.rows[t.spec.meta.family]!.cells[r.weather];
+        expect(["no", "cash_only", "only_on_squeeze"]).not.toContain(cell);
+      }
+    }
+    void named;
+  });
+  it("spot is long-only: nothing competes in a down trend that its family row forbids", () => {
+    for (const t of tradingTemplates().filter((x) => x.spec.meta.family === "trend" && !x.controlKind)) {
+      expect(shadowEligibility(t, { trend: "downtrend", volatility: "normal", squeeze: false }, matrix).eligible).toBe(false);
+    }
   });
 });

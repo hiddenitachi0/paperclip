@@ -8,6 +8,7 @@ import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertCompanyOwnerOrInstanceAdmin, assertInstanceAdmin } from "./authz.js";
 import { tradingTemplateStore } from "../services/trading-template-store.js";
+import { tradingSelectorService } from "../services/trading-selector.js";
 import { experimentSummary } from "../services/trading-experiment-store.js";
 import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 import { currentMarketWeather, marketWeatherHistory } from "../services/trading-regimes.js";
@@ -305,6 +306,37 @@ export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
     const query = weatherHistoryQuery.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid market weather query.", query.error.flatten());
     res.json(await marketWeatherHistory(db, asset, new Date(), { from: query.data.from, to: query.data.to, spellLimit: query.data.spells }));
+  });
+
+  // DUR-5015: the shadow tournament and the monthly selector. Reading only: shadow
+  // runs and checkpoints are written by the scheduler chain's own connection, so no
+  // route here can place a trade, move a balance or promote a cell. Any active
+  // company member may read; the walk-forward replay costs real CPU, so it is
+  // owner/admin only.
+  const selector = tradingSelectorService(db);
+
+  router.get("/companies/:companyId/trading/shadow/cells", readScope(), async (req, res) => {
+    res.json({ items: await selector.shadowSummary(req.params.companyId as string) });
+  });
+
+  router.get("/companies/:companyId/trading/selector/decisions", readScope(), async (req, res) => {
+    res.json({ rules: { version: selector.rules.version }, items: await selector.listDecisions(req.params.companyId as string) });
+  });
+
+  router.get("/companies/:companyId/trading/selector/promoted", readScope(), async (req, res) => {
+    res.json({ items: await selector.promotedCells(req.params.companyId as string) });
+  });
+
+  router.get("/companies/:companyId/trading/selector/decisions/:decisionId", readScope(), async (req, res) => {
+    res.json(await selector.getDecision(req.params.companyId as string, req.params.decisionId as string));
+  });
+
+  router.get("/companies/:companyId/trading/selector/decisions/:decisionId/reproduce", readScope(), async (req, res) => {
+    res.json(await selector.reproduce(req.params.companyId as string, req.params.decisionId as string));
+  });
+
+  router.get("/companies/:companyId/trading/selector/walk-forward", writeScope(), async (req, res) => {
+    res.json(await selector.walkForward(req.params.companyId as string));
   });
 
   // DUR-5017: which vigilance alerts reach Telegram. Owner/admin only, for reading too:

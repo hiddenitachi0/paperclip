@@ -1,5 +1,6 @@
 import { normalCdf } from "./trading-backtest.js";
 import { fnv1a, seededRandom } from "./trading-scoring.js";
+import type { TradingEligibilityMatrix, TradingMatrixCellValue, TradingTemplate } from "./trading-templates.js";
 
 /**
  * DUR-5015: the shadow tournament's strategy selector, as pure functions.
@@ -86,6 +87,37 @@ export function tradingWeatherKey(label: { trend: "uptrend" | "downtrend" | "ran
   if (label.squeeze) return "squeeze";
   if (label.volatility === "high") return "high_volatility";
   return label.trend === "uptrend" ? "up" : label.trend === "downtrend" ? "down" : "range";
+}
+
+export type ShadowEligibility = { eligible: true; weather: TradingWeatherKey } | { eligible: false; weather: TradingWeatherKey | null; reason: string };
+
+const MATRIX_NO_RUN: readonly TradingMatrixCellValue[] = ["no", "cash_only", "only_on_squeeze"];
+
+/**
+ * Whether a template runs in shadow in the weather a coin has today. Controls
+ * are yardsticks and do not compete; a template that needs data we do not
+ * record yet (funding, open interest) cannot be tested fully and stays out; the
+ * matrix cell of the template family for today's weather key must allow trading
+ * (the key already folds a squeeze into the "squeeze" column, so a breakout
+ * template runs there and a trend template does not); and the template's own
+ * allowed weather must hold.
+ */
+export function shadowEligibility(
+  template: Pick<TradingTemplate, "spec" | "allowedWeather" | "requiresData" | "controlKind">,
+  label: { trend: "uptrend" | "downtrend" | "ranging"; volatility: "low" | "normal" | "high"; squeeze: boolean },
+  matrix: TradingEligibilityMatrix,
+): ShadowEligibility {
+  const weather = tradingWeatherKey(label);
+  const family = template.spec.meta.family;
+  if (template.controlKind || family === "control") return { eligible: false, weather, reason: "A control is a yardstick, not a competitor." };
+  if (template.requiresData.length > 0) return { eligible: false, weather, reason: `Needs ${template.requiresData.join(" and ")} data that is not recorded yet.` };
+  const cell = matrix.rows[family]?.cells[weather];
+  if (cell === undefined || MATRIX_NO_RUN.includes(cell)) return { eligible: false, weather, reason: `The eligibility matrix does not allow ${family} in ${weather} weather.` };
+  const trend = label.trend === "uptrend" ? "up" : label.trend === "downtrend" ? "down" : "range";
+  if (!template.allowedWeather.trend.includes(trend)) return { eligible: false, weather, reason: `The template does not trade in a ${trend} trend.` };
+  if (template.allowedWeather.squeeze === "yes" && !label.squeeze) return { eligible: false, weather, reason: "The template needs a squeeze." };
+  if (template.allowedWeather.squeeze === "no" && label.squeeze) return { eligible: false, weather, reason: "The template does not trade in a squeeze." };
+  return { eligible: true, weather };
 }
 
 export function tradingCellKey(cell: { templateKey: string; weather: string; asset: string }): string {
