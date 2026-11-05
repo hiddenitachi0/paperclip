@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { tradingShadowCells, tradingShadowTrades, tradingStrategies, type Db } from "@paperclipai/db";
 import {
   TRADING_ASSETS,
@@ -49,6 +49,9 @@ const SHADOW_START_CASH_USD = 3_000 / TRADING_ESTIMATED_USD_NOK_RATE;
 const DONE_MEMORY = 4096;
 /** Newest bars to look at when a trade's signal bar is not in them: after this many bars it is given up. */
 const GIVE_UP_AFTER_BARS = 600;
+/** How many open trades one tick looks at, and how many orphans one tick may give up. */
+const RESOLVE_WINDOW = 2000;
+const ORPHAN_BATCH = 500;
 
 export interface TradingShadowDeps {
   now?: () => Date;
@@ -191,14 +194,48 @@ export function tradingShadowService(db: Db, deps: TradingShadowDeps = {}) {
     }
   }
 
+  /**
+   * An open trade the resolver can never close: its template version is no longer
+   * competing, or its timeframe is not one the candle store holds. Such a row is
+   * kept out of the resolve window (it would otherwise sit at the front, oldest
+   * first, and starve the real rows) and is given up after the same grace a
+   * trade with no bars gets. Only these are expired by age: a real trade that is
+   * still being held is never voided for being old, which would bias the record.
+   */
+  function realTradeFilter(): SQL {
+    const known = competing().map((t) => and(eq(tradingShadowTrades.templateKey, t.key), eq(tradingShadowTrades.templateVersion, t.templateVersion)));
+    return and(or(...known) ?? sql`false`, inArray(tradingShadowTrades.timeframe, [...TRADING_CANDLE_TIMEFRAMES])) ?? sql`false`;
+  }
+
+  async function expireOrphans(now: Date, result: TradingShadowTickResult): Promise<void> {
+    const orphans = await db
+      .select()
+      .from(tradingShadowTrades)
+      .where(and(eq(tradingShadowTrades.status, "open"), isNull(tradingShadowTrades.resolvedAt), sql`NOT (${realTradeFilter()})`))
+      .orderBy(asc(tradingShadowTrades.signalBarCloseAt))
+      .limit(ORPHAN_BATCH);
+    for (const trade of orphans) {
+      try {
+        // A timeframe the service does not know has no bar length; the longest decision bar stands in for it.
+        const barMs = isCandleTimeframe(trade.timeframe) ? tradingTimeframeMs(trade.timeframe) : tradingTimeframeMs("1d");
+        if (now.getTime() - trade.signalBarCloseAt.getTime() <= GIVE_UP_AFTER_BARS * barMs) continue;
+        result.voided += await voidTrade(trade.id, "Nothing can resolve this trade any more: its template version or timeframe is no longer run.", now, now);
+      } catch (err) {
+        logger.error({ err, tradeId: trade.id }, "trading shadow: giving up an orphaned trade failed");
+      }
+    }
+  }
+
   /** Closes open trades whose exit has now happened on closed bars. */
   async function resolveOpen(now: Date, result: TradingShadowTickResult): Promise<void> {
+    await expireOrphans(now, result);
     const open = await db
       .select()
       .from(tradingShadowTrades)
-      .where(and(eq(tradingShadowTrades.status, "open"), isNull(tradingShadowTrades.resolvedAt)))
-      .orderBy(asc(tradingShadowTrades.signalBarCloseAt))
-      .limit(2000);
+      .where(and(eq(tradingShadowTrades.status, "open"), isNull(tradingShadowTrades.resolvedAt), realTradeFilter()))
+      // Never-checked rows first, then the longest-unchecked: a row that was just looked at and could not close yet goes to the back, so no group of stuck rows can fill the window.
+      .orderBy(sql`${tradingShadowTrades.lastCheckedBarAt} ASC NULLS FIRST`, asc(tradingShadowTrades.signalBarCloseAt))
+      .limit(RESOLVE_WINDOW);
     if (open.length === 0) return;
     const byStream = new Map<string, typeof open>();
     for (const trade of open) {

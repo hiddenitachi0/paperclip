@@ -19,6 +19,13 @@ const d = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skipping migration 0273 test: ${support.reason ?? "unsupported environment"}`);
 
 const MIGRATION_PATH = fileURLToPath(new URL("./migrations/0273_trading_shadow_selector.sql", import.meta.url));
+// 0274 (DUR-5171) hangs a guard on the decisions table; rolling 0273 back means rolling 0274 back first.
+const ROLLBACK_0274_PATH = fileURLToPath(new URL("./migrations/0274_trading_selector_decisions_append_only.sql", import.meta.url));
+const rollback0274Statements = (): string[] =>
+  readFileSync(ROLLBACK_0274_PATH, "utf8")
+    .split("\n")
+    .filter((line) => /^--\s{3}DROP/.test(line))
+    .map((line) => line.replace(/^--\s+/, "").trim());
 const DIGEST = "a".repeat(64);
 const TABLES = ["trading_selector_confirmations", "trading_selector_decisions", "trading_shadow_trades", "trading_shadow_cells", "trading_selector_rules"];
 
@@ -89,7 +96,7 @@ d("migration 0273_trading_shadow_selector", () => {
   });
 
   it("upgrades a database that already holds trading rows without touching them, and a second run changes nothing", async () => {
-    for (const statement of rollbackStatements()) await db.execute(sql.raw(statement));
+    for (const statement of [...rollback0274Statements(), ...rollbackStatements()]) await db.execute(sql.raw(statement));
     for (const table of TABLES) expect(await rows(sql`SELECT to_regclass(${table}) AS t`)).toEqual([{ t: null }]);
     const counts = () => rows(sql`SELECT (SELECT count(*) FROM trading_strategies)::int AS s, (SELECT count(*) FROM companies)::int AS c`);
     const before = await counts();
@@ -109,6 +116,7 @@ d("migration 0273_trading_shadow_selector", () => {
     const before = await rows(sql`SELECT (SELECT count(*) FROM trading_strategies)::int AS s, (SELECT count(*) FROM companies)::int AS c`);
     const statements = rollbackStatements();
     expect(statements).toHaveLength(10);
+    for (const statement of rollback0274Statements()) await db.execute(sql.raw(statement));
     for (const statement of statements) await db.execute(sql.raw(statement));
     for (const table of TABLES) expect(await rows(sql`SELECT to_regclass(${table}) AS t`)).toEqual([{ t: null }]);
     expect(await rows(sql`SELECT proname FROM pg_proc WHERE proname LIKE 'trading_shadow_%' OR proname LIKE 'trading_selector_%'`)).toEqual([]);
