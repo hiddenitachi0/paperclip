@@ -34,7 +34,7 @@ exists the status is `collecting`.
 - **Base rate:** share of "up" outcomes over the trailing 90 days, using only bars whose horizon had closed at decision time (kept in the row's `indicator_snapshot.baseRateUp`). The evaluator reads the last 720 closed bars, so on 1h bars the window is shorter than 90 days.
 - **Direction only for fixed rules.** Brier score, log loss and calibration exist only for forecasters with a real probability.
 - **R unit:** the stop distance, or 1 ATR(14) at the decision bar.
-- **Sample size and running time:** `prediction.targetSamples` (default 620) and `prediction.minRunningDays` (default 90) in the version's spec, so they are fixed with the approved version. Both must be reached; the verdict is computed once.
+- **Sample size and running time:** `prediction.targetSamples` (default 620) and `prediction.minRunningDays` (default 90) in the version's spec, so they are fixed with the approved version. Both must be reached; the verdict is computed once. The scoreboard response also carries `criteria`: the forward test judged against the written pass/fail list (Brier skill, trade results against the past-data test, drawdown), computed by `evaluateForwardCriteria` from `TRADING_PASS_FAIL_CRITERIA` (`packages/shared/src/trading-criteria.ts`, described in `docs/specs/trading-agent-pass-fail-criteria.md`). Its words are "Collecting", "Criteria met" and "Criteria not met".
 - **What a fixed rule "calls":** the rule is run on the newest closed bar as if flat (an entry is an "up" call) and as if long with only its rule exits armed (a rule exit is a "down" call). Stops, targets and trailing are trade management and are scored as trades. Both on one bar: no call.
 
 ## Restarts

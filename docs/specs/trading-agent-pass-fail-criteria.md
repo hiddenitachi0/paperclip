@@ -1,104 +1,101 @@
-# Trading agent (DUR-4153/DUR-4171): paper-trading pass/fail criteria
+# Trading agent: pass/fail criteria (DUR-5011)
 
-## Context
+Replaces the DUR-4227 version, which judged a strategy after "30 days or 20
+trades". That is dropped: 20 trades say almost nothing, and a verdict that can
+arrive early invites reading luck as skill.
 
-DUR-4153 (design) and DUR-4171 (implementation) both ask for a dashboard that
-shows paper-trading results "against pass/fail criteria written in advance."
-DUR-4153 was expected to hand this down from a design document, but it never
-produced one before delegating implementation directly to this task (see
-DUR-4153's comment thread). Per this feature's own ground rules ("when
-something is unclear, state your assumption, choose the safer option, and
-continue"), this document is that assumption: a concrete, written-in-advance
-definition of what "the strategy is working" means for a single paper
-strategy, using only fields the dashboard endpoint
-(`GET /companies/:companyId/trading/strategies/:strategyId/dashboard`,
-`TradingDashboardSummary` in `packages/shared/src/trading.ts`) already
-exposes. Filip (or whoever reviews this PR) should treat these thresholds as
-a starting point to confirm or adjust, not a final word -- flagged in
-"Questions for Filip" below.
+**Every number below is an assumption, awaiting Filip's approval on DUR-5011.**
+They come from his decisions on DUR-4890 (3: 620 predictions per version, no
+early verdicts; 5: 0.40% fee per side, past-data tests also at double fees).
+The numbers live in one place, `TRADING_PASS_FAIL_CRITERIA` in
+`packages/shared/src/trading-criteria.ts`. The past-data gate, the metrics
+service (the scoreboard endpoint) and the strategy page all read that
+constant; this document describes it and must change with it.
 
-No new endpoint or schema is introduced by this document. Evaluating a
-strategy against these criteria is a client-side (UI) read of the existing
-dashboard response; nothing here requires the server to compute a verdict.
+## Wording
 
-## Evaluation window
+A result is one of: **Collecting**, **Criteria met**, **Criteria not met**.
+An item that cannot be judged says "Could not be judged" and counts against.
+The words "promising" and "ready" are not used for a strategy's result, on
+screen or in messages. "Criteria met" is a statement about a written list, not
+a forecast, and not a decision to use real money. Real money stays locked
+server-wide; Filip decides about it later, and only after a strategy has proven
+itself positive after fees.
 
-A strategy is only evaluated once it has run long enough for its rule to
-have had a fair chance to signal. Minimum window: **30 days of wall-clock
-running time** (accumulated `running` time, not counting `paused` or
-`halted_risk` gaps) or **20 completed round-trip trades**, whichever comes
-first. Below that, the dashboard should show "still gathering data," not a
-pass/fail verdict -- a strategy with one lucky trade on day 2 is not "passing."
+## 1. Past-data gate (before a strategy may start on paper)
 
-## Pass criteria (all of the following must hold)
+All of these, run out of sample on the live price source, at double fees:
 
-1. **Beats buy-and-hold on a risk-adjusted basis, not just raw return.**
-   `totalPnlNok` (realized + unrealized) is compared against
-   `buyAndHoldValueNok - startingCashNok`. The strategy passes this check if
-   its total return is at least equal to buy-and-hold, OR if it trails
-   buy-and-hold by no more than 5 percentage points while its max drawdown
-   (see #2) is less than half of buy-and-hold's max drawdown over the same
-   window -- i.e. "it's fine to make a bit less than holding, if it did so
-   with meaningfully less pain." A strategy that merely matches buy-and-hold
-   while taking on equal or greater drawdown has not earned its complexity
-   and fails this check.
-2. **Max drawdown stays under the strategy's own configured ceiling.**
-   Never breaches `riskConfig.maxDrawdownPct` (and never gets anywhere near
-   `TRADING_HARD_CEILING.maxDrawdownPct`, the hard 20% ceiling in
-   `packages/shared/src/trading.ts`) — if it did, `halted_risk` would have
-   already fired and paused it, which itself counts as a fail for this
-   evaluation window regardless of PnL before the halt.
-3. **No unattended circuit-breaker halts.** `status === "halted_risk"` at
-   any point during the window (`pauseReason` of `circuit_breaker` or
-   `reconciliation_mismatch`) is an automatic fail for that window, even if
-   PnL looks good going in — the point of paper trading is proving the
-   *system* is trustworthy, not just the rule's math.
-4. **Fees don't eat the edge.** `feesPaidNok` stays under 15% of gross
-   realized profit (realized gains before fees). A rule that only "wins" by
-   trading so often the fees erase the edge has not found a real signal.
-5. **The approval gate never got silently bypassed.** Every order at or
-   above `riskConfig.approvalAboveNok` (or, if that started `null`, every
-   single order) has a matching `trading_ledger_entries` row showing the
-   approval was requested and resolved (approve/reject/expire) before any
-   `order_filled` ledger entry for that signal. This is a correctness check
-   on the safety mechanism itself, not a performance number, but it belongs
-   in "pass/fail" because a strategy that traded despite a missing approval
-   record must not be trusted regardless of its PnL.
+| # | Criterion | Assumed number |
+| - | --------- | -------------- |
+| 1 | Out-of-sample trades | at least 100 |
+| 2 | Expectancy at 2x fees (0.80% per side) | above 0 R per trade |
+| 3 | Windows that are positive (a window with no trades is not positive) | at least 60% |
+| 4 | Beats random entry with the same exposure | beats at least 95% of 300 random-entry runs |
+| 5 | A clean holdout read, or confirmation on paper | holdout read for the first time and positive at 2x fees; a repeated read cannot pass alone, forward paper data decides |
 
-## Fail criteria (any one of the following is an automatic fail, overriding #1)
+The gate also keeps the checks that guard against fooling ourselves (look-ahead,
+point-in-time inputs, neighbouring parameters, bull/bear/range coverage,
+drawdown within the strategy's own cap). Those are implemented in
+`evaluateBacktestGate` and are unchanged by this card. The numbers in 1 to 4
+now come from the shared constant.
 
-- Any `halted_risk` with `pauseReason: "circuit_breaker"` or
-  `"reconciliation_mismatch"` during the window (see #3 above).
-- `totalPnlNok` below `-1 * riskConfig.dailyLossLimitNok * 5` cumulative
-  (i.e. the strategy has, in total, lost more than five days' worth of its
-  own configured daily-loss limit) — a slow bleed a single day's circuit
-  breaker wouldn't catch.
-- Any order filled without price falling inside `riskConfig.priceBandPct` of
-  the signal price that produced it (a stale/bad quote getting traded on
-  anyway) — checked against `trading_orders.signalPriceNok` vs
-  `filledPriceNok`.
+## 2. Forward paper test
 
-## Dashboard presentation (for the Frontend Engineer's follow-up UI work)
+The verdict is computed **once**, when both of these are met. Until then the
+page shows "Collecting: x of N" and nothing else; no hit rate, no interval, no
+early read.
 
-Given the above, the dashboard's verdict badge should be one of:
-- **Gathering data** — window not yet met.
-- **Passing** — all pass criteria hold, no fail criteria hit.
-- **Failing** — any fail criterion hit, or a pass criterion does not hold.
+| # | Criterion | Assumed number |
+| - | --------- | -------------- |
+| 1 | Independent observations, fixed per version in advance (decision 3) | about 620 |
+| 2 | Running time, paused and halted time excluded | at least 3 months (90 days) |
 
-The existing `TradingDashboardSummary` fields (`totalPnlNok`,
-`buyAndHoldValueNok`, `feesPaidNok`, `status`, `pauseReason`) are sufficient
-to compute all of the above in the UI layer except #2 (max drawdown over the
-window) and #5 (approval-gate audit), which need the ledger
-(`GET .../ledger`) and orders (`GET .../orders`) endpoints already exposed
-by this PR. No new backend surface is needed for this document's criteria.
+Then every item must hold:
 
-## Questions for Filip
+| # | Criterion | Assumed number |
+| - | --------- | -------------- |
+| 3 | Brier skill, for forecasters with real probabilities only | above 0 (a fixed rule gives a direction, not a probability: "does not apply") |
+| 4 | Trade results no worse than the past-data test | forward expectancy above 0 R and not below the past-data out-of-sample expectancy at 2x fees (tolerance 0 R) |
+| 5 | Drawdown within the cap | worst forward drawdown at or below the strategy's own `maxDrawdownPct` |
 
-1. Are the specific numeric thresholds above (30-day/20-trade window, 5pp
-   buy-and-hold tolerance, 15% fee cap, 5x daily-loss cumulative fail line)
-   the right starting point, or do you have numbers in mind from the design
-   report (research report 6) that should override these?
-2. Should "passing" ever be a signal to relax `riskConfig` limits
-   automatically, or must every risk-config change always be a manual
-   operator edit (current implementation: always manual, via
-   `PATCH .../strategies/:id`)? This document assumes the latter.
+An item that cannot be judged (no gate run to compare with, no trade with a
+measurable risk, no cap) counts against "Criteria met". The existing stored
+read of hit rate against the decision-time base rate and the three baselines
+stays on the scoreboard as before; this card does not change it.
+
+Safety checks that are about the machinery and not the result (no halt on a
+circuit breaker or ledger mismatch, every fill inside its price band, large
+orders approved before filling) stay on the strategy page next to the criteria.
+They do not produce a verdict word.
+
+## What the sample size can and cannot show
+
+Normal approximation, one-sided test at 5%, against a 50% hit rate,
+independent observations:
+
+- **620** observations give an **80%** chance of confirming a true 55% hit rate.
+- **400** observations give about **64%**.
+- A weaker true edge is confirmed less often than that, and a strategy with no
+  edge at all is wrongly confirmed about 1 time in 20.
+
+So "Criteria not met" at 620 does not prove there is no edge. It means this
+sample did not show one. That is a normal outcome.
+
+## What was removed from the old version
+
+The 30-day / 20-trade window, the buy-and-hold tolerance, the 15% fee cap and
+the "five days of daily loss" line are gone as verdict items. Fees are handled
+by running every past-data test at double fees and judging forward trades net
+of the paper fee. Daily loss and drawdown stay enforced by the risk limits
+themselves, and drawdown is criterion 5.
+
+## Questions for Filip (approve or change on DUR-5011)
+
+1. Are the numbers above right as written: 100 trades, 60% positive windows,
+   95% against random entry, 620 observations, 90 days, Brier skill above 0?
+2. "No worse than the past-data test": compare with the past-data result at
+   **2x** fees (assumed, the gate run) or at 1x fees? Zero tolerance, or allow
+   a small shortfall?
+3. Is 90 days the right reading of "at least 3 months" (versus calendar
+   months)?

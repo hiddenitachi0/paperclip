@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TRADING_PASS_FAIL_CRITERIA } from "./trading-criteria.js";
 import { canonicalTradingJson, deriveTradingRiskConfig, tradingRiskLoosenings, type TradingStrategySpec } from "./trading-spec.js";
 
 /**
@@ -28,8 +29,8 @@ export const TRADING_BACKTEST_COSTS = {
   /** Extra adverse move on every fill, as % of the price. */
   slippagePct: 0.05,
   /** Every past-data test also runs at these multiples of the fee; the LAST one is the gate. */
-  feeMultipliers: [1, 2] as const,
-  gateFeeMultiplier: 2,
+  feeMultipliers: [1, TRADING_PASS_FAIL_CRITERIA.pastData.gateFeeMultiplier] as const,
+  gateFeeMultiplier: TRADING_PASS_FAIL_CRITERIA.pastData.gateFeeMultiplier,
 } as const;
 
 /** Walk-forward layout (plan section 5, item 4). */
@@ -57,11 +58,11 @@ export const TRADING_BACKTEST_LIMITS = {
 export const TRADING_START_GATE = {
   /** The headline gate uses these coins only; every other coin is flagged "chosen with hindsight". */
   headlineCoins: ["BTC", "ETH"] as const,
-  minOutOfSampleTrades: 100,
+  minOutOfSampleTrades: TRADING_PASS_FAIL_CRITERIA.pastData.minOutOfSampleTrades,
   /** Share of out-of-sample windows that must be positive. A window with no trades is not positive. */
-  minPositiveWindowShare: 0.6,
+  minPositiveWindowShare: TRADING_PASS_FAIL_CRITERIA.pastData.minPositiveWindowShare,
   /** The strategy's per-trade net return must beat this share of the random-entry runs. */
-  randomEntryQuantile: 0.95,
+  randomEntryQuantile: TRADING_PASS_FAIL_CRITERIA.pastData.randomEntryQuantile,
   /** Share of neighbouring parameter sets that must also be positive out of sample. */
   minPlateauShare: 0.75,
   /** A market state counts as covered by a coin's out-of-sample windows with at least this many days of it. */
