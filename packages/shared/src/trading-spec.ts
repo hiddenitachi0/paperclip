@@ -1040,18 +1040,27 @@ export function describeTradingSpec(spec: TradingStrategySpec): string[] {
 /** How many rule changes the Trader may propose for one strategy in 24 hours. */
 export const TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY = 5;
 
+/** How many experiments the Trader may queue for one strategy in 24 hours (each one is up to half an hour of worker time). */
+export const TRADING_TRADER_EXPERIMENTS_PER_STRATEGY_PER_DAY = 6;
+
 /** What the card says about a proposal that has no past-data test behind it. */
 export const TRADING_NOT_TESTED_ON_PAST_DATA = "not yet tested on past data";
 
 /**
  * The Trader's request to change a strategy's rules. `.strict()` on purpose:
- * a field this schema does not know (an `experimentId` before the experiment
- * runner exists, a `status`, a `mode`, a wallet) is refused with its name
+ * a field this schema does not know (a `status`, a `mode`, a wallet) is refused with its name
  * rather than silently dropped. The summary and reasons are the Trader's own
  * words; the card also shows the rules as stored, which are what count.
  */
 export const traderProposeChangeSchema = z
   .object({
+    /**
+     * DUR-5018: the finished experiment that recommended exactly these rules.
+     * Required: a proposal that cites none is refused before anything is
+     * stored. The server also checks the experiment (same strategy, same
+     * live version, recommended variant == this spec).
+     */
+    experimentId: z.string().uuid({ message: "Cite the experiment that recommended this change (experimentId). Run an experiment first." }),
     spec: tradingStrategySpecSchema,
     guidelines: z.string().max(TRADING_GUIDELINES_MAX).default(""),
     summary: z.string().trim().min(3).max(500),

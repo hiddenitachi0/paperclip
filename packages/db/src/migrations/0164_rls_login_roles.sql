@@ -520,6 +520,8 @@ DECLARE
     'trading_strategy_versions',
     -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
     'trading_start_gate_overrides',
+    -- DUR-5018: created, granted on and policed in 0272_trading_experiments.sql; company-scoped, so in both lists.
+    'trading_experiments',
     -- DUR-5014 strategy templates. Created (and granted on) in
     -- 0271; instance-wide global tables with no company_id, so they are in the
     -- login-role list ONLY.
@@ -914,6 +916,8 @@ DECLARE
     'trading_strategy_versions',
     -- DUR-5008: created, granted on and policed in 0268_trading_backtest.sql; company-scoped, so in both lists.
     'trading_start_gate_overrides',
+    -- DUR-5018: created, granted on and policed in 0272_trading_experiments.sql; company-scoped, so in both lists.
+    'trading_experiments',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.

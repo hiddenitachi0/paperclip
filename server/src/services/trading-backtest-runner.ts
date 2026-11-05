@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import { TRADING_BACKTEST_LIMITS } from "@paperclipai/shared";
+import { resolveWorkerLaunch, workerLaunchOptions, type WorkerLaunch } from "./worker-launch.js";
+import { TRADING_BACKTEST_LIMITS, TRADING_EXPERIMENT_LIMITS } from "@paperclipai/shared";
 import type { BacktestWorkerJob, BacktestWorkerMessage } from "./trading-backtest-worker.js";
+import type { ExperimentWorkerJob, ExperimentWorkerMessage } from "./trading-experiment-worker.js";
 import type { TemplateReportWorkerJob, TemplateReportWorkerMessage } from "./trading-template-report-worker.js";
 
 /**
@@ -36,6 +35,12 @@ export interface BacktestQueue {
    * company test and a template report never run side by side. Absent = no
    * template reports (tests that only exercise company runs).
    */
+  /** DUR-5018: experiments share this chain too (one heavy job at a time); they go after company tests and before template reports. */
+  experiments?: {
+    claimNextExperiment(): Promise<{ id: string; companyId: string } | null>;
+    failInterrupted(): Promise<number>;
+    failExperiment(companyId: string, experimentId: string, message: string): Promise<void>;
+  };
   templateReports?: {
     claimNextReport(): Promise<{ id: string } | null>;
     failInterrupted(): Promise<number>;
@@ -56,6 +61,9 @@ export interface BacktestRunnerOptions {
   now?: () => Date;
   /** Tests inject a fake worker. */
   runWorker?: (job: BacktestWorkerJob, limitMs: number) => Promise<BacktestWorkerMessage & { type: "result" }>;
+  runExperimentWorker?: (job: ExperimentWorkerJob, limitMs: number) => Promise<ExperimentWorkerMessage & { type: "result" }>;
+  /** Wall-clock limit for one experiment. */
+  experimentMaxWallMs?: number;
   runTemplateWorker?: (job: TemplateReportWorkerJob, limitMs: number) => Promise<TemplateReportWorkerMessage & { type: "result" }>;
 }
 
@@ -70,12 +78,8 @@ export interface BacktestRunnerStatus {
 const DEFAULT_POLL_EVERY_MS = 15_000;
 const WORKER_HEAP_MB = 1536;
 
-function resolveWorker(name = "trading-backtest-worker"): { url: URL; execArgv: string[] } {
-  const compiled = new URL(`./${name}.js`, import.meta.url);
-  if (existsSync(compiled)) return { url: compiled, execArgv: [] };
-  // Source run (tsx / vitest): load the .ts worker through tsx.
-  const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
-  return { url: new URL(`./${name}.ts`, import.meta.url), execArgv: ["--import", tsx] };
+function resolveWorker(name = "trading-backtest-worker"): WorkerLaunch {
+  return resolveWorkerLaunch(name, import.meta.url);
 }
 
 export function spawnBacktestWorker(job: BacktestWorkerJob, limitMs: number): Promise<BacktestWorkerMessage & { type: "result" }> {
@@ -87,10 +91,15 @@ export function spawnTemplateReportWorker(job: TemplateReportWorkerJob, limitMs:
   return spawnWorker(resolveWorker("trading-template-report-worker"), job, limitMs);
 }
 
-function spawnWorker<M extends { type: string }>(target: { url: URL; execArgv: string[] }, job: unknown, limitMs: number): Promise<M & { type: "result" }> {
-  const { url, execArgv } = target;
+/** DUR-5018: the experiment worker, same limits and same supervision. */
+export function spawnExperimentWorker(job: ExperimentWorkerJob, limitMs: number): Promise<ExperimentWorkerMessage & { type: "result" }> {
+  return spawnWorker(resolveWorker("trading-experiment-worker"), job, limitMs);
+}
+
+function spawnWorker<M extends { type: string }>(target: WorkerLaunch, job: unknown, limitMs: number): Promise<M & { type: "result" }> {
+  const { url } = target;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(url, { workerData: job, execArgv, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+    const worker = new Worker(url, { workerData: job, ...workerLaunchOptions(target), resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     let settled = false;
     const finish = (settle: () => void) => {
       if (settled) return;
@@ -115,6 +124,8 @@ export function tradingBacktestRunner(options: BacktestRunnerOptions) {
   const maxWallMs = options.maxWallMs ?? TRADING_BACKTEST_LIMITS.maxWallMs;
   const runWorker = options.runWorker ?? spawnBacktestWorker;
   const runTemplateWorker = options.runTemplateWorker ?? spawnTemplateReportWorker;
+  const runExperimentWorker = options.runExperimentWorker ?? spawnExperimentWorker;
+  const experimentMaxWallMs = options.experimentMaxWallMs ?? TRADING_EXPERIMENT_LIMITS.maxWallMs;
   const prepareEveryMs = 10 * 60_000;
   const state = {
     nextPrepareAt: 0,
@@ -125,6 +136,28 @@ export function tradingBacktestRunner(options: BacktestRunnerOptions) {
     lastFinishedAt: null as Date | null,
     lastMessage: null as string | null,
   };
+
+  /** An experiment only runs when no company test is waiting; a template report only when no experiment is. Returns whether it ran one. */
+  async function runNextExperiment(): Promise<boolean> {
+    const queue = options.queue.experiments;
+    if (!queue) return false;
+    const claimed = await queue.claimNextExperiment();
+    if (!claimed) return false;
+    state.currentRunId = claimed.id;
+    options.logger.info({ experimentId: claimed.id }, "experiment started");
+    try {
+      const result = await runExperimentWorker({ databaseUrl: options.databaseUrl, experimentId: claimed.id, companyId: claimed.companyId, maxWallMs: experimentMaxWallMs }, experimentMaxWallMs + 60_000);
+      state.lastMessage = result.message;
+      options.logger.info({ experimentId: claimed.id, ok: result.ok, decision: result.decision }, "experiment finished");
+    } catch (err) {
+      const message = err instanceof Error ? err.message.replace("past-data test", "experiment") : "The experiment failed.";
+      state.lastMessage = message;
+      await queue.failExperiment(claimed.companyId, claimed.id, message).catch((e) => options.logger.error({ err: e }, "could not mark the experiment failed"));
+      options.logger.error({ experimentId: claimed.id, err: message }, "experiment failed");
+    }
+    state.nextPollAt = 0;
+    return true;
+  }
 
   /** Company tests come first; a template report only runs when none is waiting. */
   async function runNextTemplateReport(): Promise<void> {
@@ -158,11 +191,14 @@ export function tradingBacktestRunner(options: BacktestRunnerOptions) {
         state.recovered = true;
         const n = await options.queue.failInterrupted();
         if (n > 0) options.logger.warn({ runs: n }, "past-data tests interrupted by a restart were marked failed");
+        const interruptedExperiments = (await options.queue.experiments?.failInterrupted()) ?? 0;
+        if (interruptedExperiments > 0) options.logger.warn({ experiments: interruptedExperiments }, "experiments interrupted by a restart were marked failed");
         const reports = (await options.queue.templateReports?.failInterrupted()) ?? 0;
         if (reports > 0) options.logger.warn({ reports }, "template reports interrupted by a restart were marked failed");
       }
       const claimed = await options.queue.claimNextRun();
       if (!claimed) {
+        if (await runNextExperiment()) return;
         await runNextTemplateReport();
         return;
       }

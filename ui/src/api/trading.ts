@@ -220,4 +220,7 @@ export const tradingApi = {
     api.get<TradingDashboardSummary>(`/companies/${companyId}/trading/strategies/${strategyId}/dashboard`),
   orders: (companyId: string, strategyId: string) =>
     api.get<TradingOrderSummary[]>(`/companies/${companyId}/trading/strategies/${strategyId}/orders`),
+  /** Opens a conversation with the company's Trader about one strategy. The Trader answers on the task; it changes nothing by itself. */
+  askTrader: (companyId: string, input: { question: string; strategyId: string }) =>
+    api.post<{ issueId: string; identifier: string | null }>(`/companies/${companyId}/trading/analyst/ask`, input),
 };

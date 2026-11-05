@@ -127,6 +127,8 @@ export interface ProposeVersionOptions {
   note?: TradingProposalNote;
   /** Refuse when this many agent proposals were already filed for the strategy in the last 24 hours. */
   agentProposalsPerDay?: number;
+  /** DUR-5018: facts about the experiment the proposal cites, shown on the card. Like the note, never compared and never acted on. */
+  experiment?: Record<string, unknown>;
 }
 
 function tradingVersionCardTitle(strategyName: string, versionNumber: number): string {
@@ -457,6 +459,7 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
             ...tradingVersionCardPayload({ id: locked.id, name: locked.name }, stored, parseSpec(stored)),
             changes: tradingChangesInWords(activeSpec, parseSpec(stored)),
             ...(options.note ? { proposerNote: { label: "The proposer's own words. Check the rules above, not this text.", ...options.note } } : {}),
+            ...(options.experiment ? { experiment: options.experiment } : {}),
           },
         })
         .returning({ id: approvals.id });
@@ -466,7 +469,7 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         strategyId,
         strategyVersionId: stored.id,
         eventType: "reconciliation",
-        detail: { reason: "strategy_version_proposed", versionId: stored.id, versionNumber: stored.version, specDigest: digest, proposedBy: proposer, approvalId: card!.id, ...(options.note ? { note: options.note } : {}) },
+        detail: { reason: "strategy_version_proposed", versionId: stored.id, versionNumber: stored.version, specDigest: digest, proposedBy: proposer, approvalId: card!.id, ...(options.note ? { note: options.note } : {}), ...(options.experiment ? { experimentId: options.experiment.experimentId } : {}) },
       });
       return { outcome: "drafted" as const, version: (await loadVersion(tx, companyId, stored.id))!, approvalId: card!.id };
     });

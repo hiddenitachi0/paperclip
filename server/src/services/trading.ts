@@ -41,6 +41,7 @@ import { evaluateEntriesHaltTrip, evaluateTradingEntryGate, evaluateTradingExitG
 import { tradingLedgerService, type TradingFxStamp } from "./trading-ledger.js";
 import { tradingVigilanceService, type TradingVigilanceService } from "./trading-vigilance.js";
 import { isVersionStartCleared, tradingBacktestStore } from "./trading-backtest-store.js";
+import { tradingExperimentStore } from "./trading-experiment-store.js";
 import { tradingVersionsService, tradingVersionLabel, type ProposeVersionResult, type TradingProposer, type TradingStrategyVersionRow } from "./trading-versions.js";
 
 /**
@@ -149,6 +150,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
   const approvalsSvc = approvalService(db);
   const versions = tradingVersionsService(db, { rawDb: deps.rawDb, now: deps.now });
   const backtests = tradingBacktestStore(db, { now: deps.now });
+  const experiments = tradingExperimentStore(db, { now: deps.now });
 
   /** The strategy as the tick must see it: the risk config comes from the active version, never from the cache column. */
   function readingVersion<T extends TradingStrategyRow>(row: T, spec: TradingStrategySpec): T {
@@ -1189,6 +1191,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     updateStrategy,
     versions,
     backtests,
+    experiments,
     setStatus,
     reconcileOnBoot,
     noteEngineVersion,
