@@ -250,6 +250,7 @@ export type SelectorAction =
   | "confirmed_promoted"
   | "confirmed_deferred_after_drawdown"
   | "kept_promoted"
+  | "confirmation_lapsed"
   | "demoted";
 
 export interface SelectorCellOutcome {
@@ -367,8 +368,8 @@ export function runSelector(input: SelectorInput): SelectorOutput {
       windowMean = windowResults.length >= rules.confirmationTrades ? mean(windowResults.slice(0, rules.confirmationTrades)) : null;
       windowTrades = Math.min(windowResults.length, rules.confirmationTrades);
       if (!passedTest) {
-        action = "failed_test";
-        note = "Confirmed earlier but no longer passes the test; it waits for a new confirmation.";
+        action = "confirmation_lapsed";
+        note = "Confirmed earlier but no longer passes the test; it needs a new confirmation window.";
       } else if (inCooldown) {
         action = "confirmed_deferred_after_drawdown";
         note = `Confirmed earlier; still inside ${rules.drawdownCooldownDays} days of a drawdown stop.`;
@@ -406,6 +407,30 @@ export function runSelector(input: SelectorInput): SelectorOutput {
           ? "Cash: no cell has enough closed trades to be tested yet."
           : "Cash: no cell beats zero expectancy after fees once the number of cells tried is accounted for.";
   return { rulesVersion: rules.version, checkpointAt: input.checkpointAt, trials: input.cells.length, tested, discoveries, cells, promoted, startedConfirmations, choice, reason, riskCaps: "unchanged" };
+}
+
+/**
+ * What an action does to a cell's confirmation record. null = the record does
+ * not change. A demoted or lapsed cell has to earn a fresh window again (after
+ * the retry wait), so both end the record the way a failed window does.
+ */
+export function selectorConfirmationTransition(action: SelectorAction): { status: SelectorConfirmationStatus; promoted: boolean; ends: boolean; opens: boolean } | null {
+  switch (action) {
+    case "passed_test_confirmation_started":
+      return { status: "running", promoted: false, ends: false, opens: true };
+    case "confirmed_promoted":
+      return { status: "passed", promoted: true, ends: false, opens: false };
+    case "confirmed_deferred_after_drawdown":
+      return { status: "passed", promoted: false, ends: false, opens: false };
+    case "confirmation_failed":
+    case "demoted":
+    case "confirmation_lapsed":
+      return { status: "failed", promoted: false, ends: true, opens: false };
+    case "confirmation_expired":
+      return { status: "expired", promoted: false, ends: true, opens: false };
+    default:
+      return null;
+  }
 }
 
 // ─── Checkpoints ────────────────────────────────────────────────────────────
@@ -491,34 +516,12 @@ export function walkForwardSelector(input: { rules: TradingSelectorRules; trades
     const out = runSelector({ rules, checkpointAt: cp.toISOString(), cells, confirmations, lastDrawdownAt: drawdown ? drawdown.toISOString() : null });
 
     for (const c of out.cells) {
-      const s = state.get(c.key);
-      switch (c.action) {
-        case "passed_test_confirmation_started":
-          state.set(c.key, { status: "running", openedAt: cpMs, elapsed: 0, sinceEnd: null, promoted: false });
-          break;
-        case "confirmed_promoted":
-          if (s) {
-            s.status = "passed";
-            s.promoted = true;
-          }
-          break;
-        case "confirmed_deferred_after_drawdown":
-          if (s) {
-            s.status = "passed";
-            s.promoted = false;
-          }
-          break;
-        case "confirmation_failed":
-          if (s) Object.assign(s, { status: "failed", sinceEnd: 0, promoted: false });
-          break;
-        case "confirmation_expired":
-          if (s) Object.assign(s, { status: "expired", sinceEnd: 0, promoted: false });
-          break;
-        case "demoted":
-          if (s) s.promoted = false;
-          break;
-        default:
-          break;
+      const change = selectorConfirmationTransition(c.action);
+      if (!change) continue;
+      if (change.opens) state.set(c.key, { status: "running", openedAt: cpMs, elapsed: 0, sinceEnd: null, promoted: false });
+      else {
+        const prior = state.get(c.key);
+        if (prior) Object.assign(prior, { status: change.status, promoted: change.promoted, sinceEnd: change.ends ? 0 : prior.sinceEnd });
       }
     }
 
