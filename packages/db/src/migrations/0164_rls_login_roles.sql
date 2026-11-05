@@ -531,7 +531,7 @@ DECLARE
     -- 0271; instance-wide global tables with no company_id, so they are in the
     -- login-role list ONLY.
     'trading_eligibility_matrices',
-    -- DUR-5015: the selector's rules (0273), instance-wide, login-role list ONLY.
+    -- DUR-5015: the selector rules table (0273), instance-wide, login-role list ONLY.
     'trading_selector_rules',
     'trading_template_reports',
     'trading_template_trials',
