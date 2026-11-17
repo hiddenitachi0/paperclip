@@ -16,6 +16,7 @@ import type {
   TradingStrategyStatus,
 } from "@paperclipai/shared";
 import { api } from "./client";
+import type { SelectorDecisionOutputView, ShadowCellView } from "../lib/tradingLeaderboard";
 
 // Trading agent (DUR-4153/DUR-4171/DUR-4227): paper-trading strategies. The
 // server only ever returns the raw `trading_strategies`/`trading_orders` row
@@ -177,7 +178,60 @@ export interface MarketWeatherHistory {
   firstDay: string | null;
 }
 
+/** One style in the template library, as the server describes it (the owner-facing parts only). */
+export interface TradingTemplateItem {
+  key: string;
+  templateVersion: number;
+  wave: "first" | "second" | "experimental" | "control";
+  name: string;
+  family: string;
+  thesis: string;
+  worksWhen: string[];
+  failsWhen: string[];
+  allowedWeather: { trend: Array<"up" | "range" | "down">; squeeze: "yes" | "no" | "any"; note: string };
+  requiresData: string[];
+  controlKind: string | null;
+  simplifications: string[];
+  decisionTimeframe: string;
+  assets: string[];
+  problems: string[];
+  /** The server's one neutral status line (never "ready", never "promising"). */
+  label: string;
+  passedPastDataChecks: boolean;
+  report: { id: string; status: string; matchesCurrentRules: boolean; summary: string | null; variantsTried: number | null; finishedAt: string | null } | null;
+}
+
+export interface TradingTemplateLibrary {
+  templates: TradingTemplateItem[];
+  excluded: Array<{ key: string; name: string; reason: string }>;
+}
+
+export interface TradingSelectorDecisionListItem {
+  id: string;
+  checkpointAt: string;
+  rulesVersion: number;
+  choice: "cash" | "cells";
+  trials: number;
+  tested: number;
+  discoveries: number;
+  reason: string;
+  decidedAt: string;
+}
+
+export interface TradingSelectorDecision extends TradingSelectorDecisionListItem {
+  output: SelectorDecisionOutputView;
+}
+
 export const tradingApi = {
+  templates: (companyId: string) => api.get<TradingTemplateLibrary>(`/companies/${companyId}/trading/templates`),
+  /** A paused paper strategy with the template's rules as version 1. The person then changes the rules in the editor. */
+  createFromTemplate: (companyId: string, input: { templateKey: string; asset: TradingAsset; name?: string }) =>
+    api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies/from-template`, input),
+  shadowCells: (companyId: string) => api.get<{ items: ShadowCellView[] }>(`/companies/${companyId}/trading/shadow/cells`),
+  selectorDecisions: (companyId: string) =>
+    api.get<{ rules: { version: number }; items: TradingSelectorDecisionListItem[] }>(`/companies/${companyId}/trading/selector/decisions`),
+  selectorDecision: (companyId: string, decisionId: string) =>
+    api.get<TradingSelectorDecision>(`/companies/${companyId}/trading/selector/decisions/${decisionId}`),
   marketWeather: (companyId: string) =>
     api.get<{ items: MarketWeatherItem[] }>(`/companies/${companyId}/trading/market-weather`),
   marketWeatherHistory: (companyId: string, asset: TradingAsset, spells = 5) =>
