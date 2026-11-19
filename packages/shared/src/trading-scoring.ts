@@ -1,5 +1,6 @@
 import type { TradingCandle, TradingTimeframe } from "./trading.js";
 import { tradingTimeframeMs } from "./trading.js";
+import { TRADING_PASS_FAIL_CRITERIA } from "./trading-criteria.js";
 
 /**
  * Prediction ledger scoring (DUR-5010): the pure rules for resolving a call,
@@ -25,9 +26,9 @@ import { tradingTimeframeMs } from "./trading.js";
 
 export const TRADING_RESOLVER_VERSION = 1;
 /** Decision 3: about 620 independent predictions per strategy version. */
-export const TRADING_DEFAULT_TARGET_SAMPLES = 620;
+export const TRADING_DEFAULT_TARGET_SAMPLES: number = TRADING_PASS_FAIL_CRITERIA.forward.targetSamples;
 /** The minimum running time of a test, in days (3 months). */
-export const TRADING_DEFAULT_MIN_RUNNING_DAYS = 90;
+export const TRADING_DEFAULT_MIN_RUNNING_DAYS: number = TRADING_PASS_FAIL_CRITERIA.forward.minRunningDays;
 export const TRADING_BASE_RATE_DAYS = 90;
 /** Decision 5: 0.40% fee per side. */
 export const TRADING_DEFAULT_FEE_PCT_PER_SIDE = 0.4;
