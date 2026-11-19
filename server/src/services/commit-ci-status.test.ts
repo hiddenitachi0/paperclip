@@ -15,7 +15,7 @@ function githubStub(input: {
   runsHttp?: number;
 }) {
   const calls: string[] = [];
-  const fetchImpl = vi.fn(async (url: string) => {
+  const fetchImpl = vi.fn(async (url: string, _init?: RequestInit) => {
     calls.push(url);
     const parsed = new URL(url);
     if (parsed.pathname.endsWith("/status")) {

@@ -83,7 +83,7 @@ type CommitFixture = { files: string[]; ci?: { runs?: Array<{ name: string; stat
 
 /** GitHub stub: /commits/{sha} (200 only for known shas), /commits/{sha}/status, /commits/{sha}/check-runs. */
 function githubStub(commits: Record<string, CommitFixture>) {
-  return vi.fn(async (url: string) => {
+  return vi.fn(async (url: string, _init?: RequestInit) => {
     const match = new URL(url).pathname.match(/\/commits\/([0-9a-f]+)(\/status|\/check-runs)?$/);
     const sha = match?.[1];
     const fixture = sha ? commits[sha] : undefined;
