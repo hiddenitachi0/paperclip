@@ -30,6 +30,7 @@ import { Trading } from "./pages/Trading";
 import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
 import { TradingStrategyEdit } from "./pages/TradingStrategyEdit";
 import { TradingBacktestReport } from "./pages/TradingBacktestReport";
+import { TradingLeaderboard } from "./pages/TradingLeaderboard";
 import { ProductGrabber } from "./pages/ProductGrabber";
 import { Email } from "./pages/Email";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
@@ -205,6 +206,7 @@ function boardRoutes() {
       <Route path="overlaps" element={<Overlaps />} />
       <Route path="trading" element={<Trading />} />
       <Route path="trading/new" element={<TradingStrategyEdit />} />
+      <Route path="trading/leaderboard" element={<TradingLeaderboard />} />
       <Route path="trading/:strategyId/edit" element={<TradingStrategyEdit />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route path="trading/:strategyId/past-data/:runId" element={<TradingBacktestReport />} />
