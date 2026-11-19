@@ -808,6 +808,14 @@ export async function startServer(): Promise<StartedServer> {
   const runServerDatabaseBackup = async (
     trigger: InstanceDatabaseBackupTrigger,
   ): Promise<InstanceDatabaseBackupRunResult | null> => {
+    // DUR-5176: a separate backup service owns the dumps. The routes already
+    // answer "managed by the backup service" before they get here; this keeps
+    // any other caller from running a server-side dump into the agent-visible
+    // volume.
+    if (config.databaseBackupManagedExternally) {
+      if (trigger === "scheduled") return null;
+      throw conflict("Database backups are managed by the separate backup service");
+    }
     if (databaseBackupInFlight) {
       const message = "Database backup already in progress";
       if (trigger === "scheduled") {
@@ -880,8 +888,12 @@ export async function startServer(): Promise<StartedServer> {
     storageService,
     feedbackExportService: feedback,
     databaseBackupDir: config.databaseBackupDir,
+    databaseBackupManagedExternally: config.databaseBackupManagedExternally,
     databaseBackupService: {
       getStorageStats: async (override) => {
+        if (config.databaseBackupManagedExternally) {
+          throw conflict("Database backups are managed by the separate backup service");
+        }
         const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
         return {
           ...computeBackupStorageStats(config.databaseBackupDir, retention, "paperclip"),
@@ -2588,6 +2600,7 @@ export async function startServer(): Promise<StartedServer> {
         heartbeatSchedulerEnabled: config.heartbeatSchedulerEnabled,
         heartbeatSchedulerIntervalMs: config.heartbeatSchedulerIntervalMs,
         databaseBackupEnabled: config.databaseBackupEnabled,
+        databaseBackupManagedExternally: config.databaseBackupManagedExternally,
         databaseBackupIntervalMinutes: config.databaseBackupIntervalMinutes,
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
         databaseBackupDir: config.databaseBackupDir,
