@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -7,12 +7,15 @@ import {
   companyQualityLoopSettings,
   issueComments,
   modelDirectoryEntries,
+  projectWorkspaces,
 } from "@paperclipai/db";
 import {
   QUALITY_CHECK_BILLING_CODE,
   QUALITY_DONE_CHECK_DEFAULT_ROUNDS,
   QUALITY_DONE_CHECK_MAX_ROUNDS,
+  PROJECT_WORKSPACE_TEST_COMMAND_KEY,
   QUALITY_LOOPS_NEW_COMPANY_DEFAULTS,
+  QUALITY_PRE_REVIEW_MAX_ROUNDS,
   QUALITY_SELF_REVIEW_MAX_PASSES,
   type CompanyQualityLoopSettings,
   type UpdateCompanyQualityLoopSettings,
@@ -22,6 +25,7 @@ import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { budgetService } from "./budgets.js";
 import {
+  DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX,
   DONE_GATE_NEEDS_WORK_PREFIX,
   DoneGateUnreadableReplyError,
   buildDoneGateCriticSystemPrompt,
@@ -92,6 +96,8 @@ export interface EffectiveQualityLoops {
   selfReviewPasses: number;
   doneCheckEnabled: boolean;
   doneCheckMaxRounds: number;
+  /** The company switched on the tests-and-criteria check before review. */
+  preReviewQualityLoop: boolean;
 }
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
@@ -101,7 +107,8 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
 
 /** Company row + the task's own override -> what actually applies to this task. */
 export function resolveEffectiveQualityLoops(
-  row: Pick<SettingsRow, "selfReviewPasses" | "doneCheckEnabled" | "doneCheckMaxRounds"> | null,
+  row: Pick<SettingsRow, "selfReviewPasses" | "doneCheckEnabled" | "doneCheckMaxRounds"> &
+    Partial<Pick<SettingsRow, "preReviewQualityLoop">> | null,
   executionPolicy: unknown,
 ): EffectiveQualityLoops {
   const policy =
@@ -117,6 +124,7 @@ export function resolveEffectiveQualityLoops(
   return {
     selfReviewPasses,
     doneCheckEnabled,
+    preReviewQualityLoop: Boolean(row?.preReviewQualityLoop),
     doneCheckMaxRounds: clampInt(
       row?.doneCheckMaxRounds ?? QUALITY_DONE_CHECK_DEFAULT_ROUNDS,
       1,
@@ -230,6 +238,33 @@ export async function readQualityLoopSettingsRow(db: Db, companyId: string): Pro
 }
 
 /**
+ * The project's "Test command (run before review)": metadata.testCommand of its primary
+ * workspace, else of any other workspace that has one. Null = the project has none, and
+ * the pre-review loop does not apply. Only a board user can set it (workspace-command-authz.ts).
+ */
+export async function resolveProjectWorkspaceTestCommand(
+  db: Db,
+  companyId: string,
+  projectId: string | null | undefined,
+): Promise<string | null> {
+  if (!projectId) return null;
+  const rows = await db
+    .select({ command: sql<string | null>`${projectWorkspaces.metadata} ->> ${PROJECT_WORKSPACE_TEST_COMMAND_KEY}` })
+    .from(projectWorkspaces)
+    .where(
+      and(
+        eq(projectWorkspaces.companyId, companyId),
+        eq(projectWorkspaces.projectId, projectId),
+        sql`coalesce(btrim(${projectWorkspaces.metadata} ->> ${PROJECT_WORKSPACE_TEST_COMMAND_KEY}), '') <> ''`,
+      ),
+    )
+    .orderBy(desc(projectWorkspaces.isPrimary), projectWorkspaces.createdAt)
+    .limit(1);
+  const command = rows[0]?.command?.trim();
+  return command ? command : null;
+}
+
+/**
  * The saved model the finish check uses: the explicit pick, else the helper's default
  * saved model. Archived or foreign entries do not count. Null = the company has none.
  */
@@ -273,6 +308,7 @@ export function qualityLoopSettingsService(db: Db) {
       doneCheckDirectoryEntryId: row?.doneCheckDirectoryEntryId ?? null,
       effectiveDoneCheckModel: await resolveDoneCheckModel(db, companyId, row),
       defaultReviewerAgentId: row?.defaultReviewerAgentId ?? null,
+      preReviewQualityLoop: effective.preReviewQualityLoop,
     };
   }
 
@@ -310,6 +346,7 @@ export function qualityLoopSettingsService(db: Db) {
     if (patch.doneCheckMaxRounds !== undefined) set.doneCheckMaxRounds = patch.doneCheckMaxRounds;
     if (patch.doneCheckDirectoryEntryId !== undefined) set.doneCheckDirectoryEntryId = patch.doneCheckDirectoryEntryId;
     if (patch.defaultReviewerAgentId !== undefined) set.defaultReviewerAgentId = patch.defaultReviewerAgentId;
+    if (patch.preReviewQualityLoop !== undefined) set.preReviewQualityLoop = patch.preReviewQualityLoop;
     await db
       .insert(companyQualityLoopSettings)
       .values({ companyId, ...set })
@@ -575,6 +612,13 @@ export function noDoneCheckModelReason(): string {
   );
 }
 
+export function noPreReviewCheckModelReason(): string {
+  return (
+    "This company has no saved model for the quality check yet, so the diff was not compared with the task before review (the tests were still run). " +
+    `An owner or admin can pick one under ${QUALITY_SETTINGS_PATH} (or set a default model for the helper).`
+  );
+}
+
 /** The finish check's reviewer: one call to the company's saved model through the helper's path. */
 export function createSavedModelDoneCheckCritic(
   db: Db,
@@ -637,7 +681,14 @@ export type QualityDoneCheckOutcome =
   | { applies: true; result: DoneGateEvaluationResult | null };
 
 export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Promise<QualityDoneCheckOutcome> {
-  if (input.requestedStatus !== "done" || input.currentStatus === "done") return { applies: false };
+  // The pre-review loop (pre-review-quality-loop.ts) runs the same check on the move to
+  // in_review: the diff against the task's acceptance criteria, before a person looks.
+  const beforeReview = input.requestedStatus === "in_review";
+  if (beforeReview) {
+    if (input.currentStatus === "in_review") return { applies: false };
+  } else if (input.requestedStatus !== "done" || input.currentStatus === "done") {
+    return { applies: false };
+  }
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return { applies: false };
   const { db, issue } = input;
   const agentId = input.actor.agentId;
@@ -650,14 +701,25 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     return { applies: false };
   }
   const effective = resolveEffectiveQualityLoops(row, issue.executionPolicy);
-  if (!effective.doneCheckEnabled) return { applies: false };
+  if (beforeReview) {
+    // Only where the whole loop applies: company switch on AND the project has a test command.
+    if (!effective.preReviewQualityLoop) return { applies: false };
+    try {
+      if (!(await resolveProjectWorkspaceTestCommand(db, issue.companyId, issue.projectId))) return { applies: false };
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "pre-review check: could not read the test command; skipping the criteria check");
+      return { applies: false };
+    }
+  } else if (!effective.doneCheckEnabled) return { applies: false };
 
   // A task with reviewers/approvers is checked by them. The worker's "done" is only a
   // hand-off to the reviewer, and the final move to done is the last approver's verdict
   // (a cheap model would be judging the approver's note, not the work). So the company's
   // finish check stands aside for the whole stage flow -- it owns the decision (applies),
   // so the instance-wide reviewer does not step in either.
+  // Before review is the opposite: the check exists to run ahead of that stage.
   if (
+    !beforeReview &&
     issueHasReviewOrApprovalStage(issue.executionPolicy, workerExclusion(issue))
   ) {
     try {
@@ -700,7 +762,7 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
   if (!critic) {
     const model = await resolveDoneCheckModel(db, issue.companyId, row);
     if (!model) {
-      await noteSkipped(noDoneCheckModelReason());
+      await noteSkipped(beforeReview ? noPreReviewCheckModelReason() : noDoneCheckModelReason());
       // The company check did not evaluate anything: the instance-wide gate still applies.
       return { applies: false };
     }
@@ -759,7 +821,11 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     currentStatus: input.currentStatus,
     patchComment: input.patchComment ?? null,
     readGeneralSettings: async () => ({}) as never,
-    configOverride: { mode: "enforce", maxRounds: effective.doneCheckMaxRounds },
+    configOverride: {
+      mode: "enforce",
+      maxRounds: beforeReview ? QUALITY_PRE_REVIEW_MAX_ROUNDS : effective.doneCheckMaxRounds,
+    },
+    beforeReview,
     critic: watchedCritic,
     unavailableReason: (err) =>
       err instanceof DoneGateUnreadableReplyError
@@ -819,7 +885,9 @@ export async function maybeScheduleQualityCheckFollowUp(input: {
   if (issue.status !== "in_progress") return false;
   if (issue.assigneeAgentId !== run.agentId || issue.assigneeUserId) return false;
   const row = await readQualityLoopSettingsRow(db, issue.companyId);
-  if (!resolveEffectiveQualityLoops(row, issue.executionPolicy).doneCheckEnabled) return false;
+  const effectiveLoops = resolveEffectiveQualityLoops(row, issue.executionPolicy);
+  // The pre-review loop's criteria check sends a task back the same way the finish check does.
+  if (!effectiveLoops.doneCheckEnabled && !effectiveLoops.preReviewQualityLoop) return false;
 
   const [sentBack] = await db
     .select({ id: issueComments.id })
@@ -832,7 +900,7 @@ export async function maybeScheduleQualityCheckFollowUp(input: {
         isNull(issueComments.authorAgentId),
         isNull(issueComments.authorUserId),
         eq(issueComments.createdByRunId, run.id),
-        sql`${issueComments.body} like ${`${DONE_GATE_NEEDS_WORK_PREFIX}%`}`,
+        sql`(${issueComments.body} like ${`${DONE_GATE_NEEDS_WORK_PREFIX}%`} or ${issueComments.body} like ${`${DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX}%`})`,
       ),
     )
     .limit(1);

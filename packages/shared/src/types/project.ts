@@ -40,6 +40,8 @@ export interface ProjectWorkspace {
   visibility: ProjectWorkspaceVisibility;
   setupCommand: string | null;
   cleanupCommand: string | null;
+  /** "Test command (run before review)": read from metadata.testCommand. */
+  testCommand?: string | null;
   remoteProvider: string | null;
   remoteWorkspaceRef: string | null;
   sharedWorkspaceKey: string | null;

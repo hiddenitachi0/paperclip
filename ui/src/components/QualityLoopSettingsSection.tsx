@@ -134,7 +134,23 @@ export function QualityLoopSettingsSection({ companyId }: { companyId: string })
         </div>
 
         <div className="space-y-2">
-          <div className="text-sm font-medium">3. Second agent reviews code tasks</div>
+          <div className="text-sm font-medium">3. Run the tests before review</div>
+          <p className="text-xs text-muted-foreground">
+            When an agent moves a task to review, the project's test command is run first, and the agent's work is
+            compared with what the task asked for. If the tests fail, the task goes back to the same agent with the last
+            lines of the output (at most 2 times); after that it goes to review with the failures written at the top. Only
+            projects that have a "Test command (run before review)" are affected. Set it on the project's workspace.
+          </p>
+          <ToggleField
+            label="Run the tests before a task goes to review"
+            checked={!!settings?.preReviewQualityLoop}
+            onChange={(v) => save({ preReviewQualityLoop: v })}
+            toggleTestId="quality-pre-review-toggle"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-sm font-medium">4. Second agent reviews code tasks</div>
           <p className="text-xs text-muted-foreground">
             New tasks in a project with code get this agent as their reviewer: when the worker says it is finished, the
             reviewer looks at it and either approves or sends it back with changes. You can change or remove the reviewer on

@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { PROJECT_WORKSPACE_TEST_COMMAND_KEY } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -144,9 +145,17 @@ export function collectProjectWorkspaceCommandPaths(
   prefix = "",
 ): string[] {
   if (!isRecord(workspacePatch)) return [];
-  return hasOwn(workspacePatch, "cleanupCommand")
-    ? [prefixPath(prefix, "cleanupCommand")]
-    : [];
+  const paths: string[] = [];
+  if (hasOwn(workspacePatch, "cleanupCommand")) paths.push(prefixPath(prefix, "cleanupCommand"));
+  // "Test command (run before review)": the server runs it on the host, so an agent key
+  // may not set it, change it, or write it through the free-form metadata object.
+  if (hasOwn(workspacePatch, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
+    paths.push(prefixPath(prefix, PROJECT_WORKSPACE_TEST_COMMAND_KEY));
+  }
+  if (isRecord(workspacePatch.metadata) && hasOwn(workspacePatch.metadata, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
+    paths.push(prefixPath(prefix, `metadata.${PROJECT_WORKSPACE_TEST_COMMAND_KEY}`));
+  }
+  return paths;
 }
 
 export function collectIssueWorkspaceCommandPaths(input: {
