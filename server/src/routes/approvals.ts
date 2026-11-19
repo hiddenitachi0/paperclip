@@ -7,6 +7,10 @@ import {
   addApprovalCommentSchema,
   createApprovalSchema,
   type DeployChangeSummary,
+  type DeployCardItem,
+  type DeployRequestPayload,
+  addDeployItemsSchema,
+  DEPLOY_CARD_ITEMS_MAX,
   deployRequestPayloadSchema,
   describeModelBoostConsequence,
   describeModelBoostRequest,
@@ -1128,11 +1132,93 @@ function findDuplicateApprovedDeploy(
 }
 
 /**
+ * Every check a deploy card must pass, and every server-side stamp it carries, in one place.
+ * Used when a card is filed, when it is resubmitted and when more items are added to a card
+ * that is still waiting (POST /approvals/:id/deploy-items), so the three paths can never
+ * drift apart. Throws a plain-language HttpError when the card must be refused; otherwise
+ * returns the payload to store.
+ *
+ * The caller must already have checked the actor's `deploys:request` permission.
+ */
+async function prepareDeployPayload(
+  db: Db,
+  req: Request,
+  companyId: string,
+  rawPayload: unknown,
+): Promise<DeployRequestPayload> {
+  const parsedDeployPayload = deployRequestPayloadSchema.parse(rawPayload);
+  assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
+  // DUR-3964 (a): an agent's deploy card must name the exact commit, in
+  // full, before anything else looks at it -- a card with no commit id
+  // deploys the top of the branch, not the change that was reviewed.
+  assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
+  await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
+  // DUR-4139: the project's board-set deploy mode/ask-first list, enforced
+  // before anything else touches this request -- see
+  // deploy-policy-enforcement.ts for what each mode does and does not do.
+  const deployPolicyDecision = await evaluateDeployPolicyForProject(db, parsedDeployPayload.projectId);
+  if (!deployPolicyDecision.allowed) {
+    throw unprocessable(deployPolicyDecision.refusalReason ?? "This project does not allow deploys right now.");
+  }
+  // DUR-3926: stamp the project's real deploy workspace over whatever the
+  // filer supplied -- the runner silently refuses any other workspace.
+  const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
+  if (deployWorkspaceId && deployWorkspaceId !== parsedDeployPayload.workspaceId) {
+    logger.warn(
+      {
+        companyId,
+        projectId: parsedDeployPayload.projectId,
+        suppliedWorkspaceId: parsedDeployPayload.workspaceId,
+        deployWorkspaceId,
+      },
+      "deploy approval filed with a workspaceId that is not the project's deploy workspace; stamping the deploy workspace (DUR-3926)",
+    );
+  }
+  const deployPayload = deployWorkspaceId
+    ? { ...parsedDeployPayload, workspaceId: deployWorkspaceId }
+    : parsedDeployPayload;
+  await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
+  const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
+  // Pointless deploy cards: refuse a card that cannot deploy or would deploy nothing, and
+  // stamp what it would actually change onto the payload.
+  const changesSinceLive = await assertDeployCardWouldChangeSomething(db, companyId, deployPayload, {
+    filedByAgent: req.actor.type === "agent",
+    deployBranch: branchStamp.deployBranch ?? null,
+  });
+  // DUR-3964 (a): stamp what this card would really deploy -- the pinned
+  // commit, or the top of the branch when the board pinned none.
+  const targetCommit = await resolveDeployTargetCommit(db, companyId, deployPayload);
+  return deployRequestPayloadSchema.parse({
+    ...deployPayload,
+    sourceBranch: branchStamp.sourceBranch,
+    deployBranch: branchStamp.deployBranch,
+    changesSinceLive: changesSinceLive ?? undefined,
+    resolvedCommit: targetCommit.resolvedCommit,
+    resolvedCommitSource: targetCommit.resolvedCommitSource,
+    askFirstActions:
+      deployPolicyDecision.askFirstActions.length > 0 ? deployPolicyDecision.askFirstActions : undefined,
+  });
+}
+
+/**
  * What the duplicate guard found. `blocking: false` means "there is a related open card,
  * link the new one to it, but do not refuse" -- used for an operator rollback filed while
  * an ordinary forward deploy is still waiting (see the deploy branch below).
  */
-type DuplicateGuardResult = { id: string; targetDescription: string; message?: string; blocking: boolean };
+type DuplicateGuardResult = {
+  id: string;
+  targetDescription: string;
+  message?: string;
+  /** Machine-readable reason, returned to the caller as `code` on the 409. */
+  code?: string;
+  blocking: boolean;
+};
+
+// One deploy card per day: a second ordinary deploy card for a project is refused with this
+// code and message so the caller knows to add its items to the open card instead.
+const DEPLOY_CARD_OPEN_CODE = "deploy_card_open";
+const DEPLOY_CARD_OPEN_MESSAGE =
+  "There is already an open deploy card for this project. Add your items to it instead.";
 
 function isRollbackDeployPayload(payload: Record<string, unknown> | null | undefined): boolean {
   return payload?.allowBackwardDeploy === true;
@@ -1179,7 +1265,13 @@ async function findDuplicateOpenApproval(
     const existing = await svc.findOpenDeployApproval(companyId, projectId, workspaceId);
     if (existing) {
       if (!isRollback) {
-        return { id: existing.id, targetDescription: "a deploy request for this project/workspace", blocking: true };
+        return {
+          id: existing.id,
+          targetDescription: "a deploy request for this project/workspace",
+          message: DEPLOY_CARD_OPEN_MESSAGE,
+          code: DEPLOY_CARD_OPEN_CODE,
+          blocking: true,
+        };
       }
       const existingPayload = (existing.payload ?? null) as Record<string, unknown> | null;
       const existingCommit = typeof existingPayload?.commit === "string" ? existingPayload.commit.trim() : "";
@@ -2106,59 +2198,7 @@ export function approvalRoutes(
     }
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
-      const parsedDeployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
-      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
-      // DUR-3964 (a): an agent's deploy card must name the exact commit, in
-      // full, before anything else looks at it -- a card with no commit id
-      // deploys the top of the branch, not the change that was reviewed.
-      assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
-      await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
-      // DUR-4139: the project's board-set deploy mode/ask-first list, enforced
-      // before anything else touches this request -- see
-      // deploy-policy-enforcement.ts for what each mode does and does not do.
-      const deployPolicyDecision = await evaluateDeployPolicyForProject(db, parsedDeployPayload.projectId);
-      if (!deployPolicyDecision.allowed) {
-        res.status(422).json({ error: deployPolicyDecision.refusalReason });
-        return;
-      }
-      // DUR-3926: stamp the project's real deploy workspace over whatever the
-      // filer supplied -- the runner silently refuses any other workspace.
-      const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
-      if (deployWorkspaceId && deployWorkspaceId !== parsedDeployPayload.workspaceId) {
-        logger.warn(
-          {
-            companyId,
-            projectId: parsedDeployPayload.projectId,
-            suppliedWorkspaceId: parsedDeployPayload.workspaceId,
-            deployWorkspaceId,
-          },
-          "deploy approval filed with a workspaceId that is not the project's deploy workspace; stamping the deploy workspace (DUR-3926)",
-        );
-      }
-      const deployPayload = deployWorkspaceId
-        ? { ...parsedDeployPayload, workspaceId: deployWorkspaceId }
-        : parsedDeployPayload;
-      await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
-      const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
-      // Pointless deploy cards: refuse a card that cannot deploy or would deploy nothing, and
-      // stamp what it would actually change onto the payload.
-      const changesSinceLive = await assertDeployCardWouldChangeSomething(db, companyId, deployPayload, {
-        filedByAgent: req.actor.type === "agent",
-        deployBranch: branchStamp.deployBranch ?? null,
-      });
-      // DUR-3964 (a): stamp what this card would really deploy -- the pinned
-      // commit, or the top of the branch when the board pinned none.
-      const targetCommit = await resolveDeployTargetCommit(db, companyId, deployPayload);
-      approvalInput.payload = deployRequestPayloadSchema.parse({
-        ...deployPayload,
-        sourceBranch: branchStamp.sourceBranch,
-        deployBranch: branchStamp.deployBranch,
-        changesSinceLive: changesSinceLive ?? undefined,
-        resolvedCommit: targetCommit.resolvedCommit,
-        resolvedCommitSource: targetCommit.resolvedCommitSource,
-        askFirstActions:
-          deployPolicyDecision.askFirstActions.length > 0 ? deployPolicyDecision.askFirstActions : undefined,
-      });
+      approvalInput.payload = await prepareDeployPayload(db, req, companyId, approvalInput.payload);
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
@@ -2347,7 +2387,9 @@ export function approvalRoutes(
         throw conflict(
           duplicate.message ??
             `There is already an open approval for ${duplicate.targetDescription}. Review or resolve it instead of filing a second one — pass acknowledgedDuplicateOfApprovalId to confirm you need a genuine second approval.`,
-          { existingApprovalId: duplicate.id },
+          duplicate.code
+            ? { code: duplicate.code, existingApprovalId: duplicate.id }
+            : { existingApprovalId: duplicate.id },
         );
       }
       // A legitimate second approval was explicitly acknowledged: keep it linked
@@ -2936,6 +2978,111 @@ export function approvalRoutes(
     },
   );
 
+  // One deploy card per day: add finished work to a deploy card that is still waiting.
+  // The commit is the day's combined (integration) commit and replaces the one on the card;
+  // every deploy check re-runs against it, exactly as for a freshly filed card.
+  router.post(
+    "/approvals/:id/deploy-items",
+    scopeFromApprovalIdParam(checkCompanyAccess),
+    validate(addDeployItemsSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Approval not found" });
+        return;
+      }
+      if (
+        !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
+          describeBlockedAction: () => "add items to a deploy card",
+          resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
+        }))
+      ) return;
+      const existingPayload = (existing.payload ?? {}) as Record<string, unknown>;
+      if (!isDeployRequestApproval(existing.type, existingPayload)) {
+        res.status(422).json({ error: "Items can only be added to a deploy card." });
+        return;
+      }
+      if (existing.status !== "pending") {
+        res.status(409).json({
+          error: "This deploy card is no longer waiting for a decision, so nothing can be added to it. File a new card instead.",
+        });
+        return;
+      }
+      if (!(await assertApprovalRequestPermissionAllowed(req, res, existing.companyId, "deploys:request"))) return;
+      if (existingPayload.allowBackwardDeploy === true) {
+        res.status(422).json({ error: "Items cannot be added to a rollback card." });
+        return;
+      }
+
+      const body = req.body as { commit: string; items: DeployCardItem[]; issueIds: string[] };
+      const previousItems = Array.isArray(existingPayload.items) ? (existingPayload.items as DeployCardItem[]) : [];
+      const items = [...previousItems, ...body.items];
+      if (items.length > DEPLOY_CARD_ITEMS_MAX) {
+        res.status(422).json({
+          error: `A deploy card can list at most ${DEPLOY_CARD_ITEMS_MAX} items. This one already has ${previousItems.length}.`,
+        });
+        return;
+      }
+      const uniqueIssueIds = Array.from(new Set(body.issueIds));
+      if (uniqueIssueIds.length > 0) {
+        const found = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(inArray(issues.id, uniqueIssueIds), eq(issues.companyId, existing.companyId)));
+        if (found.length !== uniqueIssueIds.length) {
+          res.status(422).json({ error: "One or more of those tasks could not be found in this company." });
+          return;
+        }
+      }
+
+      // Rebuild the card from what the filer originally wrote (not the server stamps, which are
+      // worked out again), with the new commit and the longer item list.
+      const filerFields: Record<string, unknown> = {};
+      for (const key of Object.keys(deployRequestPayloadSchema.shape)) {
+        if (key in existingPayload) filerFields[key] = existingPayload[key];
+      }
+      const prepared = await prepareDeployPayload(db, req, existing.companyId, {
+        ...filerFields,
+        commit: body.commit,
+        items,
+      });
+      // Keep anything else the card carries (links to related cards, the issues it was filed
+      // for); the freshly checked deploy fields win. Stamps that no longer apply drop out.
+      const nextPayload: Record<string, unknown> = { ...existingPayload, ...prepared };
+      for (const [key, value] of Object.entries(nextPayload)) {
+        if (value === undefined) delete nextPayload[key];
+      }
+
+      const approval = await svc.addDeployItems(id, nextPayload);
+      const actor = getActorInfo(req);
+      if (uniqueIssueIds.length > 0) {
+        await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
+          agentId: actor.agentId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        });
+      }
+      await logActivity(db, {
+        companyId: approval.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "approval.deploy_items_added",
+        entityType: "approval",
+        entityId: approval.id,
+        details: {
+          type: approval.type,
+          commit: body.commit,
+          addedItemCount: body.items.length,
+          itemCount: items.length,
+          issueIds: uniqueIssueIds,
+        },
+      });
+      const personaNames = await personaDisplayNamesFor([approval]);
+      res.json(withPersonaMetadata(approval, personaNames));
+    },
+  );
+
   router.post(
     "/approvals/:id/resubmit",
     scopeFromApprovalIdParam(checkCompanyAccess),
@@ -2973,48 +3120,7 @@ export function approvalRoutes(
     }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
-      const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
-      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
-      // DUR-3964 (a): a resubmitted card gets the same "name the exact commit"
-      // rule as a freshly filed one -- resubmit is the path an agent takes
-      // after a rejection, and it was one of the paths the unusable cards used.
-      assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
-      await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
-      // DUR-4139: same policy enforcement as a freshly filed card -- the
-      // project's deploy policy may have changed to preview_only since this
-      // card was first filed.
-      const resubmitDeployPolicyDecision = await evaluateDeployPolicyForProject(db, parsedDeployPayload.projectId);
-      if (!resubmitDeployPolicyDecision.allowed) {
-        res.status(422).json({ error: resubmitDeployPolicyDecision.refusalReason });
-        return;
-      }
-      // DUR-3926: same deploy-workspace stamp as the filing path above.
-      const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
-      const deployPayload = deployWorkspaceId
-        ? { ...parsedDeployPayload, workspaceId: deployWorkspaceId }
-        : parsedDeployPayload;
-      await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
-      const branchStamp = await resolveDeployApprovalBranchStamp(db, existing.companyId, deployPayload);
-      // Pointless deploy cards: a resubmitted card gets the same "would this deploy anything?"
-      // check as a freshly filed one -- resubmit is the path an agent takes
-      // after a rejection, and it was the path the six pointless cards used.
-      const changesSinceLive = await assertDeployCardWouldChangeSomething(db, existing.companyId, deployPayload, {
-        filedByAgent: req.actor.type === "agent",
-        deployBranch: branchStamp.deployBranch ?? null,
-      });
-      const targetCommit = await resolveDeployTargetCommit(db, existing.companyId, deployPayload);
-      req.body.payload = deployRequestPayloadSchema.parse({
-        ...deployPayload,
-        sourceBranch: branchStamp.sourceBranch,
-        deployBranch: branchStamp.deployBranch,
-        changesSinceLive: changesSinceLive ?? undefined,
-        resolvedCommit: targetCommit.resolvedCommit,
-        resolvedCommitSource: targetCommit.resolvedCommitSource,
-        askFirstActions:
-          resubmitDeployPolicyDecision.askFirstActions.length > 0
-            ? resubmitDeployPolicyDecision.askFirstActions
-            : undefined,
-      });
+      req.body.payload = await prepareDeployPayload(db, req, existing.companyId, req.body.payload);
     }
     if (
       isOperatorActionApproval(existing.type, existing.payload) &&

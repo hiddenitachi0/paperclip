@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import {
   APPROVAL_TYPES,
+  addDeployItemsSchema,
   createApprovalSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
@@ -39,6 +40,12 @@ interface ApprovalCreateOptions extends BaseClientOptions {
 
 interface ApprovalResubmitOptions extends BaseClientOptions {
   payload?: string;
+}
+
+interface ApprovalDeployAddOptions extends BaseClientOptions {
+  commit: string;
+  item: string[];
+  issue?: string[];
 }
 
 interface ApprovalCommentOptions extends BaseClientOptions {
@@ -298,6 +305,58 @@ export function registerApprovalCommands(program: Command): void {
 
   addCommonClientOptions(
     approval
+      .command("deploy-add")
+      .description(
+        "Add finished items to a deploy card that is still waiting (one deploy card per day). " +
+          "--commit is the new combined commit to deploy; every deploy check runs again against it.",
+      )
+      .argument("<approvalId>", "Deploy card (approval) ID")
+      .requiredOption("--commit <sha>", "Full commit id to deploy (the day's combined commit)")
+      .requiredOption(
+        "--item <summary>",
+        "One finished item, in plain words (repeat for more)",
+        collectOption,
+        [] as string[],
+      )
+      .option(
+        "--issue <id>",
+        "Task for the matching --item, e.g. NOR-123 (repeat; give one per --item or none)",
+        collectOption,
+        [] as string[],
+      )
+      .action(async (approvalId: string, opts: ApprovalDeployAddOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const issueRefs = opts.issue ?? [];
+          if (issueRefs.length > 0 && issueRefs.length !== opts.item.length) {
+            throw new Error(
+              `Give one --issue for each --item, or none. You gave ${opts.item.length} item(s) and ${issueRefs.length} issue(s).`,
+            );
+          }
+          const resolved: Array<{ id: string; identifier: string | null }> = [];
+          for (const ref of issueRefs) {
+            const issue = await ctx.api.get<{ id: string; identifier?: string | null }>(apiPath`/api/issues/${ref}`);
+            if (!issue?.id) throw new Error(`Could not find task ${ref}.`);
+            resolved.push({ id: issue.id, identifier: issue.identifier ?? ref });
+          }
+          const payload = addDeployItemsSchema.parse({
+            commit: opts.commit,
+            items: opts.item.map((summary, index) => ({
+              summary,
+              ...(resolved[index] ? { issueId: resolved[index].identifier ?? resolved[index].id } : {}),
+            })),
+            issueIds: Array.from(new Set(resolved.map((issue) => issue.id))),
+          });
+          const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/deploy-items`, payload);
+          printOutput(updated, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
       .command("withdraw")
       .description("Withdraw your own not-yet-decided approval request (e.g. a stale duplicate)")
       .argument("<approvalId>", "Approval ID")
@@ -334,6 +393,10 @@ export function registerApprovalCommands(program: Command): void {
         }
       }),
   );
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 function parseCsv(value: string | undefined): string[] | undefined {

@@ -21,6 +21,7 @@ const COMPANY_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const LIVE_COMMIT = "aaaaaaaaaaaa";
+const ISSUE_ID = "55555555-5555-4555-8555-555555555555";
 // DUR-3964: an agent-filed deploy card must name the commit in full, so the
 // commit under test is written out to 40 characters. Every refusal still
 // prints it short, which is what the assertions below read.
@@ -34,6 +35,7 @@ const mockApprovalService = vi.hoisted(() => ({
   reject: vi.fn(),
   requestRevision: vi.fn(),
   resubmit: vi.fn(),
+  addDeployItems: vi.fn(),
   listComments: vi.fn(),
   addComment: vi.fn(),
   findOpenHireApprovalForRole: vi.fn(),
@@ -123,6 +125,8 @@ function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://gi
           ? workspaceRepoUrl === undefined
             ? []
             : [[workspaceRepoUrl]]
+          : query.includes('from "issues"')
+            ? [[ISSUE_ID]]
           : query.includes("projects")
             ? [[PROJECT_ID, COMPANY_ID]]
             : [];
@@ -670,6 +674,240 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
         ),
       ).toEqual([]);
       expect(mockApprovalService.create.mock.calls[0]?.[1]?.payload?.changesSinceLive).toBeUndefined();
+    },
+    TEST_TIMEOUT,
+  );
+});
+
+describe("One deploy card per day: adding items to a card that is still waiting", () => {
+  const PENDING_CARD = {
+    id: "approval-1",
+    type: "request_board_approval",
+    status: "pending",
+    companyId: COMPANY_ID,
+    requestedByAgentId: "agent-2",
+    payload: {
+      kind: "deploy",
+      projectId: PROJECT_ID,
+      workspaceId: WORKSPACE_ID,
+      commit: "cccccccccccccccccccccccccccccccccccccccc",
+      title: "Deploy widgets",
+      note: "Ship it",
+      relatedApprovalId: "99999999-9999-4999-8999-999999999999",
+      sourceBranch: "custom",
+      deployBranch: "custom",
+      items: [{ summary: "Fixes the sign-in error", issueId: "NOR-1" }],
+    },
+  };
+  const addBody = (overrides: Record<string, unknown> = {}) => ({
+    commit: NEW_COMMIT,
+    items: [{ summary: "Adds the weekly report email", issueId: "NOR-2" }],
+    issueIds: [ISSUE_ID],
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../services/index.js");
+    vi.doUnmock("../services/deploy-branches.js");
+    vi.doUnmock("../services/deploy-workspace.js");
+    vi.doUnmock("../services/deploy-change-guard.js");
+    vi.doUnmock("../services/github-fetch.js");
+    vi.doUnmock("../routes/approvals.js");
+    vi.doUnmock("../routes/authz.js");
+    vi.doUnmock("../middleware/index.js");
+    registerModuleMocks();
+    vi.clearAllMocks();
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      action: "deploys:request",
+      reason: "allow_test",
+      explanation: "Allowed by test mock.",
+    });
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([]);
+    mockIssueApprovalService.linkManyForApproval.mockResolvedValue(undefined);
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
+    mockLogActivity.mockResolvedValue(undefined);
+    mockSecretService.resolveGitHubToken.mockResolvedValue(null);
+    mockApprovalService.getById.mockResolvedValue(PENDING_CARD);
+    mockApprovalService.addDeployItems.mockImplementation(async (_id: string, payload: unknown) => ({
+      ...PENDING_CARD,
+      payload,
+    }));
+    mockResolveProjectDeployWorkspaceId.mockResolvedValue(null);
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({
+      deployBranch: "custom",
+      mirrorBranch: "master",
+      projectId: PROJECT_ID,
+    });
+    mockResolveLiveDeployCommit.mockResolvedValue(LIVE_COMMIT);
+  });
+
+  it(
+    "appends the items, moves the card to the new commit, links the tasks and records it",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(200);
+      const [id, stored] = mockApprovalService.addDeployItems.mock.calls[0] as [string, any];
+      expect(id).toBe("approval-1");
+      expect(stored.commit).toBe(NEW_COMMIT);
+      expect(stored.items).toEqual([
+        { summary: "Fixes the sign-in error", issueId: "NOR-1" },
+        { summary: "Adds the weekly report email", issueId: "NOR-2" },
+      ]);
+      // The checks ran again against the new commit and re-stamped it.
+      expect(stored.resolvedCommit).toBe(NEW_COMMIT);
+      expect(stored.changesSinceLive?.changedFileCount).toBe(1);
+      // Things the card already carried are kept.
+      expect(stored.relatedApprovalId).toBe("99999999-9999-4999-8999-999999999999");
+      expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
+        "approval-1",
+        [ISSUE_ID],
+        expect.anything(),
+      );
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "approval.deploy_items_added", entityId: "approval-1" }),
+      );
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "runs the same checks as filing: a new commit that would deploy nothing is refused",
+    async () => {
+      githubAnswers({ status: "behind", files: [] });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(422);
+      expect(messageOf(res)).toMatch(/already running/i);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+      expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "needs the right to ask for a deploy",
+    async () => {
+      mockAccessService.decide.mockResolvedValue({
+        allowed: false,
+        action: "deploys:request",
+        reason: "deny_test",
+        explanation: "Denied by test mock.",
+      });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(403);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.each(["approved", "rejected", "revision_requested", "cancelled"])(
+    "refuses a card that is %s -- only a waiting card takes items",
+    async (status) => {
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, status });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(409);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "never changes a card that was decided at the same moment, and links nothing",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      const { conflict } = await import("../errors.js");
+      mockApprovalService.addDeployItems.mockRejectedValue(
+        conflict("This deploy card was decided just now, so nothing was added to it."),
+      );
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(409);
+      expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses anything that is not a deploy card",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, payload: { kind: "merge_pr" } });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(422);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses a rollback card",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({
+        ...PENDING_CARD,
+        payload: { ...PENDING_CARD.payload, allowBackwardDeploy: true },
+      });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(422);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "stops at 50 items in total",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({
+        ...PENDING_CARD,
+        payload: {
+          ...PENDING_CARD.payload,
+          items: Array.from({ length: 50 }, (_, index) => ({ summary: `Item ${index}` })),
+        },
+      });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(422);
+      expect(messageOf(res)).toMatch(/at most 50 items/);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "rejects a bad body: no items, or a summary over 300 characters",
+    async () => {
+      const app = await createAgentApp(createRouteDb());
+      const noItems = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody({ items: [] }));
+      expect(noItems.status).toBe(400);
+      const tooLong = await request(app)
+        .post("/api/approvals/approval-1/deploy-items")
+        .send(addBody({ items: [{ summary: "x".repeat(301) }] }));
+      expect(tooLong.status).toBe(400);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
     },
     TEST_TIMEOUT,
   );

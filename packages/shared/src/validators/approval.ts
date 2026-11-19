@@ -105,6 +105,40 @@ export const deployChangeSummarySchema = z
 
 export type DeployChangeSummary = z.infer<typeof deployChangeSummarySchema>;
 
+/** Most items one deploy card may list. */
+export const DEPLOY_CARD_ITEMS_MAX = 50;
+
+/**
+ * One finished piece of work a deploy card ships, in plain language. The card
+ * lists one line per item so the operator sees everything that goes live in a
+ * single decision. `issueId` is the issue's id or identifier (e.g. "NOR-123").
+ */
+export const deployCardItemSchema = z
+  .object({
+    summary: z.string().trim().min(1).max(300),
+    issueId: z.string().trim().min(1).max(100).optional(),
+    branch: z.string().trim().min(1).max(200).optional(),
+    commit: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict();
+
+export type DeployCardItem = z.infer<typeof deployCardItemSchema>;
+
+/**
+ * Body of POST /api/approvals/:id/deploy-items: add finished work to a deploy
+ * card that is still waiting. `commit` is the new commit to deploy (the day's
+ * combined merge) and replaces the one on the card.
+ */
+export const addDeployItemsSchema = z
+  .object({
+    commit: z.string().trim().min(1).max(200),
+    items: z.array(deployCardItemSchema).min(1).max(DEPLOY_CARD_ITEMS_MAX),
+    issueIds: z.array(z.string().uuid()).max(DEPLOY_CARD_ITEMS_MAX).optional().default([]),
+  })
+  .strict();
+
+export type AddDeployItems = z.infer<typeof addDeployItemsSchema>;
+
 /**
  * `request_board_approval` payload convention for deploy requests filed against
  * a project's `deployPolicy`. Formalizes the `{kind:"deploy", ...}` shape the
@@ -171,6 +205,10 @@ export const deployRequestPayloadSchema = z
     // filer, same rule as sourceBranch/deployBranch/changesSinceLive above --
     // a card must not be able to claim its own "nothing here needs asking".
     askFirstActions: z.array(deployAskFirstActionSchema).optional(),
+    // One deploy card per day: every finished item this card ships, one plain
+    // line each. Filers may supply it when filing; more can be added to a card
+    // that is still waiting via POST /api/approvals/:id/deploy-items.
+    items: z.array(deployCardItemSchema).max(DEPLOY_CARD_ITEMS_MAX).optional(),
   })
   .strict();
 

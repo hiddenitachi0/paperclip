@@ -13,7 +13,7 @@ import {
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
 } from "@paperclipai/shared";
-import { notFound, unprocessable } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { agentService } from "./agents.js";
@@ -1016,6 +1016,27 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .returning()
         .then((rows) => rows[0]);
+    },
+
+    /**
+     * One deploy card per day: replace the payload of a deploy card that is still waiting
+     * (new commit + more items). The status test is part of the UPDATE itself, so a card the
+     * operator approved or rejected at the same moment is never changed -- the caller gets a
+     * conflict and nothing is written.
+     */
+    addDeployItems: async (id: string, payload: Record<string, unknown>) => {
+      const updated = await db
+        .update(approvals)
+        .set({ payload, updatedAt: new Date() })
+        .where(and(eq(approvals.id, id), eq(approvals.status, "pending")))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updated) {
+        throw conflict(
+          "This deploy card was decided just now, so nothing was added to it. Check the card, then file a new one if needed.",
+        );
+      }
+      return updated;
     },
 
     // DUR-141: the requesting agent's own self-serve way to kill a
