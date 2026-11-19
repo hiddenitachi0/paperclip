@@ -64,6 +64,7 @@ export const PRE_REVIEW_COULD_NOT_RUN_PREFIX = "Quality loop: could not run the 
 const OUTPUT_TAIL_LINES = 60;
 const OUTPUT_KEEP_BYTES = 64 * 1024;
 const KILL_GRACE_MS = 5_000;
+const FORCE_SETTLE_MS = 2_000;
 
 export interface PreReviewTestRunResult {
   /** Process exit code; null when it was killed (timeout) or never started. */
@@ -126,7 +127,16 @@ export const defaultPreReviewTestRunner: PreReviewTestRunner = ({ command, cwd, 
     const timer = setTimeout(() => {
       timedOut = true;
       killGroup("SIGTERM");
-      setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS).unref();
+      setTimeout(() => {
+        killGroup("SIGKILL");
+        // A descendant that left the process group can hold the output pipes open, so "close"
+        // would never fire. Give up on the pipes shortly after the kill and report the timeout.
+        setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finish({ exitCode: null, timedOut: true, output: output.slice(-OUTPUT_KEEP_BYTES) });
+        }, FORCE_SETTLE_MS).unref();
+      }, KILL_GRACE_MS).unref();
     }, timeoutMs);
     child.on("error", (err) => {
       clearTimeout(timer);
@@ -349,7 +359,10 @@ export async function evaluatePreReviewQualityLoop(
 
   // A pass for this very commit, or a final failed round already on the task: let it through.
   try {
-    if (headSha && (await countLoopComments(db, base, `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}%`)) > 0) return null;
+    // With a commit: a pass for that commit. Without one (no git HEAD to read), a pass in the
+    // current loop counts, or the agent would be woken and re-tested forever.
+    const passScope = headSha ? base : { ...base, since };
+    if ((await countLoopComments(db, passScope, `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}%`)) > 0) return null;
     if ((await countPreReviewFailedRounds(db, { ...base, since })) >= QUALITY_PRE_REVIEW_MAX_ROUNDS) return null;
     // The tests could not be started earlier in this loop: say so once, then stop trying.
     if ((await countLoopComments(db, { ...base, since }, `${PRE_REVIEW_COULD_NOT_RUN_PREFIX}%`)) > 0) return null;

@@ -166,6 +166,10 @@ function collectAgentSafeImportPolicyErrors(
         if (workspace.cleanupCommand) {
           errors.push(`Safe import does not allow project ${project.slug} workspace ${workspace.key} cleanupCommand.`);
         }
+        // The pre-review test command is a shell string the server runs; board users only.
+        if (workspace.metadata && workspace.metadata.testCommand != null) {
+          errors.push(`Safe import does not allow project ${project.slug} workspace ${workspace.key} metadata.testCommand.`);
+        }
       }
     }
   }

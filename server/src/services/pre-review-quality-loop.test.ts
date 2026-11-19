@@ -347,6 +347,27 @@ describeEmbeddedPostgres("pre-review quality loop (DB-backed, real temp repo)", 
     expect(comment).toContain("started");
   }, 30_000);
 
+  it("a descendant that leaves the process group cannot hold the check open forever", async () => {
+    const f = await seed({ testCommand: "echo started; setsid sleep 60 & wait" });
+    const w = recordingWakeup();
+    expect((await move(f, w.wakeup, { timeoutMs: 300 }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    const [comment] = await loopComments(f.issueId);
+    expect(comment).toContain("Quality loop: tests failed (round 1 of 2)");
+    expect(comment).toContain("did not finish within");
+  }, 30_000);
+
+  it("a workspace with no git commit: one pass lets the next move through instead of looping", async () => {
+    const f = await seed();
+    fs.rmSync(path.join(f.repo!, ".git"), { recursive: true, force: true });
+    const w = recordingWakeup();
+    expect((await move(f, w.wakeup, { runner: passing }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    expect(await move(f, w.wakeup, { runner: failing })).toBeNull();
+    expect(w.calls).toHaveLength(1);
+    expect(await loopComments(f.issueId)).toHaveLength(1);
+  });
+
   it("the test command does not see the server's own secrets", async () => {
     process.env.DATABASE_URL = "postgres://secret-user:secret-pass@db/prod";
     process.env.PAPERCLIP_AGENT_JWT_SECRET = "jwt-secret-value";
