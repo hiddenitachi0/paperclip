@@ -8,6 +8,7 @@ import type {
   UpdateTradingStrategyInput,
   TradingAsset,
   TradingDashboardSummary,
+  TradingForwardCriteriaResult,
   TradingOrderSide,
   TradingOrderStatus,
   TradingPauseReason,
@@ -201,6 +202,9 @@ export const tradingApi = {
   /** `overrideReason` is the owner's written reason for starting without a passed past-data test; the server checks who may use it. */
   setStatus: (companyId: string, strategyId: string, status: "running" | "paused", overrideReason?: string) =>
     api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies/${strategyId}/status`, overrideReason ? { status, overrideReason } : { status }),
+  /** The prediction scoreboard. `criteria` is the forward paper test judged against the written pass/fail criteria (absent when the strategy has no approved version). */
+  scoreboard: (companyId: string, strategyId: string) =>
+    api.get<{ strategyId: string; version: number | null; criteria?: TradingForwardCriteriaResult }>(`/companies/${companyId}/trading/strategies/${strategyId}/scoreboard`),
   startGate: (companyId: string, strategyId: string) =>
     api.get<TradingStartGate>(`/companies/${companyId}/trading/strategies/${strategyId}/start-gate`),
   backtests: (companyId: string, strategyId: string) =>

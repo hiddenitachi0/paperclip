@@ -299,6 +299,9 @@ d("tradingEvaluatorService", () => {
       // While collecting, no hit rate is presented for any forecaster.
       expect(board.forecasters.every((f) => f.hitRate === null && f.hitRateInterval === null)).toBe(true);
       expect(board.verdict).toBeNull();
+      // The written pass/fail criteria (DUR-5011): only the two counters, no judgement, no verdict word.
+      expect(board.criteria).toMatchObject({ state: "collecting", label: "Collecting" });
+      expect(board.criteria!.items.map((i) => i.key)).toEqual(["samples", "running_time"]);
     });
 
     it("writes the verdict once when the sample size and the running time are both reached", async () => {
@@ -320,6 +323,9 @@ d("tradingEvaluatorService", () => {
       expect(board.verdict).not.toBeNull();
       const rule = board.forecasters.find((f) => f.forecasterKey === "rule")!;
       expect(rule.hitRate).toBeCloseTo(16 / 24, 12);
+      // Judged against the written criteria; with no past-data gate run to compare with, trade results "could not be judged" and count against.
+      expect(board.criteria!.state).toBe("criteria_not_met");
+      expect(board.criteria!.items.find((i) => i.key === "trade_results")?.state).toBe("could_not_judge");
     });
   });
 
