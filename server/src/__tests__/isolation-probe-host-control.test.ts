@@ -69,8 +69,11 @@ function runProbe(opts: Options = {}) {
   // Real PATH is kept (the probe needs sh, grep, find ...). Make sure a real
   // docker/psql on this machine cannot leak into the "clean" runs: put fakes
   // first, and for "missing" shadow nothing but rely on the check below.
+  // Pin the working directory: the probe treats its own cwd as the agent's
+  // workspace (allowed), so it must not depend on where vitest was started.
   const result = spawnSync("sh", [PROBE], {
     encoding: "utf8",
+    cwd: root,
     env: {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       HOME: home,
