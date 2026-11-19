@@ -410,10 +410,40 @@ if [ -n "${PROBE_OTHER_COMPANY_DIR:-}" ]; then
 fi
 
 # --- Stage 6: server-only folders -------------------------------------------
-for path in "$PC_HOME"/instances/*/.env "$PC_HOME"/instances/*/config.json "$PC_HOME"/instances/*/data/backups; do
+for path in "$PC_HOME"/instances/*/.env "$PC_HOME"/instances/*/config.json; do
   [ -e "$path" ] || continue
   if [ -r "$path" ]; then found 6 server-only-path "$path"; else pass 6 server-only-path "$path"; fi
 done
+# The database dumps. With the backup service (docker/docker-compose.backup.yml,
+# DUR-5176) the server's own backup folder is absent or empty, and an absent or
+# empty folder is a PASS -- it is the whole point -- not something to skip. A
+# folder an agent can read and that holds anything is the old gap: every dump
+# in it is readable (and deletable) by every agent.
+backups_seen=0
+for path in "$PC_HOME"/instances/*/data/backups; do
+  [ -e "$path" ] || continue
+  backups_seen=1
+  if [ ! -r "$path" ]; then
+    pass 6 server-only-path "$path"
+  elif [ -d "$path" ] && [ -z "$(ls -A "$path" 2>/dev/null)" ]; then
+    pass 6 server-only-path "$path"
+  else
+    found 6 server-only-path "$path"
+  fi
+done
+[ "$backups_seen" = 0 ] && pass 6 server-only-path "$PC_HOME/instances/default/data/backups"
+# A dump anywhere else under the agent-visible volume is the same leak under a
+# different name. Prints at most the first few paths, never any content.
+stray_dumps="$(find "$PC_HOME" -type f -name 'paperclip-*.sql*' 2>/dev/null | head -n 5)"
+if [ -n "$stray_dumps" ]; then
+  while IFS= read -r dump; do
+    found 6 backup-dump-under-home "$dump"
+  done <<DUMPS
+$stray_dumps
+DUMPS
+else
+  pass 6 backup-dump-under-home "$PC_HOME"
+fi
 
 # --- Stage 7: host control --------------------------------------------------
 stage7_host_control

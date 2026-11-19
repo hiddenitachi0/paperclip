@@ -186,6 +186,18 @@ export function Trading() {
 
       {selectedCompanyId ? <MarketWeatherPanel companyId={selectedCompanyId} /> : null}
 
+      <section className="space-y-1" aria-labelledby="trading-leaderboard-link-title" data-testid="trading-leaderboard-link">
+        <h2 id="trading-leaderboard-link-title" className="text-sm font-semibold">
+          Strategy leaderboard
+        </h2>
+        <p className="text-xs text-muted-foreground">
+          See how the strategies compare, ranked only on trades they made going forward, with the range and the number of trades behind each result.
+        </p>
+        <Link to="/trading/leaderboard" className="inline-block text-sm underline-offset-2 hover:underline">
+          Open the leaderboard
+        </Link>
+      </section>
+
       {canManage && selectedCompanyId ? <TestWalletsPanel companyId={selectedCompanyId} /> : null}
 
       {canManage && selectedCompanyId ? <CryptoCompanySettingsCard companyId={selectedCompanyId} /> : null}
