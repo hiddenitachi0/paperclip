@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { TradingStrategyEditor } from "../components/TradingStrategyEditor";
 import { TradingDisclaimer } from "../components/TradingDisclaimer";
+import { TradingTemplateGallery } from "../components/TradingTemplateGallery";
 
 /**
  * One screen for adding a strategy and for changing one. Saving never
@@ -170,6 +171,18 @@ export function TradingStrategyEdit() {
             You are changing version {waiting.version}, which is {WAITING_FOR_APPROVAL.toLowerCase()}. If you save, it is replaced by the new version.
           </p>
         </div>
+      ) : null}
+
+      {mode === "create" && saved === null && selectedCompanyId ? (
+        <TradingTemplateGallery
+          companyId={selectedCompanyId}
+          onCreated={(id) => {
+            queryClient.invalidateQueries({ queryKey: queryKeys.trading.list(selectedCompanyId) });
+            pushToast({ title: "Strategy added", body: "It is paused and uses play money. Its rules are open for you to change.", tone: "success" });
+            navigate(`/trading/${id}/edit`);
+          }}
+          onError={(message) => pushToast({ title: "Could not use that template", body: message, tone: "error" })}
+        />
       ) : null}
 
       <TradingStrategyEditor
