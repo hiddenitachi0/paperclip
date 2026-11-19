@@ -2,11 +2,21 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/router", () => ({
+  Link: ({ to, children, ...rest }: { to: string; children: React.ReactNode }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
 import {
   ApprovalPayloadRenderer,
   approvalDeployBranchInfo,
   approvalDeployChangeSummaryText,
+  approvalDeployItems,
+  DeployItemsList,
   approvalDeployTargetCommitText,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
@@ -851,5 +861,76 @@ describe("ApprovalPayloadRenderer", () => {
       spendingLimitSummary(hireMonthlySpendingLimitCentsFromPayload({})),
     );
     expect(renderHireCard({ name: "Analyst" })).toContain("Up to $50.00 a month");
+  });
+});
+
+describe("deploy card items (one deploy card per day)", () => {
+  const payload = {
+    kind: "deploy",
+    commit: "a".repeat(40),
+    items: [
+      { summary: "Fixes the sign-in error on the login page", issueId: "NOR-123" },
+      { summary: "Adds the weekly report email" },
+      { summary: "   " },
+    ],
+  };
+
+  it("lists one plain line per item and skips empty ones", () => {
+    expect(approvalDeployItems(payload)).toEqual([
+      { summary: "Fixes the sign-in error on the login page", issueRef: "NOR-123" },
+      { summary: "Adds the weekly report email", issueRef: null },
+    ]);
+  });
+
+  it("returns nothing for older cards and non-deploy cards", () => {
+    expect(approvalDeployItems({ kind: "deploy", commit: "abc" })).toEqual([]);
+    expect(approvalDeployItems({ kind: "merge_pr", items: [{ summary: "x" }] })).toEqual([]);
+    expect(approvalDeployItems(null)).toEqual([]);
+  });
+
+  it("renders each item with a link to its task", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<DeployItemsList payload={payload} />);
+    });
+    expect(container.textContent).toContain("What goes live (2 items)");
+    expect(container.textContent).toContain("Fixes the sign-in error on the login page");
+    expect(container.textContent).toContain("Adds the weekly report email");
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBe("/issues/NOR-123");
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("shows the items on the full deploy card", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<ApprovalPayloadRenderer type="request_board_approval" payload={payload} />);
+    });
+    expect(container.textContent).toContain("Adds the weekly report email");
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("cuts a short view after maxVisible items and says how many more there are", () => {
+    const many = {
+      kind: "deploy",
+      items: Array.from({ length: 7 }, (_, index) => ({ summary: `Item number ${index + 1}` })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<DeployItemsList payload={many} maxVisible={5} />);
+    });
+    expect(container.querySelectorAll("li")).toHaveLength(5);
+    expect(container.textContent).toContain("…and 2 more. Open the card to see all of them.");
+    act(() => root.unmount());
+    container.remove();
   });
 });
