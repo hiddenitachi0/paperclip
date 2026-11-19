@@ -177,4 +177,62 @@ describe("instance database backup routes", () => {
     expect((await request(user).get("/api/instance/database-backups/stats")).status).toBe(403);
     expect(service.getStorageStats).not.toHaveBeenCalled();
   });
+
+  describe("when the backup service owns the dumps (DUR-5176)", () => {
+    function managedApp(actor: Record<string, unknown>, service: InstanceDatabaseBackupService) {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.actor = actor as typeof req.actor;
+        next();
+      });
+      app.use("/api", instanceDatabaseBackupRoutes(service, { managedExternally: true }));
+      app.use(errorHandler);
+      return app;
+    }
+    const admin = { type: "board", userId: "a", source: "session", isInstanceAdmin: true };
+
+    it("answers 'run backup now' with a clear 409 and never touches the service", async () => {
+      const service = createBackupService();
+      const res = await request(managedApp(admin, service)).post("/api/instance/database-backups").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("backup_managed_externally");
+      expect(res.body.error).toMatch(/managed by the separate backup service/i);
+      expect(service.runManualBackup).not.toHaveBeenCalled();
+    });
+
+    it("answers storage stats the same way, with or without a retention override", async () => {
+      const service = createBackupService();
+      const app = managedApp(admin, service);
+      for (const url of [
+        "/api/instance/database-backups/stats",
+        "/api/instance/database-backups/stats?dailyDays=14&weeklyWeeks=2&monthlyMonths=3",
+      ]) {
+        const res = await request(app).get(url);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe("backup_managed_externally");
+      }
+      expect(service.getStorageStats).not.toHaveBeenCalled();
+    });
+
+    it("still refuses non-admins and agents before saying anything about the setup", async () => {
+      const service = createBackupService();
+      const user = managedApp({ type: "board", userId: "u", source: "session", isInstanceAdmin: false }, service);
+      const agent = managedApp({ type: "agent", agentId: "a1", companyId: "c1", source: "agent_key" }, service);
+      for (const app of [user, agent]) {
+        expect((await request(app).post("/api/instance/database-backups").send({})).status).toBe(403);
+        expect((await request(app).get("/api/instance/database-backups/stats")).status).toBe(403);
+      }
+    });
+
+    it("leaves the default (flag off) behaviour unchanged", async () => {
+      const service = createBackupService();
+      const app = managedApp(admin, service);
+      // Same routes without the option still run the backup.
+      const plain = createApp(admin, service);
+      expect((await request(plain).post("/api/instance/database-backups").send({})).status).toBe(201);
+      expect((await request(app).post("/api/instance/database-backups").send({})).status).toBe(409);
+      expect(service.runManualBackup).toHaveBeenCalledTimes(1);
+    });
+  });
 });
