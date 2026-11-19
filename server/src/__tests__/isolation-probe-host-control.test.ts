@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const PROBE = path.join(REPO_ROOT, "scripts", "isolation-probe.sh");
@@ -19,7 +19,13 @@ const isLinux = process.platform === "linux";
 
 const tempDirs: string[] = [];
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0)) {
+    if (dir === cleanToolDir) continue; // shared across tests, removed in afterAll
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+afterAll(() => {
+  if (cleanToolDir) fs.rmSync(cleanToolDir, { recursive: true, force: true });
 });
 
 function tempDir(): string {
@@ -32,6 +38,37 @@ function tempDir(): string {
 function nonTmpDir(): string {
   const dir = fs.mkdtempSync(path.join(REPO_ROOT, ".probe7-"));
   tempDirs.push(dir);
+  return dir;
+}
+
+// A PATH that holds every tool on this machine except the ones the probe
+// looks for (docker, podman, psql, pg_isready). CI runners ship a real docker
+// CLI; without this the "nothing is reachable" runs would see it and report a leak.
+let cleanToolDir: string | null = null;
+function cleanTools(): string {
+  if (cleanToolDir) return cleanToolDir;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "probe7-tools-"));
+  tempDirs.push(dir);
+  const hidden = new Set(["docker", "podman", "psql", "pg_isready"]);
+  for (const entry of (process.env.PATH ?? "").split(":").filter(Boolean)) {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(entry);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (hidden.has(name)) continue;
+      const link = path.join(dir, name);
+      if (fs.existsSync(link)) continue;
+      try {
+        fs.symlinkSync(path.join(entry, name), link);
+      } catch {
+        // ignore unreadable or racing entries
+      }
+    }
+  }
+  cleanToolDir = dir;
   return dir;
 }
 
@@ -66,16 +103,15 @@ function runProbe(opts: Options = {}) {
     writeExecutable(path.join(bin, "psql"), db === "default-login-works" ? "#!/bin/sh\nexit 0\n" : "#!/bin/sh\nexit 2\n");
   }
 
-  // Real PATH is kept (the probe needs sh, grep, find ...). Make sure a real
-  // docker/psql on this machine cannot leak into the "clean" runs: put fakes
-  // first, and for "missing" shadow nothing but rely on the check below.
+  // The probe needs sh, grep, find ... but a real docker/psql on this machine
+  // must not leak into the "clean" runs, so PATH is the fakes plus cleanTools().
   // Pin the working directory: the probe treats its own cwd as the agent's
   // workspace (allowed), so it must not depend on where vitest was started.
   const result = spawnSync("sh", [PROBE], {
     encoding: "utf8",
     cwd: root,
     env: {
-      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      PATH: `${bin}:${cleanTools()}`,
       HOME: home,
       TMPDIR: root,
       PROBE_ONLY_STAGE: "7",
