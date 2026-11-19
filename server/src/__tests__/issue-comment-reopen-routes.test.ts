@@ -159,6 +159,13 @@ vi.mock("../services/instance-settings.js", () => ({
   instanceSettingsService: () => mockInstanceSettingsService,
 }));
 
+// DUR-5179: the gate's own logic is covered in services/done-evidence-gate.test.ts; here only
+// the comment-approval wiring is under test.
+const mockEvaluateDoneEvidenceGate = vi.hoisted(() => vi.fn(async (_input: unknown) => null as unknown));
+vi.mock("../services/done-evidence-gate.js", () => ({
+  evaluateDoneEvidenceGate: (input: unknown) => mockEvaluateDoneEvidenceGate(input),
+}));
+
 vi.mock("../services/issues.js", () => ({
   issueService: () => mockIssueService,
 }));
@@ -277,6 +284,7 @@ async function waitForWakeup(assertion: () => void) {
 describe.sequential("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEvaluateDoneEvidenceGate.mockResolvedValue(null);
     mockIssueService.getById.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
     mockIssueService.update.mockReset();
@@ -2013,6 +2021,122 @@ describe.sequential("issue comment reopen routes", () => {
       }),
       mockTx,
     );
+  });
+
+  it("refuses an agent reviewer's APPROVED comment when the done evidence is missing (DUR-5179), leaving the task in review", async () => {
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const workerAgentId = "22222222-2222-4222-8222-222222222222";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "agent", agentId: reviewerAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: workerAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockEvaluateDoneEvidenceGate.mockResolvedValue({
+      mode: "enforce",
+      refuse: true,
+      reason: "not_on_origin",
+      message: "Not done yet: commit 1111111 is not on GitHub.",
+      reasons: ["commit 1111111 is not on GitHub."],
+      commits: ["1111111"],
+    });
+    mockIssueService.addComment.mockResolvedValue({ id: "system-note-1" });
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: reviewerAgentId,
+        companyId: "99999999-9999-4999-8999-999999999999",
+        source: "agent_key",
+        runId: "run-review-1",
+      }),
+    )
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "## Review: PAP-580 - APPROVED\n\nLooks good." });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "done_evidence_missing", error: "Not done yet: commit 1111111 is not on GitHub." });
+    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issue.id,
+      "Not done yet: commit 1111111 is not on GitHub.",
+      {},
+      { authorType: "system" },
+    );
+    const input = mockEvaluateDoneEvidenceGate.mock.calls[0]![0] as Record<string, any>;
+    expect(input.actor).toMatchObject({ actorType: "agent", agentId: reviewerAgentId });
+    expect(input.requestedStatus).toBe("done");
+    // The gate is told whose done notes to read besides the approver's own comment.
+    expect(input.otherNoteAgentIds).toEqual([issue.assigneeAgentId]);
+  });
+
+  it("never runs the done-evidence gate for a board user's approval comment (DUR-5179)", async () => {
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "user", userId: "local-board" }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "user", userId: "local-board" },
+        returnAssignee: { type: "agent", agentId: reviewerAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-board-1", issueId: issue.id, companyId: issue.companyId, body: "x", createdAt: new Date(), updatedAt: new Date() });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      status: "done",
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await installActor(createApp(), { type: "board", userId: "local-board", companyIds: ["99999999-9999-4999-8999-999999999999"], source: "local_implicit", isInstanceAdmin: false }))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "## Review: APPROVED" });
+
+    expect(res.status).toBe(201);
+    expect(mockEvaluateDoneEvidenceGate).not.toHaveBeenCalled();
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, expect.objectContaining({ status: "done" }), mockTx);
   });
 
   it("auto-approves a reviewer comment with structured review metadata", async () => {
