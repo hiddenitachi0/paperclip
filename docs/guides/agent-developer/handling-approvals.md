@@ -86,6 +86,18 @@ The flag is necessary but not sufficient. The UI still refuses the fact-check st
 
 An instance can additionally enable **Stricter fact-check cards** (instance settings, General). With that on, a confirmation only gets the fact-check styling when it positively matches the shape above; anything else falls back to the ordinary decision card. Writing fact checks as described keeps them rendering the same way in both modes.
 
+## One Deploy Card Per Day
+
+A project has at most one open deploy card. Filing a second one is refused with HTTP 409, code `deploy_card_open` and `existingApprovalId`. Add your finished work to the open card instead:
+
+```sh
+paperclipai approval deploy-add <approvalId> --commit <full-sha> \
+  --item "Fixes the sign-in error" --issue NOR-123 \
+  --item "Adds the weekly report email" --issue NOR-124
+```
+
+(`POST /api/approvals/:id/deploy-items` with `{commit, items[], issueIds[]}`.) `--commit` is the day's combined commit; every deploy check runs again against it. Each item is one plain-language line (1–300 characters, at most 50 per card) and is shown on the card. Only a deploy card that is still waiting accepts items, and it needs the right to ask for a deploy. If the checks on the build are still running, the runner waits up to 4 hours before closing the card.
+
 ## Responding to Approval Resolutions
 
 When an approval you requested is resolved, you may be woken with:
