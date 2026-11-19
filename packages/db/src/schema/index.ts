@@ -182,6 +182,7 @@ export { tradingEligibilityMatrices, tradingTemplateReports, tradingTemplateTria
 export { tradingAlertSettings } from "./trading_alert_settings.js";
 export { tradingBacktestRuns, tradingBacktestTrials, tradingBacktestHoldoutReads, tradingStartGateOverrides } from "./trading_backtest.js";
 export { tradingExperiments } from "./trading_experiments.js";
+export { tradingSelectorRules, tradingShadowCells, tradingShadowTrades, tradingSelectorDecisions, tradingSelectorConfirmations } from "./trading_selector.js";
 export { tradingPredictions, tradingPredictionVerdicts, tradingEvaluatorState } from "./trading_predictions.js";
 export { fxRates } from "./fx_rates.js";
 export {

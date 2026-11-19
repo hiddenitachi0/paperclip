@@ -146,6 +146,25 @@ describeEmbeddedPostgres("tradingRoutes authz (DUR-4171)", () => {
     expect((await request(app).post(`/api/companies/${companyId}/trading/market-weather`).send({})).status).toBe(404);
   });
 
+  it("shadow tournament and selector (DUR-5015): any active member reads, the replay is owner/admin only, nothing can be written, another company is refused", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const viewer = createApp(companyId, "viewer");
+    for (const path of ["shadow/cells", "selector/decisions", "selector/promoted"]) {
+      const res = await request(viewer).get(`/api/companies/${companyId}/trading/${path}`);
+      expect(res.status, path).toBe(200);
+      expect(res.body.items, path).toEqual([]);
+      expect((await request(viewer).get(`/api/companies/${otherCompanyId}/trading/${path}`)).status, path).toBe(403);
+      expect((await request(viewer).post(`/api/companies/${companyId}/trading/${path}`).send({})).status, path).toBe(404);
+    }
+    expect((await request(viewer).get(`/api/companies/${companyId}/trading/selector/decisions/${randomUUID()}`)).status).toBe(404);
+    expect((await request(viewer).get(`/api/companies/${companyId}/trading/selector/decisions/${randomUUID()}/reproduce`)).status).toBe(404);
+    expect((await request(viewer).get(`/api/companies/${companyId}/trading/selector/walk-forward`)).status).toBe(403);
+    const owner = await request(createApp(companyId, "owner")).get(`/api/companies/${companyId}/trading/selector/walk-forward`);
+    expect(owner.status).toBe(200);
+    expect(owner.body).toMatchObject({ rulesVersion: 1, checkpoints: [] });
+  });
+
   it("alert settings (DUR-5017): owners and admins read and change them, everyone else gets 403, and a bad value is refused before any write", async () => {
     const companyId = await seedCompany();
     const url = `/api/companies/${companyId}/trading/alert-settings`;

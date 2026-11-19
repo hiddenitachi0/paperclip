@@ -94,6 +94,8 @@ import { tradingBacktestRunner } from "./services/trading-backtest-runner.js";
 import { tradingExperimentStore } from "./services/trading-experiment-store.js";
 import { tradingTemplateStore } from "./services/trading-template-store.js";
 import { tradingEvaluatorService } from "./services/trading-evaluator.js";
+import { tradingShadowService } from "./services/trading-shadow.js";
+import { tradingSelectorService } from "./services/trading-selector.js";
 import { fxRatesService, norgesBankFetcher } from "./services/fx-rates.js";
 import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { describeCryptoRealMoneyLockForBoot } from "./services/crypto-real-money-lock.js";
@@ -1139,6 +1141,10 @@ export async function startServer(): Promise<StartedServer> {
     // path: it places no orders and files no cards, so it starts by itself on
     // every boot even though the order path pauses on restart (DUR-4171).
     const tradingEvaluator = tradingEvaluatorService(schedulerDb as any);
+    // DUR-5015: the shadow tournament and the monthly selector run on the evaluator's chain: they
+    // read closed bars and write only their own tables (no order, balance or card).
+    const tradingShadow = tradingShadowService(schedulerDb as any);
+    const tradingSelector = tradingSelectorService(schedulerDb as any);
     const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1955,11 +1961,30 @@ export async function startServer(): Promise<StartedServer> {
               actorType: "scheduler",
               route: "heartbeat-scheduler:tradingEvaluator",
             },
-            () => tradingEvaluator.tick(new Date()),
+            async () => {
+              const now = new Date();
+              const evaluated = await tradingEvaluator.tick(now);
+              // Each step is its own failure domain: a shadow or selector error never hides the evaluator's result.
+              const shadow = await tradingShadow.tick(now).catch((err) => {
+                logger.error({ err }, "trading-shadow tick failed");
+                return null;
+              });
+              const selected = await tradingSelector.tick(now).catch((err) => {
+                logger.error({ err }, "trading-selector tick failed");
+                return null;
+              });
+              return { evaluated, shadow, selected };
+            },
           )
-            .then((result) => {
+            .then(({ evaluated: result, shadow, selected }) => {
               if (result.predictionsWritten > 0 || result.resolved > 0 || result.verdictsWritten > 0) {
                 logger.info({ ...result }, "trading-evaluator tick");
+              }
+              if (shadow && (shadow.opened > 0 || shadow.closed > 0 || shadow.voided > 0 || shadow.cellsRegistered > 0)) {
+                logger.info({ ...shadow }, "trading-shadow tick");
+              }
+              if (selected && selected.decisions > 0) {
+                logger.info({ ...selected }, "trading-selector checkpoint");
               }
             })
             .catch((err) => {
