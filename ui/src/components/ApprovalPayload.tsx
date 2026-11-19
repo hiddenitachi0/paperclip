@@ -275,6 +275,29 @@ export function DeployItemsList({
 }
 
 /**
+ * The deploy card's revision number. It goes up every time the card changes (items added),
+ * and approve sends the one the person saw, so a card that changed after it was opened is
+ * refused instead of approved unseen. Renders nothing for cards without a revision.
+ */
+export function DeployCardRevision({
+  payload,
+  className,
+}: {
+  payload?: Record<string, unknown> | null;
+  className?: string;
+}) {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const revision = payload?.cardRevision;
+  if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) return null;
+  return (
+    <p className={cn("text-xs text-muted-foreground", className)} data-testid="deploy-card-revision">
+      Card revision {revision}
+      {revision > 1 ? " — changed since it was first filed." : ""}
+    </p>
+  );
+}
+
+/**
  * DUR-3923: a board approval whose kind only LOOKS like a deploy ("deploy_pr",
  * "deploy_release", "rollout", ...) is one nothing acts on -- scripts/deploy-runner.sh
  * only handles kind "deploy", and the server refuses to approve these. Mirrors
@@ -1062,6 +1085,7 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
         </div>
       )}
       <DeployItemsList payload={payload} />
+      <DeployCardRevision payload={payload} />
       {recommendedAction && (
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">

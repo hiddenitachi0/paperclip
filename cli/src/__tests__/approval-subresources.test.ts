@@ -86,6 +86,31 @@ describe("approval subresource commands", () => {
     });
   });
 
+  it("sends the card revision the person saw when approving", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ id: APPROVAL_ID })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["approval", "approve", APPROVAL_ID, "--card-revision", "3"]);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://localhost:3100/api/approvals/${APPROVAL_ID}/approve`);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).expectedCardRevision).toBe(3);
+  });
+
+  it("sends no revision on approve when none is given, and refuses a bad one before calling the server", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ id: APPROVAL_ID })));
+    vi.stubGlobal("fetch", fetchMock);
+    await run(["approval", "approve", APPROVAL_ID]);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).expectedCardRevision).toBeUndefined();
+
+    fetchMock.mockClear();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as never);
+    await expect(run(["approval", "approve", APPROVAL_ID, "--card-revision", "zero"])).rejects.toThrow("exit");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("adds items without tasks when none are given", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ id: APPROVAL_ID })));
     vi.stubGlobal("fetch", fetchMock);

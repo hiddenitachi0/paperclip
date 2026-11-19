@@ -40,6 +40,7 @@ import {
   isCryptoTopUpApproval,
   isCryptoWalletTxApproval,
   isTradingStrategyVersionApproval,
+  readDeployCardRevision,
   type CrossCompanyInstructionDecisionHooks,
 } from "../services/approvals.js";
 import { tradingVersionsService } from "../services/trading-versions.js";
@@ -1145,6 +1146,8 @@ async function prepareDeployPayload(
   req: Request,
   companyId: string,
   rawPayload: unknown,
+  /** Revision of the card this replaces (null = a new card), so the stamp goes up by one. */
+  previousCardRevision: number | null = null,
 ): Promise<DeployRequestPayload> {
   const parsedDeployPayload = deployRequestPayloadSchema.parse(rawPayload);
   assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
@@ -1197,6 +1200,9 @@ async function prepareDeployPayload(
     resolvedCommitSource: targetCommit.resolvedCommitSource,
     askFirstActions:
       deployPolicyDecision.askFirstActions.length > 0 ? deployPolicyDecision.askFirstActions : undefined,
+    // Never the filer's own value: the number goes up every time the card changes, and
+    // approve has to name the number the person saw.
+    cardRevision: (previousCardRevision ?? 0) + 1,
   });
 }
 
@@ -2721,6 +2727,7 @@ export function approvalRoutes(
         // This route ran the per-kind approve checks above (host-action
         // owner/admin + shape, unsupported deploy kinds).
         decidedOnApprovalCard: true,
+        expectedCardRevision: req.body.expectedCardRevision,
         securityReviewBypass: securityReviewBypass
           ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
           : undefined,
@@ -3010,6 +3017,20 @@ export function approvalRoutes(
         return;
       }
       if (!(await assertApprovalRequestPermissionAllowed(req, res, existing.companyId, "deploys:request"))) return;
+      // A card a person filed is theirs: nobody rewrites it from the side. An agent may only
+      // add to the card it filed itself; a board user may add to an agent's card.
+      if (existing.requestedByUserId) {
+        res.status(403).json({
+          error: "This card was filed by a person, so items cannot be added to it. File a new card instead.",
+        });
+        return;
+      }
+      if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
+        res.status(403).json({
+          error: "Only the agent that filed this card, or the board, can add items to it.",
+        });
+        return;
+      }
       if (existingPayload.allowBackwardDeploy === true) {
         res.status(422).json({ error: "Items cannot be added to a rollback card." });
         return;
@@ -3042,11 +3063,12 @@ export function approvalRoutes(
       for (const key of Object.keys(deployRequestPayloadSchema.shape)) {
         if (key in existingPayload) filerFields[key] = existingPayload[key];
       }
+      const previousRevision = readDeployCardRevision(existingPayload);
       const prepared = await prepareDeployPayload(db, req, existing.companyId, {
         ...filerFields,
         commit: body.commit,
         items,
-      });
+      }, previousRevision);
       // Keep anything else the card carries (links to related cards, the issues it was filed
       // for); the freshly checked deploy fields win. Stamps that no longer apply drop out.
       const nextPayload: Record<string, unknown> = { ...existingPayload, ...prepared };
@@ -3054,7 +3076,7 @@ export function approvalRoutes(
         if (value === undefined) delete nextPayload[key];
       }
 
-      const approval = await svc.addDeployItems(id, nextPayload);
+      const approval = await svc.addDeployItems(id, nextPayload, previousRevision);
       const actor = getActorInfo(req);
       if (uniqueIssueIds.length > 0) {
         await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
@@ -3120,7 +3142,13 @@ export function approvalRoutes(
     }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
-      req.body.payload = await prepareDeployPayload(db, req, existing.companyId, req.body.payload);
+      req.body.payload = await prepareDeployPayload(
+        db,
+        req,
+        existing.companyId,
+        req.body.payload,
+        readDeployCardRevision(existing.payload),
+      );
     }
     if (
       isOperatorActionApproval(existing.type, existing.payload) &&

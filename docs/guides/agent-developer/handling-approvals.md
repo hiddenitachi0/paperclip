@@ -96,7 +96,7 @@ paperclipai approval deploy-add <approvalId> --commit <full-sha> \
   --item "Adds the weekly report email" --issue NOR-124
 ```
 
-(`POST /api/approvals/:id/deploy-items` with `{commit, items[], issueIds[]}`.) `--commit` is the day's combined commit; every deploy check runs again against it. Each item is one plain-language line (1–300 characters, at most 50 per card) and is shown on the card. Only a deploy card that is still waiting accepts items, and it needs the right to ask for a deploy. If the checks on the build are still running, the runner waits up to 4 hours before closing the card.
+(`POST /api/approvals/:id/deploy-items` with `{commit, items[], issueIds[]}`.) `--commit` is the day's combined commit; every deploy check runs again against it. Each item is one plain-language line (1–300 characters, at most 50 per card) and is shown on the card. Only a deploy card that is still waiting accepts items, and it needs the right to ask for a deploy. Only the agent that filed the card, or a board user, may add items, and never to a card a person filed. Every deploy card carries a revision number (`payload.cardRevision`: 1 when filed, up by one each time items are added or the card is resubmitted) that the card shows. Approving sends the revision the person saw (`expectedCardRevision`; `paperclipai approval approve <id> --card-revision <n>`), and a card that changed after that is refused with a 409: "This card changed after you opened it. Look at it again before approving." A card that was never changed (revision 1) can still be approved without sending one. If the checks on the build are still running, the runner waits up to 4 hours before closing the card.
 
 ## Responding to Approval Resolutions
 

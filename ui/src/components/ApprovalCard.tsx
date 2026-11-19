@@ -11,6 +11,7 @@ import {
   approvalTechnicalReference,
   approvalDeployBranchInfo,
   approvalDeployChangeSummaryText,
+  DeployCardRevision,
   DeployItemsList,
   approvalDeployTargetCommitText,
   approvalIsRollbackDeploy,
@@ -210,6 +211,7 @@ export function ApprovalCard({
                   <p className="text-xs leading-5 text-muted-foreground">{deployChangeSummary}</p>
                 )}
                 <DeployItemsList payload={payload} className="pt-1" maxVisible={5} />
+                <DeployCardRevision payload={payload} />
               </div>
             </div>
           </div>

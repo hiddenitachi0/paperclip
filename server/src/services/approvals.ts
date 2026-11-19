@@ -194,6 +194,21 @@ export interface ApprovalDecisionOptions {
    * refused here -- see APPROVAL_CARD_ONLY below.
    */
   decidedOnApprovalCard?: boolean;
+  /**
+   * The deploy card revision (`payload.cardRevision`) the approver was looking at. A deploy
+   * card that has changed since (items added) is refused with a 409 instead of approved.
+   */
+  expectedCardRevision?: number;
+}
+
+export const DEPLOY_CARD_CHANGED_MESSAGE =
+  "This card changed after you opened it. Look at it again before approving.";
+
+/** The card's revision stamp, or null for a card that has none (filed before revisions existed). */
+export function readDeployCardRevision(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null;
+  const value = (payload as Record<string, unknown>).cardRevision;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
 }
 
 /**
@@ -303,6 +318,25 @@ export function approvalService(db: Db) {
         kind: (existing.payload as Record<string, unknown> | null)?.kind,
       });
     }
+    // A deploy card that changed after the approver opened it is refused: they would be approving
+    // a version they never saw. A card that was never changed (revision 1) needs no revision
+    // from the caller; a changed one must be approved with the revision the caller saw.
+    let requiredCardRevision: number | null = null;
+    if (targetStatus === "approved" && existing.type === "request_board_approval") {
+      const existingPayload = (existing.payload ?? {}) as Record<string, unknown>;
+      if (existingPayload.kind === "deploy") {
+        requiredCardRevision = readDeployCardRevision(existingPayload);
+        if (requiredCardRevision !== null) {
+          const expected = options.expectedCardRevision;
+          if (expected === undefined ? requiredCardRevision > 1 : expected !== requiredCardRevision) {
+            throw conflict(DEPLOY_CARD_CHANGED_MESSAGE, {
+              code: "deploy_card_changed",
+              cardRevision: requiredCardRevision,
+            });
+          }
+        }
+      }
+    }
     if (targetStatus === "approved") {
       await assertSecurityReviewClearedOrBypassed(existing, options);
     }
@@ -347,7 +381,17 @@ export function approvalService(db: Db) {
         decidedAt: now,
         updatedAt: now,
       })
-      .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+      .where(
+        and(
+          eq(approvals.id, id),
+          inArray(approvals.status, resolvableStatuses),
+          // The card must still be at the revision that was checked above, so an add-items
+          // landing between the check and this write cannot be approved unseen.
+          requiredCardRevision !== null
+            ? sql`(${approvals.payload} ->> 'cardRevision') = ${String(requiredCardRevision)}`
+            : undefined,
+        ),
+      )
       .returning()
       .then((rows) => rows[0] ?? null);
 
@@ -358,6 +402,12 @@ export function approvalService(db: Db) {
     const latest = await getExistingApproval(id);
     if (latest.status === targetStatus) {
       return { approval: latest, applied: false };
+    }
+    if (requiredCardRevision !== null && canResolveStatuses.has(latest.status)) {
+      throw conflict(DEPLOY_CARD_CHANGED_MESSAGE, {
+        code: "deploy_card_changed",
+        cardRevision: readDeployCardRevision(latest.payload),
+      });
     }
 
     throw unprocessable(
@@ -1024,16 +1074,26 @@ export function approvalService(db: Db) {
      * operator approved or rejected at the same moment is never changed -- the caller gets a
      * conflict and nothing is written.
      */
-    addDeployItems: async (id: string, payload: Record<string, unknown>) => {
+    addDeployItems: async (id: string, payload: Record<string, unknown>, fromRevision: number | null = null) => {
       const updated = await db
         .update(approvals)
         .set({ payload, updatedAt: new Date() })
-        .where(and(eq(approvals.id, id), eq(approvals.status, "pending")))
+        .where(
+          and(
+            eq(approvals.id, id),
+            eq(approvals.status, "pending"),
+            // Only from the revision the caller read, so two adds at once cannot overwrite
+            // each other's items.
+            fromRevision !== null
+              ? sql`(${approvals.payload} ->> 'cardRevision') = ${String(fromRevision)}`
+              : sql`(${approvals.payload} ->> 'cardRevision') IS NULL`,
+          ),
+        )
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) {
         throw conflict(
-          "This deploy card was decided just now, so nothing was added to it. Check the card, then file a new one if needed.",
+          "This deploy card was decided or changed just now, so nothing was added to it. Look at the card again, then add your items if it is still waiting.",
         );
       }
       return updated;

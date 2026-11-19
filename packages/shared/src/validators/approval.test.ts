@@ -244,4 +244,13 @@ describe("deploy card items (one deploy card per day)", () => {
       addDeployItemsSchema.parse({ commit: "a".repeat(40), items: [{ summary: "x" }], issueIds: ["NOR-1"] }),
     ).toThrow();
   });
+
+  it("takes a card revision on the payload and on approve, and only a whole number from 1", () => {
+    expect(deployRequestPayloadSchema.parse({ ...basePayload, cardRevision: 2 }).cardRevision).toBe(2);
+    expect(() => deployRequestPayloadSchema.parse({ ...basePayload, cardRevision: 0 })).toThrow();
+    expect(resolveApprovalSchema.parse({ expectedCardRevision: 3 }).expectedCardRevision).toBe(3);
+    expect(resolveApprovalSchema.parse({}).expectedCardRevision).toBeUndefined();
+    expect(() => resolveApprovalSchema.parse({ expectedCardRevision: 1.5 })).toThrow();
+    expect(() => resolveApprovalSchema.parse({ expectedCardRevision: 0 })).toThrow();
+  });
 });

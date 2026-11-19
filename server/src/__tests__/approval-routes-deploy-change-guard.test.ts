@@ -656,6 +656,22 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
   );
 
   it(
+    "stamps revision 1 on a new card, whatever revision the filer wrote",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send(deployBody({ cardRevision: 99 }));
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create.mock.calls[0]?.[1]?.payload?.cardRevision).toBe(1);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     "says nothing about what would change when the card pins no commit",
     async () => {
       // DUR-3964: only the board may file without a commit; there is then
@@ -685,9 +701,11 @@ describe("One deploy card per day: adding items to a card that is still waiting"
     type: "request_board_approval",
     status: "pending",
     companyId: COMPANY_ID,
-    requestedByAgentId: "agent-2",
+    requestedByAgentId: "agent-1",
+    requestedByUserId: null,
     payload: {
       kind: "deploy",
+      cardRevision: 1,
       projectId: PROJECT_ID,
       workspaceId: WORKSPACE_ID,
       commit: "cccccccccccccccccccccccccccccccccccccccc",
@@ -841,6 +859,86 @@ describe("One deploy card per day: adding items to a card that is still waiting"
       expect(res.status).toBe(409);
       expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
       expect(mockLogActivity).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "stamps the next revision number on the card, ignoring whatever the filer wrote",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      mockApprovalService.getById.mockResolvedValue({
+        ...PENDING_CARD,
+        payload: { ...PENDING_CARD.payload, cardRevision: 4 },
+      });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(200);
+      const [, stored, fromRevision] = mockApprovalService.addDeployItems.mock.calls[0] as [string, any, number | null];
+      expect(stored.cardRevision).toBe(5);
+      // The write only lands if the card is still at the revision that was read.
+      expect(fromRevision).toBe(4);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses another agent: only the agent that filed the card may add to it",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, requestedByAgentId: "agent-2" });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(403);
+      expect(messageOf(res)).toMatch(/only the agent that filed this card/i);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+      expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses a card a person filed, even from the agent named on it",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, requestedByUserId: "user-9" });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(403);
+      expect(messageOf(res)).toMatch(/filed by a person/i);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses a card a person filed, from a board user too",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, requestedByUserId: "user-9" });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(403);
+      expect(mockApprovalService.addDeployItems).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "lets a board user add to a card an agent filed",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(200);
+      expect(mockApprovalService.addDeployItems).toHaveBeenCalledTimes(1);
     },
     TEST_TIMEOUT,
   );

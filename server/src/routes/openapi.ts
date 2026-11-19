@@ -2868,7 +2868,7 @@ registry.registerPath({
   method: "post",
   path: "/api/approvals/{id}/deploy-items",
   tags: ["approvals"],
-  summary: "Add finished items (and the new combined commit) to a deploy card that is still waiting",
+  summary: "Add finished items (and the new combined commit) to a deploy card that is still waiting. Only the agent that filed the card, or the board, may do this, and never on a card a person filed. Raises payload.cardRevision.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(addDeployItemsSchema),

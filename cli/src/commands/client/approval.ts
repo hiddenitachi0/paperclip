@@ -25,9 +25,19 @@ interface ApprovalListOptions extends BaseClientOptions {
   status?: string;
 }
 
+function parseCardRevisionOption(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error("--card-revision must be a whole number of 1 or more (the revision shown on the card).");
+  }
+  return value;
+}
+
 interface ApprovalDecisionOptions extends BaseClientOptions {
   decisionNote?: string;
   decidedByUserId?: string;
+  cardRevision?: string;
 }
 
 interface ApprovalCreateOptions extends BaseClientOptions {
@@ -224,12 +234,18 @@ export function registerApprovalCommands(program: Command): void {
       .argument("<approvalId>", "Approval ID")
       .option("--decision-note <text>", "Decision note")
       .option("--decided-by-user-id <id>", "Decision actor user ID")
+      .option(
+        "--card-revision <n>",
+        "Deploy cards: the revision number shown on the card (payload.cardRevision, see `approval get`). " +
+          "Approval is refused if the card changed after you looked at it. Required for a card that has been changed since it was filed.",
+      )
       .action(async (approvalId: string, opts: ApprovalDecisionOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
           const payload = resolveApprovalSchema.parse({
             decisionNote: opts.decisionNote,
             decidedByUserId: opts.decidedByUserId,
+            expectedCardRevision: parseCardRevisionOption(opts.cardRevision),
           });
           const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/approve`, payload);
           printOutput(updated, { json: ctx.json });

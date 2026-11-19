@@ -32,6 +32,10 @@ export const resolveApprovalSchema = z.object({
       reason: multilineTextSchema.pipe(z.string().trim().min(1)),
     })
     .optional(),
+  // Deploy cards: the revision number the person was looking at (`payload.cardRevision`).
+  // Approving a deploy card whose revision has moved on since is refused, so nobody approves
+  // a version of the card they never saw. Only used by /approve for kind "deploy".
+  expectedCardRevision: z.number().int().min(1).optional(),
 });
 
 export type ResolveApproval = z.infer<typeof resolveApprovalSchema>;
@@ -209,6 +213,11 @@ export const deployRequestPayloadSchema = z
     // line each. Filers may supply it when filing; more can be added to a card
     // that is still waiting via POST /api/approvals/:id/deploy-items.
     items: z.array(deployCardItemSchema).max(DEPLOY_CARD_ITEMS_MAX).optional(),
+    // Revision number of the card: 1 when filed, up by one every time the card changes
+    // (items added, resubmitted). Always stamped server-side (a filer's value is replaced),
+    // shown on the card, and sent back on approve so a card that changed after the person
+    // opened it is refused instead of approved unseen.
+    cardRevision: z.number().int().min(1).optional(),
   })
   .strict();
 

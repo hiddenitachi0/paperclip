@@ -16,6 +16,7 @@ import {
   approvalDeployBranchInfo,
   approvalDeployChangeSummaryText,
   approvalDeployItems,
+  DeployCardRevision,
   DeployItemsList,
   approvalDeployTargetCommitText,
   approvalDuplicateKey,
@@ -930,6 +931,36 @@ describe("deploy card items (one deploy card per day)", () => {
     });
     expect(container.querySelectorAll("li")).toHaveLength(5);
     expect(container.textContent).toContain("…and 2 more. Open the card to see all of them.");
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("shows the card revision on the full card, and says when the card has changed since it was filed", () => {
+    const render = (extra: Record<string, unknown>) => {
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(<ApprovalPayloadRenderer type="request_board_approval" payload={{ ...payload, ...extra }} />);
+      });
+      const text = container.querySelector('[data-testid="deploy-card-revision"]')?.textContent ?? null;
+      act(() => root.unmount());
+      container.remove();
+      return text;
+    };
+    expect(render({ cardRevision: 1 })).toBe("Card revision 1");
+    expect(render({ cardRevision: 3 })).toBe("Card revision 3 — changed since it was first filed.");
+    expect(render({})).toBeNull();
+  });
+
+  it("shows no revision for anything that is not a deploy card", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<DeployCardRevision payload={{ kind: "merge_pr", cardRevision: 2 }} />);
+    });
+    expect(container.textContent).toBe("");
     act(() => root.unmount());
     container.remove();
   });
