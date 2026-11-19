@@ -17,7 +17,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
-import { evaluateDoneEvidenceGate, extractAcceptanceCriteriaPaths } from "./done-evidence-gate.js";
+import { evaluateDoneEvidenceGate, extractAcceptanceCriteriaPaths, hasRecentIdenticalNote } from "./done-evidence-gate.js";
 
 const SHA = "1".repeat(40);
 const SHA_B = "2".repeat(40);
@@ -64,6 +64,35 @@ describe("extractAcceptanceCriteriaPaths", () => {
     expect(paths("## Acceptance Criteria\nSee `./server/src/a.ts:42`, and (docs/b.md).")).toEqual(["server/src/a.ts", "docs/b.md"]);
   });
 
+  it("does not turn routes, branch-like names, content types or packages into required files beyond what the repo check can drop", () => {
+    const description = [
+      "## Acceptance Criteria",
+      "- `GET /issues/:id` answers and `/DUR/dashboard/now` renders",
+      "- sends `application/json` from `@paperclipai/shared` (see `paperclipai/paperclip`)",
+      "- merged to `origin/custom` and `feat/x`",
+    ].join("\n");
+    const found = extractAcceptanceCriteriaPaths(description);
+    // Routes, scoped packages and the content-type-with-colon style tokens never become paths ...
+    expect(found.map((p) => p.path)).not.toContain("issues/:id");
+    expect(found.map((p) => p.path)).not.toContain("DUR/dashboard/now");
+    expect(found.map((p) => p.path)).not.toContain("@paperclipai/shared");
+    // ... and the folder-like leftovers are flagged as folders, which the gate drops when they do not exist.
+    expect(found.every((p) => p.dir)).toBe(true);
+  });
+
+  it("strips a trailing slash, reads markdown link targets, and skips lines that say what must not change", () => {
+    const description = [
+      "## Acceptance Criteria",
+      "- the folder `ui/src/` is updated",
+      "- documented in [the guide](docs/a.md)",
+      "- Do not change `package.json` and leave `server/src/keep.ts` unchanged",
+    ].join("\n");
+    expect(extractAcceptanceCriteriaPaths(description)).toEqual([
+      { path: "docs/a.md", dir: false },
+      { path: "ui/src", dir: true },
+    ]);
+  });
+
   it("returns nothing when there is no Acceptance Criteria section", () => {
     expect(paths("Fix `server/src/a.ts` please.")).toEqual([]);
     expect(paths("")).toEqual([]);
@@ -79,23 +108,63 @@ if (!embeddedPostgresSupport.supported) {
   );
 }
 
-type CommitFixture = { files: string[]; ci?: { runs?: Array<{ name: string; status: string; conclusion: string | null }>; status?: unknown } };
+type CiFixture = { runs?: Array<{ name: string; status: string; conclusion: string | null }>; status?: unknown };
+type CommitFixture = {
+  files: string[];
+  ci?: CiFixture;
+  /** parent shas; two parents = a merge commit (the second is the pull request head) */
+  parents?: string[];
+  committedAt?: string;
+  message?: string;
+  /** false = on GitHub but not on the project's branch (a fork-only or stray-branch commit) */
+  onBranch?: boolean;
+  /** paths that exist in the repo at this commit besides its files */
+  contents?: string[];
+};
 
-/** GitHub stub: /commits/{sha} (200 only for known shas), /commits/{sha}/status, /commits/{sha}/check-runs. */
-function githubStub(commits: Record<string, CommitFixture>) {
+/**
+ * GitHub stub: /commits/{sha} (200 only for known shas), /commits/{sha}/status and /check-runs,
+ * /compare/{branch}...{sha} and /contents/{path}. `extraCi` serves checks for shas that are not
+ * commits of their own (a pull request head).
+ */
+function githubStub(commits: Record<string, CommitFixture>, extraCi: Record<string, CiFixture> = {}) {
   return vi.fn(async (url: string, _init?: RequestInit) => {
-    const match = new URL(url).pathname.match(/\/commits\/([0-9a-f]+)(\/status|\/check-runs)?$/);
+    const parsed = new URL(url);
+    const compare = parsed.pathname.match(/\/compare\/.+\.\.\.([0-9a-f]+)$/);
+    if (compare) {
+      const fixture = commits[compare[1]!];
+      if (!fixture) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify({ status: fixture.onBranch === false ? "ahead" : "behind" }), { status: 200 });
+    }
+    const contents = parsed.pathname.match(/\/contents\/(.+)$/);
+    if (contents) {
+      const wanted = decodeURIComponent(contents[1]!);
+      const ref = parsed.searchParams.get("ref") ?? "";
+      const fixture = commits[ref];
+      const exists = Boolean(fixture && (fixture.contents ?? []).some((path) => path === wanted || path.startsWith(`${wanted}/`)));
+      return new Response(exists ? "{}" : "not found", { status: exists ? 200 : 404 });
+    }
+    const match = parsed.pathname.match(/\/commits\/([0-9a-f]+)(\/status|\/check-runs)?$/);
     const sha = match?.[1];
     const fixture = sha ? commits[sha] : undefined;
-    if (!sha || !fixture) return new Response("not found", { status: 404 });
+    const ci = sha ? (fixture?.ci ?? extraCi[sha]) : undefined;
+    if (!sha || (!fixture && !extraCi[sha])) return new Response("not found", { status: 404 });
     if (match![2] === "/status") {
-      return new Response(JSON.stringify(fixture.ci?.status ?? { state: "pending", total_count: 0, statuses: [] }), { status: 200 });
+      return new Response(JSON.stringify(ci?.status ?? { state: "pending", total_count: 0, statuses: [] }), { status: 200 });
     }
     if (match![2] === "/check-runs") {
-      const runs = fixture.ci?.runs ?? [];
+      const runs = ci?.runs ?? [];
       return new Response(JSON.stringify({ total_count: runs.length, check_runs: runs }), { status: 200 });
     }
-    return new Response(JSON.stringify({ sha, files: fixture.files.map((filename) => ({ filename })) }), { status: 200 });
+    return new Response(
+      JSON.stringify({
+        sha,
+        parents: (fixture!.parents ?? []).map((parent) => ({ sha: parent })),
+        commit: { message: fixture!.message ?? "A change", committer: { date: fixture!.committedAt ?? new Date().toISOString() } },
+        files: fixture!.files.map((filename) => ({ filename })),
+      }),
+      { status: 200 },
+    );
   });
 }
 
@@ -131,6 +200,7 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
     mode?: "off" | "report" | "enforce" | null;
     repoUrl?: string | null;
     description?: string;
+    createdAt?: Date;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -157,6 +227,7 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
         name: "main",
         sourceType: "git_repo",
         repoUrl: input.repoUrl ?? "https://github.com/acme/widgets",
+        repoRef: "custom",
         isPrimary: true,
       });
     }
@@ -172,26 +243,42 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
       assigneeAgentId: agentId,
       issueNumber: 1,
       identifier: `${issuePrefix}-1`,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     });
     if (input.mode !== null) {
       await db.insert(companyQualityLoopSettings).values({ companyId, doneEvidenceMode: input.mode ?? "enforce" });
     }
-    return { companyId, agentId, projectId, issueId, description };
+    return { companyId, agentId, projectId, issueId, description, identifier: `${issuePrefix}-1`, createdAt: input.createdAt ?? new Date() };
   }
 
   function agentDone(
     seeded: Awaited<ReturnType<typeof seed>>,
     fetchImpl: ReturnType<typeof githubStub>,
-    overrides: { note?: string | null; actorType?: string; requestedStatus?: string } = {},
+    overrides: {
+      note?: string | null;
+      actorType?: string;
+      requestedStatus?: string;
+      token?: string | null;
+      otherNoteAgentIds?: string[];
+      actorAgentId?: string;
+    } = {},
   ) {
     return evaluateDoneEvidenceGate({
       db,
-      issue: { id: seeded.issueId, identifier: "T-1", companyId: seeded.companyId, projectId: seeded.projectId, description: seeded.description },
-      actor: { actorType: overrides.actorType ?? "agent", agentId: overrides.actorType === "user" ? null : seeded.agentId, runId: randomUUID() },
+      issue: {
+        id: seeded.issueId,
+        identifier: seeded.identifier,
+        companyId: seeded.companyId,
+        projectId: seeded.projectId,
+        description: seeded.description,
+        createdAt: seeded.createdAt,
+      },
+      otherNoteAgentIds: overrides.otherNoteAgentIds,
+      actor: { actorType: overrides.actorType ?? "agent", agentId: overrides.actorType === "user" ? null : (overrides.actorAgentId ?? seeded.agentId), runId: randomUUID() },
       requestedStatus: overrides.requestedStatus ?? "done",
       currentStatus: "in_progress",
       patchComment: overrides.note === undefined ? `Done in commit ${SHA}.` : overrides.note,
-      deps: { fetchImpl, getGitHubToken: async () => "ghp_test" },
+      deps: { fetchImpl, getGitHubToken: async () => (overrides.token === undefined ? "ghp_test" : overrides.token) },
     });
   }
 
@@ -359,5 +446,119 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
     expect(await agentDone(await seed({ repoUrl: null }), fetchImpl)).toBeNull();
     expect(await agentDone(await seed({ repoUrl: "https://gitlab.com/acme/widgets" }), fetchImpl)).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("treats a folder-like name that does not exist in the repository as not a file (a branch, a content type)", async () => {
+    const seeded = await seed({
+      description: "## Acceptance Criteria\n- `docs/x.md` is updated and merged to `origin/custom` as `application/json`\n",
+    });
+    const fetchImpl = githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN } });
+    expect(await agentDone(seeded, fetchImpl)).toBeNull();
+  });
+
+  it("still requires a folder that does exist in the repository to be touched", async () => {
+    const seeded = await seed({ description: "## Acceptance Criteria\n- `ui/src/components` is updated\n" });
+    const untouched = githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN, contents: ["ui/src/components/A.tsx"] } });
+    expect(await agentDone(seeded, untouched)).toMatchObject({ reason: "files_not_touched" });
+    const touched = githubStub({ [SHA]: { files: ["ui/src/components/A.tsx"], ci: GREEN, contents: ["ui/src/components/A.tsx"] } });
+    expect(await agentDone(seeded, touched)).toBeNull();
+  });
+
+  it("refuses a commit that is on GitHub but not on the project's branch (fork-only or stray branch)", async () => {
+    const seeded = await seed({});
+    const result = await agentDone(seeded, githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN, onBranch: false } }));
+    expect(result).toMatchObject({ refuse: true, reason: "not_on_branch" });
+    expect(result!.message).toBe(
+      "Not done yet: commit 1111111 is on GitHub but not on custom yet. Merge it, then name the commit that is on custom.",
+    );
+  });
+
+  it("for a merge commit also needs the pull request head (second parent) green", async () => {
+    const seeded = await seed({});
+    const HEAD = "3".repeat(40);
+    const lockfileOnly = { runs: [{ name: "refresh", status: "completed", conclusion: "success" }] };
+    const red = { runs: [{ name: "General tests", status: "completed", conclusion: "failure" }] };
+    const base = { files: ["docs/x.md"], ci: lockfileOnly, parents: ["4".repeat(40), HEAD] };
+    const failing = await agentDone(seeded, githubStub({ [SHA]: base }, { [HEAD]: red }));
+    expect(failing).toMatchObject({ refuse: true, reason: "checks_failed" });
+    expect(failing!.message).toBe("Not done yet: the checks for 3333333 (the pull request behind 1111111) failed: General tests.");
+    expect(await agentDone(seeded, githubStub({ [SHA]: base }, { [HEAD]: GREEN }))).toBeNull();
+    // A merge commit with no checks of its own is fine when the pull request head is green.
+    expect(await agentDone(seeded, githubStub({ [SHA]: { ...base, ci: undefined } }, { [HEAD]: GREEN }))).toBeNull();
+    // ... but a pull request head with no result is not a pass.
+    expect(await agentDone(seeded, githubStub({ [SHA]: base }, { [HEAD]: {} }))).toMatchObject({ reason: "no_check_result" });
+  });
+
+  it("says Paperclip has no GitHub access when there is no token and GitHub answers 404", async () => {
+    const seeded = await seed({});
+    const result = await agentDone(seeded, githubStub({}), { token: null });
+    expect(result).toMatchObject({ refuse: true, reason: "no_github_access" });
+    expect(result!.message).toContain("Paperclip has no GitHub access for this company");
+    expect(result!.message).not.toContain("not on GitHub");
+  });
+
+  it("treats 401, 403 and 429 as GitHub could not be reached, never as not pushed", async () => {
+    const seeded = await seed({});
+    for (const status of [401, 403, 429]) {
+      const denied = vi.fn(async (_url: string, _init?: RequestInit) => new Response("no", { status }));
+      const result = await agentDone(seeded, denied as unknown as ReturnType<typeof githubStub>);
+      expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
+    }
+  });
+
+  it("with no files named, refuses a commit older than the task unless it mentions the task", async () => {
+    const seeded = await seed({ description: "## Acceptance Criteria\n- it works\n", createdAt: new Date() });
+    const old = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    const stale = await agentDone(seeded, githubStub({ [SHA]: { files: ["a.ts"], ci: GREEN, committedAt: old } }));
+    expect(stale).toMatchObject({ refuse: true, reason: "commit_not_new" });
+    expect(stale!.message).toContain(`does not mention ${seeded.identifier}`);
+    const mentioned = githubStub({ [SHA]: { files: ["a.ts"], ci: GREEN, committedAt: old, message: `Fix the thing (${seeded.identifier})` } });
+    expect(await agentDone(seeded, mentioned)).toBeNull();
+  });
+
+  it("reads the worker's done note when someone else approves (the review stage's return assignee)", async () => {
+    const seeded = await seed({});
+    const reviewerId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerId,
+      companyId: seeded.companyId,
+      name: "Reviewer",
+      role: "reviewer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issueComments).values({
+      companyId: seeded.companyId,
+      issueId: seeded.issueId,
+      authorAgentId: seeded.agentId,
+      body: `Finished: merged in commit ${SHA}.`,
+    });
+    const fetchImpl = githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN } });
+    // The reviewer approves with a comment that names no commit ...
+    const without = await agentDone(seeded, fetchImpl, { actorAgentId: reviewerId, note: "## Review: APPROVED" });
+    expect(without).toMatchObject({ reason: "no_commit" });
+    // ... and once the worker (the return assignee) is named, the worker's note is read.
+    const withWorker = await agentDone(seeded, fetchImpl, {
+      actorAgentId: reviewerId,
+      note: "## Review: APPROVED",
+      otherNoteAgentIds: [reviewerId, seeded.agentId],
+    });
+    expect(withWorker).toBeNull();
+  });
+
+  it("recognises a refusal that was already posted a few minutes ago", async () => {
+    const seeded = await seed({});
+    const body = "Not done yet: commit 1111111 is not on GitHub. Push the work and name the commit that is there.";
+    expect(await hasRecentIdenticalNote(db, { companyId: seeded.companyId, issueId: seeded.issueId, body })).toBe(false);
+    await db.insert(issueComments).values({ companyId: seeded.companyId, issueId: seeded.issueId, body, authorType: "system" });
+    expect(await hasRecentIdenticalNote(db, { companyId: seeded.companyId, issueId: seeded.issueId, body })).toBe(true);
+    expect(await hasRecentIdenticalNote(db, { companyId: seeded.companyId, issueId: seeded.issueId, body: `${body} (different)` })).toBe(false);
+    // Long after, the same words may be said again.
+    expect(
+      await hasRecentIdenticalNote(db, { companyId: seeded.companyId, issueId: seeded.issueId, body, now: new Date(Date.now() + 3600_000) }),
+    ).toBe(false);
   });
 });

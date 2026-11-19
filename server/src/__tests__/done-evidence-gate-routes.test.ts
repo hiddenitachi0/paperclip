@@ -66,6 +66,7 @@ const mockGetGeneral = vi.hoisted(() =>
 const mockEvaluateDoneGateCritic = vi.hoisted(() => vi.fn(async (_input: unknown) => null as unknown));
 const mockEvaluateOriginCommitDoneGate = vi.hoisted(() => vi.fn(async (_input: unknown) => null as unknown));
 const mockEvaluateDoneEvidenceGate = vi.hoisted(() => vi.fn(async (_input: unknown) => null as unknown));
+const mockHasRecentIdenticalNote = vi.hoisted(() => vi.fn(async (_db: unknown, _input: unknown) => false));
 
 vi.mock("../services/issue-approvals.js", () => ({
   issueApprovalService: () => mockIssueApprovalService,
@@ -88,6 +89,7 @@ vi.mock("../services/origin-commit-gate.js", () => ({
 }));
 vi.mock("../services/done-evidence-gate.js", () => ({
   evaluateDoneEvidenceGate: (input: unknown) => mockEvaluateDoneEvidenceGate(input),
+  hasRecentIdenticalNote: (db: unknown, input: unknown) => mockHasRecentIdenticalNote(db, input),
 }));
 
 function registerModuleMocks() {
@@ -222,6 +224,7 @@ describe("PATCH /api/issues/:id -- done-evidence gate wiring (DUR-5179)", () => 
     mockEvaluateDoneGateCritic.mockResolvedValue(null);
     mockEvaluateOriginCommitDoneGate.mockResolvedValue(null);
     mockEvaluateDoneEvidenceGate.mockResolvedValue(null);
+    mockHasRecentIdenticalNote.mockResolvedValue(false);
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockAccessService.canUser.mockResolvedValue(false);
@@ -299,6 +302,43 @@ describe("PATCH /api/issues/:id -- done-evidence gate wiring (DUR-5179)", () => 
       {},
       { authorType: "system" },
     );
+  });
+
+  it("does not post the same refusal twice in a row, but still answers 409", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
+    mockEvaluateDoneEvidenceGate.mockResolvedValue(REFUSAL);
+    mockHasRecentIdenticalNote.mockResolvedValue(true);
+
+    const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("done_evidence_missing");
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHasRecentIdenticalNote).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ issueId: ISSUE_ID, body: REFUSAL.message }),
+    );
+  });
+
+  it("gates the status AFTER the review policy: a worker whose done only moves the task to review is not gated as done", async () => {
+    const REVIEWER_ID = "44444444-4444-4444-8444-444444444444";
+    mockIssueService.getById.mockResolvedValue(
+      baseIssue({
+        status: "in_progress",
+        executionPolicy: {
+          mode: "normal",
+          commentRequired: false,
+          stages: [{ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", type: "review", approvalsNeeded: 1, participants: [{ id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "agent", agentId: REVIEWER_ID }] }],
+        },
+      }),
+    );
+
+    await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done", comment: "Ready for review." });
+
+    expect(mockEvaluateDoneEvidenceGate).toHaveBeenCalledTimes(1);
+    const input = mockEvaluateDoneEvidenceGate.mock.calls[0]![0] as Record<string, any>;
+    // The review stage turned the requested done into in_review before the gate looked at it.
+    expect(input.requestedStatus).toBe("in_review");
   });
 
   it("lets done through silently when the gate passes or does not apply", async () => {

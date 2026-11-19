@@ -164,6 +164,7 @@ vi.mock("../services/instance-settings.js", () => ({
 const mockEvaluateDoneEvidenceGate = vi.hoisted(() => vi.fn(async (_input: unknown) => null as unknown));
 vi.mock("../services/done-evidence-gate.js", () => ({
   evaluateDoneEvidenceGate: (input: unknown) => mockEvaluateDoneEvidenceGate(input),
+  hasRecentIdenticalNote: async () => false,
 }));
 
 vi.mock("../services/issues.js", () => ({
@@ -2088,8 +2089,9 @@ describe.sequential("issue comment reopen routes", () => {
     const input = mockEvaluateDoneEvidenceGate.mock.calls[0]![0] as Record<string, any>;
     expect(input.actor).toMatchObject({ actorType: "agent", agentId: reviewerAgentId });
     expect(input.requestedStatus).toBe("done");
-    // The gate is told whose done notes to read besides the approver's own comment.
-    expect(input.otherNoteAgentIds).toEqual([issue.assigneeAgentId]);
+    // During a review stage the assignee is the reviewer; the worker's done note (where the
+    // commit was named) lives with the agent the task returns to. Both are handed to the gate.
+    expect(input.otherNoteAgentIds).toEqual([reviewerAgentId, workerAgentId]);
   });
 
   it("never runs the done-evidence gate for a board user's approval comment (DUR-5179)", async () => {
