@@ -31,6 +31,11 @@
 #                           reported as KNOWN_GAP and do not fail the probe.
 #   PROBE_REPORT            also write the report to this file.
 #   PROBE_OTHER_COMPANY_DIR a folder that belongs to ANOTHER company (stage 5).
+#   PROBE_ONLY_STAGE        set to 7 to run only stage 7 (host control). Used by
+#                           the unit test; the acceptance run leaves it unset.
+#   PROBE_DB_DEFAULT_LOGIN_ENFORCED  set to 1 once the Paperclip database owner
+#                           password has been rotated: a working default login
+#                           then counts as a LEAK instead of a KNOWN_GAP.
 #   PAPERCLIP_HOME          defaults to /paperclip.
 #
 # Exit status: 1 if any LEAK, else 0.
@@ -63,6 +68,11 @@ found() { # stage check path-or-name
     *" $1 "*) LEAKS=$((LEAKS + 1)); emit "LEAK $1 $2 $3" ;;
     *) GAPS=$((GAPS + 1)); emit "KNOWN_GAP $1 $2 $3" ;;
   esac
+}
+
+gap() { # stage check detail -- a known gap that never fails the probe
+  GAPS=$((GAPS + 1))
+  emit "KNOWN_GAP $1 $2 $3"
 }
 
 broken() { # stage check detail -- the probe cannot do this check; always fails
@@ -99,6 +109,121 @@ find_server_pid() {
 
 # Does the file contain the marker? Never prints the match.
 file_has_marker() { grep -qaF -f "$PATTERN_FILE" "$1" 2>/dev/null; }
+
+
+# --- Stage 7: host control (DUR-5182) ---------------------------------------
+# An agent must not be able to take control of the machine it runs on: no way
+# to talk to Docker, no private SSH keys, no write access to the host's
+# folders. Privileged steps (deploy, set a setting, recreate) go only through
+# the approved on-box runner. These checks only LOOK; nothing is written.
+#
+# Test overrides (never set in production):
+#   PROBE_MOUNTINFO        defaults to /proc/self/mountinfo
+#   PROBE_SSH_DIRS         folders to scan for private keys
+#   PROBE_DOCKER_SOCKETS   socket paths to look for
+#   PROBE_DB_HOST          defaults to db
+#   PROBE_DB_PORT          defaults to 5432
+stage7_host_control() {
+  # 7.1 Docker: no socket, no DOCKER_HOST, no docker command.
+  docker_clean=1
+  if [ -n "${DOCKER_HOST:-}" ]; then
+    found 7 docker-host "DOCKER_HOST"
+    docker_clean=0
+  fi
+  for sock in ${PROBE_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /var/run/podman/podman.sock /run/podman/podman.sock}; do
+    if [ -S "$sock" ] || [ -e "$sock" ]; then
+      found 7 docker-socket "$sock"
+      docker_clean=0
+    fi
+  done
+  if command -v docker >/dev/null 2>&1; then
+    found 7 docker-cli "$(command -v docker)"
+    docker_clean=0
+  fi
+  [ "$docker_clean" = 1 ] && pass 7 docker "no-socket-no-host-no-cli"
+
+  # 7.2 SSH: no private key an agent can read, and no forwarded SSH agent.
+  ssh_clean=1
+  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    found 7 ssh-agent "SSH_AUTH_SOCK"
+    ssh_clean=0
+  fi
+  for dir in ${PROBE_SSH_DIRS:-"${HOME:-/nonexistent}/.ssh" "$PC_HOME/.ssh" /root/.ssh /home/*/.ssh}; do
+    [ -d "$dir" ] || continue
+    for key in $(find "$dir" -maxdepth 2 -type f -readable -print 2>/dev/null); do
+      if grep -qaE -e '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' "$key" 2>/dev/null; then
+        found 7 ssh-private-key "$key"
+        ssh_clean=0
+      fi
+    done
+  done
+  [ "$ssh_clean" = 1 ] && pass 7 ssh-keys "no-readable-private-key"
+
+  # 7.3 Paperclip's own database. Two separate facts, both a KNOWN_GAP today
+  # (the fix is a network change and a password rotation that need Filip):
+  # the database can be reached at all, and the default owner login works.
+  # Neither is a LEAK until PROBE_DB_DEFAULT_LOGIN_ENFORCED=1.
+  db_host="${PROBE_DB_HOST:-db}"
+  db_port="${PROBE_DB_PORT:-5432}"
+  if command -v pg_isready >/dev/null 2>&1 && command -v psql >/dev/null 2>&1; then
+    if pg_isready -q -h "$db_host" -p "$db_port" -t 3 >/dev/null 2>&1; then
+      gap 7 db-reachable "$db_host:$db_port"
+      if PGPASSWORD=paperclip PGCONNECT_TIMEOUT=3 psql -X -q -t -A -h "$db_host" -p "$db_port" -U paperclip -d paperclip -c 'select 1' >/dev/null 2>&1; then
+        if [ "${PROBE_DB_DEFAULT_LOGIN_ENFORCED:-0}" = 1 ]; then
+          LEAKS=$((LEAKS + 1)); emit "LEAK 7 db-owner-default-login $db_host:$db_port"
+        else
+          gap 7 db-owner-default-login "$db_host:$db_port"
+        fi
+      else
+        pass 7 db-owner-default-login "default-credentials-refused"
+      fi
+    else
+      pass 7 db-reachable "$db_host:$db_port-not-reachable"
+      pass 7 db-owner-default-login "database-not-reachable"
+    fi
+  else
+    gap 7 db-checks "pg_isready-or-psql-missing"
+  fi
+
+  # 7.4 No host folder an agent can write to, outside its own workspace, the
+  # app data folder and temporary space. A host folder shows up as a mount;
+  # a mount this user can write to, that is not on the list, is a leak.
+  mi="${PROBE_MOUNTINFO:-/proc/self/mountinfo}"
+  mount_clean=1
+  if [ ! -r "$mi" ]; then
+    broken 7 host-writable "cannot-read-mountinfo"
+  else
+    here="$(pwd -P 2>/dev/null || pwd)"
+    while read -r _ _ _ _ mp opts _; do
+      # mountinfo escapes spaces as \040
+      mp="$(printf '%b' "$(printf '%s' "$mp" | sed 's/\\040/ /g')")"
+      case "$mp" in
+        /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/tmp|/tmp/*|/run/lock|"$PC_HOME"|"$PC_HOME"/*|"$here"|"$here"/*) continue ;;
+      esac
+      [ -n "${TMPDIR:-}" ] && case "$mp" in "$TMPDIR"|"$TMPDIR"/*) continue ;; esac
+      case ",$opts," in *,ro,*) continue ;; esac
+      if [ -w "$mp" ]; then
+        found 7 host-writable "$mp"
+        mount_clean=0
+      fi
+    done <"$mi"
+    [ "$mount_clean" = 1 ] && pass 7 host-writable "no-writable-host-mount"
+  fi
+}
+
+finish() {
+  emit "SUMMARY leaks=$LEAKS known_gaps=$GAPS passes=$PASSES"
+  if [ -n "${PROBE_REPORT:-}" ]; then
+    cp "$REPORT_TMP" "$PROBE_REPORT" 2>/dev/null || true
+  fi
+  [ "$LEAKS" -eq 0 ]
+}
+
+if [ "${PROBE_ONLY_STAGE:-}" = 7 ]; then
+  stage7_host_control
+  finish
+  exit $?
+fi
 
 # --- Stage 0: the agent's own environment -----------------------------------
 SERVER_KEY_NAMES="BETTER_AUTH_SECRET PAPERCLIP_AGENT_JWT_SECRET PAPERCLIP_SECRETS_MASTER_KEY PAPERCLIP_TELEMETRY_BACKEND_TOKEN PAPERCLIP_FEEDBACK_EXPORT_BACKEND_TOKEN PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN PAPERCLIP_DEV_SERVER_STATUS_TOKEN"
@@ -290,8 +415,7 @@ for path in "$PC_HOME"/instances/*/.env "$PC_HOME"/instances/*/config.json "$PC_
   if [ -r "$path" ]; then found 6 server-only-path "$path"; else pass 6 server-only-path "$path"; fi
 done
 
-emit "SUMMARY leaks=$LEAKS known_gaps=$GAPS passes=$PASSES"
-if [ -n "${PROBE_REPORT:-}" ]; then
-  cp "$REPORT_TMP" "$PROBE_REPORT" 2>/dev/null || true
-fi
-[ "$LEAKS" -eq 0 ]
+# --- Stage 7: host control --------------------------------------------------
+stage7_host_control
+
+finish

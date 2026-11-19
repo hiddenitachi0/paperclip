@@ -15,7 +15,7 @@ on:
       enforced_stages:
         description: "Stages whose checks must pass (space separated)"
         required: false
-        default: "0 1 2"
+        default: "0 1 2 7"
   workflow_call: {}
   pull_request:
     branches:
@@ -129,7 +129,7 @@ jobs:
 
       - name: Run agent isolation acceptance test
         env:
-          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2' }}
+          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2 7' }}
           ISOLATION_SECRETS_MODE: ${{ matrix.secrets_mode }}
           COMPOSE_PROJECT_NAME: dur3994-isolation-${{ matrix.secrets_mode }}
         run: ./scripts/agent-isolation-acceptance.sh

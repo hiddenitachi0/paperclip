@@ -17,7 +17,7 @@
 #      KNOWN_GAP plus a path or variable NAME, never a value.
 #
 # Pass rule: no LEAK for the stages listed in ISOLATION_ENFORCED_STAGES
-# (default "0 1 2"). Checks for later stages are printed as KNOWN_GAP and do not
+# (default "0 1 2 7"). Checks for later stages are printed as KNOWN_GAP and do not
 # fail the run; each later stage adds its number here when it ships.
 #
 # The server is NOT the container's PID 1: docker/docker-compose.yml starts
@@ -101,7 +101,7 @@ if [ "$SECRETS_MODE" = file ]; then
   COMPOSE+=(-f docker/docker-compose.secrets.yml)
 fi
 
-ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1 2}"
+ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1 2 7}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-isolation-acceptance.XXXXXX")"
 SERVER_SECRETS_FILE="$WORK_DIR/server-secrets.env"
 PAYLOAD_FILE="$WORK_DIR/payload.json"
@@ -973,7 +973,7 @@ main() {
   company_a="$(create_company "DUR-3994 isolation A")"
   probe_agent="$(create_probe_agent "$company_a" "isolation-probe" /tmp/dur3994-probe-report.txt "$other_dir")"
   control_agent="$(create_probe_agent "$company_a" "isolation-control" /tmp/dur3994-control-report.txt "$other_dir" \
-    "$(python3 -c 'import json,sys;print(json.dumps({"CONTROL_PLANTED": sys.argv[1]}))' "$(canary)")")"
+    "$(python3 -c 'import json,sys;print(json.dumps({"CONTROL_PLANTED": sys.argv[1], "DOCKER_HOST": "tcp://127.0.0.1:2375", "SSH_AUTH_SOCK": "/tmp/dur5182-agent.sock"}))' "$(canary)")")"
   if [ -z "$probe_agent" ] || [ -z "$control_agent" ]; then
     fail "could not create the probe agents"
     return 1
@@ -1021,6 +1021,16 @@ main() {
         fi
       done
     fi
+    if stage_enforced 7; then
+      # DUR-5182: host control. The database checks (db-reachable,
+      # db-owner-default-login) are KNOWN_GAP lines until Filip changes the
+      # network and rotates the owner password; they are not required here.
+      for check in docker ssh-keys host-writable; do
+        if ! printf '%s\n' "$report" | grep -q "^PASS 7 $check "; then
+          fail "stage 7 check '$check' did not pass"
+        fi
+      done
+    fi
     if stage_enforced 1; then
       for check in server-pid proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
         if ! printf '%s\n' "$report" | grep -q "^PASS 1 $check "; then
@@ -1053,6 +1063,16 @@ main() {
     log "PASS negative control (b): the probe caught the planted canary"
   else
     fail "negative control (b): the probe did not catch a canary planted in the agent's own env"
+  fi
+  if stage_enforced 7; then
+    # DUR-5182 negative control: an agent that is handed a Docker address and
+    # a forwarded SSH agent must be caught by the host-control checks.
+    if printf '%s\n' "$control_report" | grep -q '^LEAK 7 docker-host DOCKER_HOST$' \
+      && printf '%s\n' "$control_report" | grep -q '^LEAK 7 ssh-agent SSH_AUTH_SOCK$'; then
+      log "PASS negative control (stage 7): the probe caught a planted Docker address and SSH agent"
+    else
+      fail "negative control (stage 7): the probe did not catch a planted DOCKER_HOST / SSH_AUTH_SOCK"
+    fi
   fi
 
   if [ "$SECRETS_MODE" = env ]; then
