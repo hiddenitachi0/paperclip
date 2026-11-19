@@ -1,5 +1,6 @@
-import { and, asc, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lte, sql } from "drizzle-orm";
 import {
+  tradingBacktestRuns,
   tradingEvaluatorState,
   tradingLedgerEntries,
   tradingOrders,
@@ -22,6 +23,7 @@ import {
   coverage,
   dropFormingCandles,
   effectiveSampleSize,
+  evaluateForwardCriteria,
   evaluateTradingSpec,
   expectedHitRateFromBaseRate,
   isIndependentCall,
@@ -658,11 +660,42 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
       const day = t.closedAt.toISOString().slice(0, 10);
       daily.set(day, (daily.get(day) ?? 0) + ((t.exitPrice - t.entryPrice) * t.quantity - t.feesUsd) / startingEquityUsd);
     }
+    // The written pass/fail criteria (DUR-5011), read from the shared constant. Nothing beyond the
+    // two counters is judged while the version is still collecting.
+    const ruleForecaster = forecasters.find((f) => f.forecasterKey === RULE_KEY);
+    const ready = status.status === "ready";
+    const probability = ready ? probabilityScores(ruleScored, flatBandPct) : null;
+    let pastDataExpectancyR: number | null = null;
+    if (ready) {
+      const [gateRun] = await db
+        .select({ report: tradingBacktestRuns.report })
+        .from(tradingBacktestRuns)
+        .where(and(eq(tradingBacktestRuns.companyId, companyId), eq(tradingBacktestRuns.versionId, versionRow.id), eq(tradingBacktestRuns.purpose, "gate"), eq(tradingBacktestRuns.status, "succeeded")))
+        .orderBy(desc(tradingBacktestRuns.finishedAt))
+        .limit(1);
+      const headline = (gateRun?.report as { headline?: { outOfSample?: { fees2x?: { expectancyR?: unknown } } } } | null | undefined)?.headline;
+      const value = headline?.outOfSample?.fees2x?.expectancyR;
+      pastDataExpectancyR = typeof value === "number" && Number.isFinite(value) ? value : null;
+    }
+    const drawdownCap = (strategy.riskConfig as { maxDrawdownPct?: unknown } | null)?.maxDrawdownPct;
+    const criteria = evaluateForwardCriteria({
+      samples: ruleForecaster?.independentResolved ?? 0,
+      targetSamples: plan.targetSamples,
+      runningDays: time.runningMs / 86_400_000,
+      minRunningDays: plan.minRunningDays,
+      brierSkill: probability?.brierSkill ?? null,
+      hasRealProbabilities: probability !== null,
+      forwardExpectancyR: trades.expectancyR,
+      pastDataExpectancyR,
+      forwardDrawdownPct: trades.maxDrawdownPct,
+      drawdownCapPct: typeof drawdownCap === "number" ? drawdownCap : null,
+    });
     return {
       strategyId,
       version: versionRow.version,
       plan,
       status,
+      criteria,
       time: { runningMs: time.runningMs, calendarMs: time.calendarMs, gapMs: time.gapMs },
       forecasters,
       trades: status.status === "ready" || trips.length > 0 ? { ...trades, ...riskAdjustedReturns([...daily.values()]), vsBuyAndHold: rows.length > 0 ? returnVsBuyAndHold(trades.netPnlUsd / startingEquityUsd, rows[0]!.referencePrice, rows[rows.length - 1]!.referencePrice) : null } : null,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clock, Pause, Play, Pencil, XCircle } from "lucide-react";
-import { describeTradingPauseReason } from "@paperclipai/shared";
+import { CheckCircle2, Clock, HelpCircle, MinusCircle, Pause, Play, Pencil, XCircle } from "lucide-react";
+import { TRADING_PASS_FAIL_CRITERIA, describePassFailPower, describeTradingPauseReason, type TradingCriterionState, type TradingForwardVerdictState } from "@paperclipai/shared";
 import { Link, useParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -11,7 +11,7 @@ import { tradingApi } from "../api/trading";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { timeAgo } from "../lib/timeAgo";
-import { evaluateTradingVerdict } from "../lib/tradingVerdict";
+import { evaluateTradingSafetyChecks } from "../lib/tradingVerdict";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "../components/StatusBadge";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -24,8 +24,8 @@ import { describeStrategyInWords } from "../lib/tradingSpecWords";
 import { parseStoredSpec } from "../lib/tradingRuleBook";
 
 /**
- * One strategy's dashboard: its current paper balances, the pass/fail
- * verdict from docs/specs/trading-agent-pass-fail-criteria.md, and a plain
+ * One strategy's dashboard: its current paper balances, the forward test
+ * judged against docs/specs/trading-agent-pass-fail-criteria.md, and a plain
  * list of its orders. The kill switch lives here too, not just the list
  * page, since an operator who opened the dashboard to look closer is the
  * most likely person to also want to stop it right away.
@@ -42,22 +42,21 @@ function formatNok(value: number | null): string {
   return `${Math.round(value).toLocaleString("nb-NO")} NOK`;
 }
 
-function VerdictBadge({ verdict }: { verdict: "gathering_data" | "passing" | "failing" }) {
-  if (verdict === "gathering_data") {
-    return <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">Gathering data</span>;
-  }
-  if (verdict === "passing") {
-    return (
-      <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-300">
-        Passing
-      </span>
-    );
-  }
-  return (
-    <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/30 dark:text-red-300">
-      Failing
-    </span>
-  );
+function VerdictBadge({ state, label }: { state: TradingForwardVerdictState; label: string }) {
+  const tone =
+    state === "collecting"
+      ? "bg-muted text-muted-foreground"
+      : state === "criteria_met"
+        ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300"
+        : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300";
+  return <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`}>{label}</span>;
+}
+
+function CriterionIcon({ state }: { state: TradingCriterionState }) {
+  if (state === "met") return <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />;
+  if (state === "not_met") return <XCircle className="h-4 w-4 shrink-0 text-destructive" />;
+  if (state === "not_applicable") return <MinusCircle className="h-4 w-4 shrink-0 text-muted-foreground" />;
+  return <HelpCircle className="h-4 w-4 shrink-0 text-muted-foreground" />;
 }
 
 export function TradingStrategyDetail() {
@@ -106,9 +105,17 @@ export function TradingStrategyDetail() {
   const waitingVersion = versions.find((v) => v.status === "draft") ?? null;
   const liveSpec = liveVersion ? parseStoredSpec(liveVersion.spec) : null;
 
-  const verdict = useMemo(() => {
+  const scoreboardQuery = useQuery({
+    queryKey: selectedCompanyId && strategyId ? queryKeys.trading.scoreboard(selectedCompanyId, strategyId) : ["trading-scoreboard", "__none__"],
+    queryFn: () => tradingApi.scoreboard(selectedCompanyId!, strategyId!),
+    enabled: Boolean(selectedCompanyId && strategyId),
+    refetchInterval: 5 * 60_000,
+  });
+  const criteria = scoreboardQuery.data?.criteria ?? null;
+
+  const safetyChecks = useMemo(() => {
     if (!dashboardQuery.data || !strategy || !ordersQuery.data) return null;
-    return evaluateTradingVerdict(dashboardQuery.data, strategy.riskConfig, strategy.createdAt, ordersQuery.data);
+    return evaluateTradingSafetyChecks(dashboardQuery.data, strategy.riskConfig, ordersQuery.data);
   }, [dashboardQuery.data, strategy, ordersQuery.data]);
 
   const setStatus = useMutation({
@@ -250,30 +257,45 @@ export function TradingStrategyDetail() {
 
           <div className="rounded-lg border border-border p-4">
             <div className="mb-2 flex items-center gap-2">
-              <h2 className="text-sm font-semibold">Pass/fail verdict</h2>
-              {verdict ? <VerdictBadge verdict={verdict.verdict} /> : null}
+              <h2 className="text-sm font-semibold">Forward paper test against the written criteria</h2>
+              {criteria ? <VerdictBadge state={criteria.state} label={criteria.label} /> : null}
             </div>
-            {verdict ? (
+            {criteria ? (
               <>
-                <p className="mb-3 text-xs text-muted-foreground">{verdict.windowNote}</p>
-                {verdict.checks.length > 0 ? (
-                  <ul className="space-y-1.5">
-                    {verdict.checks.map((check) => (
-                      <li key={check.label} className="flex items-center gap-2 text-sm">
-                        {check.ok ? (
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
-                        ) : (
-                          <XCircle className="h-4 w-4 shrink-0 text-destructive" />
-                        )}
-                        {check.label}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
+                <p className="mb-3 text-xs text-muted-foreground">{criteria.note}</p>
+                <ul className="space-y-1.5">
+                  {criteria.items.map((item) => (
+                    <li key={item.key} className="flex items-start gap-2 text-sm">
+                      <CriterionIcon state={item.state} />
+                      <span>
+                        {item.label}
+                        <span className="block text-xs text-muted-foreground">{item.detail}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {describePassFailPower()} {TRADING_PASS_FAIL_CRITERIA.assumptionNote}
+                </p>
               </>
+            ) : scoreboardQuery.isLoading ? (
+              <p className="text-xs text-muted-foreground">Loading the scoreboard.</p>
             ) : (
-              <p className="text-xs text-muted-foreground">Still loading orders to compute the verdict.</p>
+              <p className="text-xs text-muted-foreground">No approved version of the rules is collecting predictions yet, so there is nothing to judge.</p>
             )}
+            {safetyChecks ? (
+              <div className="mt-4 border-t border-border pt-3">
+                <h3 className="mb-1.5 text-xs font-semibold text-muted-foreground">Safety checks (about the machinery, not the result)</h3>
+                <ul className="space-y-1.5">
+                  {safetyChecks.map((check) => (
+                    <li key={check.label} className="flex items-center gap-2 text-sm">
+                      <CriterionIcon state={check.ok ? "met" : "not_met"} />
+                      {check.label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </>
       ) : null}
