@@ -492,7 +492,8 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
 
       if (
         cd "$worktree_cwd"
-        pnpm install "$@"
+        # DUR-5268: link from the shared store (npm_config_store_dir, set by Paperclip) rather than download/copy.
+        pnpm install "$@" --prefer-offline
       ) >"$stdout_path" 2>"$stderr_path"; then
         cat "$stdout_path"
         cat "$stderr_path" >&2

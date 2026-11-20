@@ -2165,6 +2165,7 @@ describe("realizeExecutionWorkspace", () => {
     expect(operations.map((operation) => operation.phase)).toEqual([
       "worktree_prepare",
       "workspace_provision",
+      "workspace_provision",
     ]);
     expect(operations[0]?.command).toContain("git worktree add");
     expect(operations[0]?.metadata).toMatchObject({
@@ -2172,6 +2173,78 @@ describe("realizeExecutionWorkspace", () => {
       created: true,
     });
     expect(operations[1]?.command).toBe("bash ./scripts/provision.sh");
+    // DUR-5268: one size report per new worktree.
+    expect(operations[2]?.command).toBe("workspace size report");
+    expect(operations[2]?.result.system).toMatch(/^New worktree size: /);
+  });
+
+  it("points the setup command at a shared package store and reports the new worktree's size once (DUR-5268)", async () => {
+    const repoRoot = await createTempRepo();
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+
+    await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+    await fs.writeFile(
+      path.join(repoRoot, "scripts", "provision.sh"),
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "printf '%s\\n' \"$npm_config_store_dir\" > .store-npm",
+        "printf '%s\\n' \"$pnpm_config_store_dir\" > .store-pnpm",
+        "printf '%s\\n' \"$npm_config_prefer_offline\" > .prefer-offline",
+        "printf '%s\\n' \"$PAPERCLIP_SHARED_VENV_DIR\" > .shared-venv",
+      ].join("\n"),
+      "utf8",
+    );
+    await runGit(repoRoot, ["add", "scripts/provision.sh"]);
+    await runGit(repoRoot, ["commit", "-m", "Add store probe script"]);
+
+    const input = (identifier: string) => ({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary" as const,
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+          provisionCommand: "bash ./scripts/provision.sh",
+        },
+      },
+      issue: { id: identifier, identifier, title: "Shared store" },
+      agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+      recorder,
+    });
+
+    const first = await realizeExecutionWorkspace(input("PAP-5268"));
+    const second = await realizeExecutionWorkspace(input("PAP-5269"));
+
+    const expectedStore = path.join(await fs.realpath(repoRoot), ".paperclip", "shared", "pnpm-store");
+    for (const workspace of [first, second]) {
+      const read = async (name: string) => (await fs.readFile(path.join(workspace.cwd, name), "utf8")).trim();
+      expect(await fs.realpath(await read(".store-npm"))).toBe(expectedStore);
+      expect(await fs.realpath(await read(".store-pnpm"))).toBe(expectedStore);
+      expect(await read(".prefer-offline")).toBe("true");
+      expect(await read(".shared-venv")).toBe(path.join(path.dirname(expectedStore), "venv"));
+    }
+    // The empty store was created for the first run; nothing copied build output into the new folders.
+    await expect(fs.stat(expectedStore)).resolves.toBeTruthy();
+    for (const workspace of [first, second]) {
+      await expect(fs.stat(path.join(workspace.cwd, "node_modules"))).rejects.toThrow();
+      await expect(fs.stat(path.join(workspace.cwd, "dist"))).rejects.toThrow();
+    }
+
+    const reports = operations.filter((operation) => operation.command === "workspace size report");
+    expect(reports).toHaveLength(2);
+    expect(reports[0]?.result.system).toContain("New worktree size:");
+    expect(reports[0]?.result.system).toContain(expectedStore);
+
+    // Reusing the folder does not report again.
+    await realizeExecutionWorkspace(input("PAP-5268"));
+    expect(operations.filter((operation) => operation.command === "workspace size report")).toHaveLength(2);
   });
 
   it("truncates oversized provision command output before storing it in memory", async () => {
