@@ -2777,7 +2777,9 @@ registry.registerPath({
     params: z.object({ companyId: z.string() }),
     body: jsonBody(createApprovalSchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  // 422 also covers a deploy card whose version's checks are still running or failed
+  // (code deploy_ci_pending / deploy_ci_failed); the board may file anyway with allowUnfinishedChecks.
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registry.registerPath({

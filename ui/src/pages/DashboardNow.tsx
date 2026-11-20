@@ -44,6 +44,7 @@ import {
   approvalTargetBadge,
   approvalDuplicateKey,
   approvalDeployBranchInfo,
+  approvalChecksOverrideNote,
   approvalIsRollbackDeploy,
 } from "../components/ApprovalPayload";
 
@@ -908,6 +909,7 @@ function ApprovalRow({
   const targetBadge = approvalTargetBadge(payload);
   const branchInfo = approvalDeployBranchInfo(payload);
   const isRollback = approvalIsRollbackDeploy(payload);
+  const checksOverrideNote = approvalChecksOverrideNote(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -950,6 +952,12 @@ function ApprovalRow({
         <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
           <AlertCircle className="h-3 w-3 shrink-0" />
           Rollback — approving moves production back to an older version
+        </p>
+      ) : null}
+      {checksOverrideNote ? (
+        <p className="flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          {checksOverrideNote}
         </p>
       ) : null}
       {isDuplicate ? (

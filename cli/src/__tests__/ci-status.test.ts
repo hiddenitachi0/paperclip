@@ -76,6 +76,37 @@ describe("paperclipai ci status", () => {
     expect(process.exitCode).toBe(2);
   });
 
+  it("exits 4, not 1, when the request itself fails (a 502 during a restart is not 'checks failed')", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ error: "Bad gateway" }), { status: 502 })),
+      ),
+    );
+    await run();
+    expect(process.exitCode).toBe(4);
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/Could not read the checks/);
+  });
+
+  it("exits 4 when the server cannot be reached at all", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+    await run();
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("exits 4 for a project the server does not know (404), distinct from failed checks", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ error: "Not found" }), { status: 404 }))),
+    );
+    await run();
+    expect(process.exitCode).toBe(4);
+  });
+
   it("describeCiStatus: no checks counts as green; unknown is its own exit code", () => {
     expect(describeCiStatus({ state: "none", failedChecks: [], pendingChecks: [], sha: SHA, repo: "a/b" }).exitCode).toBe(0);
     expect(describeCiStatus({ state: "unknown", failedChecks: [], pendingChecks: [], sha: SHA, repo: "a/b" }).exitCode).toBe(3);

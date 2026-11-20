@@ -108,7 +108,7 @@ To wait for green from a box without GitHub access, ask the server:
 paperclipai ci status --project <projectId> --sha <sha> -C <companyId>
 ```
 
-It prints `green`, `pending (2 checks still running: ...)` or `failed: <check names>`. Exit code 0 is green (or no checks), 2 pending, 1 failed, 3 GitHub could not be asked, so a script can loop on it. (`GET /api/companies/:companyId/projects/:projectId/ci-status?sha=<7-40 hex>`.)
+It prints `green`, `pending (2 checks still running: ...)` or `failed: <check names>`. Exit code 0 is green (or no checks), 2 pending, 1 failed, 3 GitHub could not be asked, 4 the request to the server itself failed (restart, 502, network). A wait loop should keep waiting on 2, 3 and 4, and give up only on 1. (`GET /api/companies/:companyId/projects/:projectId/ci-status?sha=<7-40 hex>`.)
 
 ## Responding to Approval Resolutions
 
