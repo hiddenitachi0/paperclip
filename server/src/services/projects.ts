@@ -31,6 +31,7 @@ import {
   type WorkspaceRuntimeService,
   type PluginManagedProjectDeclaration,
   type PluginManagedProjectResolution,
+  PROJECT_WORKSPACE_TEST_COMMAND_KEY,
 } from "@paperclipai/shared";
 import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runtime-read-model.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
@@ -53,6 +54,7 @@ type CreateWorkspaceInput = {
   visibility?: string | null;
   setupCommand?: string | null;
   cleanupCommand?: string | null;
+  testCommand?: string | null;
   remoteProvider?: string | null;
   remoteWorkspaceRef?: string | null;
   sharedWorkspaceKey?: string | null;
@@ -196,6 +198,35 @@ function toRuntimeService(row: WorkspaceRuntimeServiceRow): WorkspaceRuntimeServ
   };
 }
 
+function readWorkspaceTestCommand(metadata: Record<string, unknown> | null | undefined): string | null {
+  const value = metadata?.[PROJECT_WORKSPACE_TEST_COMMAND_KEY];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * The test command lives in metadata, which a PATCH can replace wholesale. Whatever the
+ * caller does to metadata, the stored command survives unless the caller names the command
+ * itself (testCommand, or metadata.testCommand), and only a board user may do that
+ * (workspace-command-authz.ts). An agent that sends `metadata: null` therefore cannot
+ * switch the pre-review tests off.
+ */
+function withWorkspaceTestCommand(
+  next: Record<string, unknown> | null | undefined,
+  previous: Record<string, unknown> | null | undefined,
+  requested: string | null | undefined,
+): Record<string, unknown> | null {
+  let command: string | null;
+  if (requested !== undefined) command = readNonEmptyString(requested);
+  else if (next && Object.prototype.hasOwnProperty.call(next, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
+    command = readNonEmptyString(next[PROJECT_WORKSPACE_TEST_COMMAND_KEY]);
+  } else command = readWorkspaceTestCommand(previous);
+  const out: Record<string, unknown> = { ...(next ?? {}) };
+  delete out[PROJECT_WORKSPACE_TEST_COMMAND_KEY];
+  if (command) out[PROJECT_WORKSPACE_TEST_COMMAND_KEY] = command;
+  if (!next && !command) return null;
+  return out;
+}
+
 function toWorkspace(
   row: ProjectWorkspaceRow,
   runtimeServices: WorkspaceRuntimeService[] = [],
@@ -213,6 +244,7 @@ function toWorkspace(
     visibility: row.visibility as ProjectWorkspace["visibility"],
     setupCommand: row.setupCommand ?? null,
     cleanupCommand: row.cleanupCommand ?? null,
+    testCommand: readWorkspaceTestCommand(row.metadata as Record<string, unknown> | null),
     remoteProvider: row.remoteProvider ?? null,
     remoteWorkspaceRef: row.remoteWorkspaceRef ?? null,
     sharedWorkspaceKey: row.sharedWorkspaceKey ?? null,
@@ -1048,13 +1080,16 @@ export function projectService(db: Db, rawDb: Db = db) {
             remoteProvider: readNonEmptyString(data.remoteProvider),
             remoteWorkspaceRef,
             sharedWorkspaceKey: readNonEmptyString(data.sharedWorkspaceKey),
-            metadata:
+            metadata: withWorkspaceTestCommand(
               data.runtimeConfig !== undefined
                 ? mergeProjectWorkspaceRuntimeConfig(
                     (data.metadata as Record<string, unknown> | null | undefined) ?? null,
                     data.runtimeConfig ?? null,
                   )
                 : (data.metadata as Record<string, unknown> | null | undefined) ?? null,
+              null,
+              data.testCommand,
+            ),
             isPrimary: shouldBePrimary,
           })
           .returning()
@@ -1125,16 +1160,20 @@ export function projectService(db: Db, rawDb: Db = db) {
       if (data.remoteProvider !== undefined) patch.remoteProvider = readNonEmptyString(data.remoteProvider);
       if (data.remoteWorkspaceRef !== undefined) patch.remoteWorkspaceRef = nextRemoteWorkspaceRef;
       if (data.sharedWorkspaceKey !== undefined) patch.sharedWorkspaceKey = readNonEmptyString(data.sharedWorkspaceKey);
-      if (data.metadata !== undefined || data.runtimeConfig !== undefined) {
-        patch.metadata =
+      if (data.metadata !== undefined || data.runtimeConfig !== undefined || data.testCommand !== undefined) {
+        const existingMetadata = (existing.metadata as Record<string, unknown> | null | undefined) ?? null;
+        const nextMetadata =
           data.runtimeConfig !== undefined
             ? mergeProjectWorkspaceRuntimeConfig(
                 data.metadata !== undefined
                   ? (data.metadata as Record<string, unknown> | null | undefined)
-                  : ((existing.metadata as Record<string, unknown> | null | undefined) ?? null),
+                  : existingMetadata,
                 data.runtimeConfig ?? null,
               )
-            : data.metadata;
+            : data.metadata !== undefined
+              ? (data.metadata as Record<string, unknown> | null)
+              : existingMetadata;
+        patch.metadata = withWorkspaceTestCommand(nextMetadata, existingMetadata, data.testCommand);
       }
 
       const updated = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
