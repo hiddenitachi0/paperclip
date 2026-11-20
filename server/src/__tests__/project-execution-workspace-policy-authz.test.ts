@@ -20,6 +20,15 @@ describe("collectProjectExecutionWorkspaceCommandPaths", () => {
     ]);
   });
 
+  // DUR-5242
+  it("refuses authorizationPolicy whatever its value", () => {
+    for (const value of [{ protectedAgent: { requiresApproval: true } }, {}, null]) {
+      expect(collectProjectExecutionWorkspaceCommandPaths({ authorizationPolicy: value })).toEqual([
+        "executionWorkspacePolicy.authorizationPolicy",
+      ]);
+    }
+  });
+
   it("still refuses strategy commands and allows ordinary fields", () => {
     expect(
       collectProjectExecutionWorkspaceCommandPaths({
@@ -66,5 +75,31 @@ describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
     expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, enabled: false }, stored)).toEqual([]);
     expect(collectProjectExecutionWorkspacePolicyDropPaths(null, { enabled: true })).toEqual([]);
     expect(collectProjectExecutionWorkspacePolicyDropPaths(null, null)).toEqual([]);
+  });
+});
+
+// DUR-5242: a stored authorizationPolicy cannot be dropped or rewritten by omission.
+describe("authorizationPolicy drop paths", () => {
+  const stored = { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: true } } };
+  const path = ["executionWorkspacePolicy.authorizationPolicy"];
+
+  it("flags omitted, null, and {enabled:false} writes", () => {
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: true }, stored)).toEqual(path);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual(path);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual(path);
+  });
+
+  it("flags a substituted policy", () => {
+    expect(
+      collectProjectExecutionWorkspacePolicyDropPaths(
+        { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: false } } },
+        stored,
+      ),
+    ).toEqual(path);
+  });
+
+  it("allows a write that keeps it, and a project with none stored", () => {
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored }, stored)).toEqual([]);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: true }, { enabled: true })).toEqual([]);
   });
 });

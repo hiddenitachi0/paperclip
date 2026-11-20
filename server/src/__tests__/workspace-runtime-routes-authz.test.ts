@@ -431,6 +431,64 @@ describe.sequential("workspace runtime service route authorization", () => {
     }
   }, 15000);
 
+  describe("project authorizationPolicy is board-only (DUR-5242)", () => {
+    const agent = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    };
+    const policy = { protectedAgent: { requiresApproval: true } };
+    const storedProject = () => ({
+      ...buildProject(),
+      executionWorkspacePolicy: { enabled: true, authorizationPolicy: policy },
+    });
+
+    it("refuses an agent project PATCH that drops, nulls, omits, or rewrites a stored policy", async () => {
+      for (const sent of [
+        { enabled: true },
+        null,
+        { enabled: false },
+        { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: false } } },
+        { enabled: true, authorizationPolicy: null },
+        { enabled: true, authorizationPolicy: policy },
+      ]) {
+        mockProjectService.update.mockClear();
+        mockProjectService.getById.mockResolvedValue(storedProject());
+        const app = await createProjectApp(agent);
+        const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+        expect(res.status).toBe(403);
+        expect(res.body.error).toContain("authorizationPolicy");
+        expect(mockProjectService.update).not.toHaveBeenCalled();
+      }
+    }, 20000);
+
+    it("refuses an agent project create that names authorizationPolicy", async () => {
+      const app = await createProjectApp(agent);
+      const res = await request(app)
+        .post("/api/companies/11111111-1111-4111-8111-111111111111/projects")
+        .send({ name: "X", executionWorkspacePolicy: { enabled: true, authorizationPolicy: policy } });
+      expect(res.status).toBe(403);
+      expect(mockProjectService.create).not.toHaveBeenCalled();
+    });
+
+    it("lets a board user rewrite or clear it", async () => {
+      mockProjectService.getById.mockResolvedValue(storedProject());
+      mockProjectService.update.mockResolvedValue(buildProject());
+      const app = await createProjectApp({
+        type: "board",
+        userId: "board-1",
+        companyIds: ["11111111-1111-4111-8111-111111111111"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: { enabled: true } });
+      expect(res.status).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalled();
+    });
+  });
+
   it("rejects agent callers that update project workspace cleanup commands", async () => {
     mockProjectService.getById.mockResolvedValue(buildProject());
     const app = await createProjectApp({

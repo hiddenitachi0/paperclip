@@ -75,6 +75,12 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
   if (hasOwn(policy, "requireIsolation")) {
     paths.push("executionWorkspacePolicy.requireIsolation");
   }
+  // DUR-5242: authorizationPolicy decides whether assignments into the project need
+  // approval and which trust preset/boundary applies, so only the board (or a plugin)
+  // may set it. Naming the key at all is refused, whatever the value.
+  if (hasOwn(policy, "authorizationPolicy")) {
+    paths.push("executionWorkspacePolicy.authorizationPolicy");
+  }
   return paths;
 }
 
@@ -100,6 +106,8 @@ export function collectProjectExecutionWorkspacePolicyDropPaths(
     if (!sameValue(stored, incoming)) paths.push(path);
   };
   check("executionWorkspacePolicy.workspaceRuntime", storedPolicy.workspaceRuntime, next?.workspaceRuntime);
+  // DUR-5242: omitting a stored authorizationPolicy (or sending null / {enabled:false}) drops it.
+  check("executionWorkspacePolicy.authorizationPolicy", storedPolicy.authorizationPolicy, next?.authorizationPolicy);
   // requireIsolation is deliberately not checked here: the project PATCH route carries the
   // stored `true` forward for agent writes (DUR-5184), so omitting it cannot drop it, and an
   // explicit change is already refused by collectProjectExecutionWorkspaceCommandPaths.
