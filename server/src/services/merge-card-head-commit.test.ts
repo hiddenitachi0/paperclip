@@ -80,16 +80,72 @@ describe("withResolvedMergePrHeadCommit (card creation)", () => {
     expect(payload.commit).toBe("head-sha");
   });
 
-  it("leaves an already-present commit alone (never overwrites a filer-supplied value)", async () => {
+  it("keeps a named commit that matches the PR's head (full sha, or a 7+ char prefix stored in full)", async () => {
     const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
-    const fetchImpl = vi.fn();
-    const payload = await withResolvedMergePrHeadCommit(
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    const full = await withResolvedMergePrHeadCommit(
       {} as any,
       "company-a",
-      { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589, commit: "already-set" },
-      { fetchImpl },
+      { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589, commit: head },
+      { fetchImpl: fetchReturning({ head: { sha: head } }) },
     );
-    expect(payload.commit).toBe("already-set");
+    expect(full.commit).toBe(head);
+    const short = await withResolvedMergePrHeadCommit(
+      {} as any,
+      "company-a",
+      { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589, commit: "0123456" },
+      { fetchImpl: fetchReturning({ head: { sha: head } }) },
+    );
+    expect(short.commit).toBe(head);
+  });
+
+  it("refuses a named commit that is no longer the PR's head", async () => {
+    const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    await expect(
+      withResolvedMergePrHeadCommit(
+        {} as any,
+        "company-a",
+        { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589, commit: "oldoldold1" },
+        { fetchImpl: fetchReturning({ head: { sha: "newnewnew2" } }) },
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: "This card names commit oldoldold1, but the pull request is now at newnewnew2. File the card for newnewnew2.",
+    });
+  });
+
+  it("refuses filing when GitHub cannot be read, with or without a named commit", async () => {
+    const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    const down = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    const message =
+      "Could not read this pull request's latest commit from GitHub. Try again in a minute, or include the commit.";
+    for (const commit of [undefined, "abcdef1234"]) {
+      await expect(
+        withResolvedMergePrHeadCommit(
+          {} as any,
+          "company-a",
+          { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589, commit },
+          { fetchImpl: down },
+        ),
+      ).rejects.toMatchObject({ status: 422, message });
+    }
+    await expect(
+      withResolvedMergePrHeadCommit(
+        {} as any,
+        "company-a",
+        { kind: "merge_pr", repo: "acme/paperclip", prNumber: 589 },
+        { fetchImpl: fetchReturning({}, false) },
+      ),
+    ).rejects.toMatchObject({ status: 422, message });
+  });
+
+  it("has nothing to look up without a repo / PR number, and leaves the payload alone", async () => {
+    const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    const fetchImpl = vi.fn();
+    const original = { kind: "merge_pr", url: "https://github.com/acme/paperclip/pull/1" };
+    expect(await withResolvedMergePrHeadCommit({} as any, "company-a", original, { fetchImpl })).toBe(original);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
