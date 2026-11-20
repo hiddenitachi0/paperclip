@@ -173,3 +173,92 @@ describe("authorizationPolicy carry-forward", () => {
     expect(carryForwardProtectedProjectPolicyFields({ enabled: true, authorizationPolicy: policy }, { enabled: true }).changedPaths).toEqual(path);
   });
 });
+
+// DUR-5258: the stored commands only run for a typed strategy, so an agent must not drop the type.
+describe("workspaceStrategy type carry-forward", () => {
+  const stored = {
+    enabled: true,
+    workspaceStrategy: { type: "git_worktree", provisionCommand: "p" },
+  };
+  const typePath = "executionWorkspacePolicy.workspaceStrategy.type";
+
+  it("keeps the stored type when the agent sends a strategy without one", () => {
+    const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
+      { enabled: true, workspaceStrategy: { baseRef: "main" } },
+      stored,
+    );
+    expect(changedPaths).toEqual([]);
+    expect((policy as any).workspaceStrategy).toEqual({ baseRef: "main", type: "git_worktree", provisionCommand: "p" });
+  });
+
+  it("keeps the type when the agent sends a strategy with only its own commands left out", () => {
+    const { policy } = carryForwardProtectedProjectPolicyFields(
+      { enabled: true, workspaceStrategy: { provisionCommand: "p" } },
+      stored,
+    );
+    expect((policy as any).workspaceStrategy).toEqual({ type: "git_worktree", provisionCommand: "p" });
+  });
+
+  it("refuses a different type while a command is stored, and accepts the same one", () => {
+    expect(
+      carryForwardProtectedProjectPolicyFields(
+        { enabled: true, workspaceStrategy: { type: "project_primary" } },
+        stored,
+      ).changedPaths,
+    ).toEqual([typePath]);
+    expect(
+      carryForwardProtectedProjectPolicyFields(
+        { enabled: true, workspaceStrategy: { type: "git_worktree" } },
+        stored,
+      ).changedPaths,
+    ).toEqual([]);
+  });
+
+  it("leaves the type editable when no command is stored", () => {
+    const noCommand = { enabled: true, workspaceStrategy: { type: "git_worktree" } };
+    const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
+      { enabled: true, workspaceStrategy: { type: "project_primary" } },
+      noCommand,
+    );
+    expect(changedPaths).toEqual([]);
+    expect((policy as any).workspaceStrategy).toEqual({ type: "project_primary" });
+  });
+});
+
+// DUR-5258: a top-level trustPreset/reviewPreset is read by the trust resolver, so it is protected.
+describe("top-level trustPreset / reviewPreset carry-forward", () => {
+  const reviewPreset = { id: "low_trust_review", version: 1, rawOutputDisposition: "quarantine" };
+  const stored = { enabled: true, trustPreset: "low_trust_review", reviewPreset };
+
+  it("keeps them when the agent leaves them out or sends null", () => {
+    for (const sent of [{ enabled: true }, null]) {
+      const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(sent, stored);
+      expect(changedPaths).toEqual([]);
+      expect((policy as any).trustPreset).toBe("low_trust_review");
+      expect((policy as any).reviewPreset).toEqual(reviewPreset);
+    }
+  });
+
+  it("accepts the stored values sent back unchanged", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ ...stored }, stored).changedPaths).toEqual([]);
+  });
+
+  it("flags a different, nulled or newly set preset", () => {
+    expect(
+      carryForwardProtectedProjectPolicyFields({ enabled: true, trustPreset: "standard" }, stored).changedPaths,
+    ).toEqual(["executionWorkspacePolicy.trustPreset"]);
+    expect(
+      carryForwardProtectedProjectPolicyFields({ enabled: true, reviewPreset: null }, stored).changedPaths,
+    ).toEqual(["executionWorkspacePolicy.reviewPreset"]);
+    expect(
+      carryForwardProtectedProjectPolicyFields({ enabled: true, trustPreset: "x" }, { enabled: true }).changedPaths,
+    ).toEqual(["executionWorkspacePolicy.trustPreset"]);
+  });
+
+  it("refuses naming them on create", () => {
+    expect(collectProjectExecutionWorkspaceCommandPaths({ enabled: true, trustPreset: "x", reviewPreset: {} })).toEqual([
+      "executionWorkspacePolicy.trustPreset",
+      "executionWorkspacePolicy.reviewPreset",
+    ]);
+  });
+});
