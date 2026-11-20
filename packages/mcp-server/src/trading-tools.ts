@@ -122,5 +122,15 @@ export function createTradingToolDefinitions(client: PaperclipApiClient): ToolDe
       }),
       ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/changes`, { body }),
     ),
+    makeTool(
+      "trading_log_forecast",
+      "Log your own probability call for a strategy's coin, for the bar that JUST closed. You send only `probabilityUp` (your chance, 0.01 to 0.99 and not 0.5, that the price is higher when the strategy's prediction horizon ends) and a short `reason` in plain words. The server picks the bar, the price, the horizon and the time; you cannot set or change any of them, and a call is accepted only within 15 minutes after a bar closes, or within 2% of the strategy's prediction horizon if that is shorter (so strategies that predict only one or two short bars take almost no calls); otherwise wait for the next close. One call per strategy per bar, never edited. It is scored forward only, next to the rules and the simple baselines, as its own forecaster. It is never backtested, has no effect on any order, and the reason is only kept as a note: news or web text may inform it but never reaches the trading engine.",
+      z.object({
+        strategyId: z.string().uuid(),
+        probabilityUp: z.number().min(0.01).max(0.99).describe("Your probability that the price is higher at the end of the horizon, from the closing price of the newest closed bar"),
+        reason: z.string().min(5).max(500).describe("Why, in one or two plain sentences"),
+      }),
+      ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/forecasts`, { body }),
+    ),
   ];
 }
