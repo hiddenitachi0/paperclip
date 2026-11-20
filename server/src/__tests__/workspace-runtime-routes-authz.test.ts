@@ -449,7 +449,6 @@ describe.sequential("workspace runtime service route authorization", () => {
     for (const [sent, path] of [
       [{ ...stored, enabled: false }, "executionWorkspacePolicy.enabled"],
       [{ ...stored, defaultMode: "adapter_default" }, "executionWorkspacePolicy.defaultMode"],
-      [{ enabled: true, defaultMode: "isolated_workspace" }, "provisionCommand"],
     ] as const) {
       mockProjectService.update.mockClear();
       mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: stored });
@@ -457,9 +456,20 @@ describe.sequential("workspace runtime service route authorization", () => {
       const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
       expect(res.status).toBe(403);
       expect(res.body.error).toContain(path);
-      expect(res.body.error).toContain("Only a person on the board");
+      expect(res.body.error).toContain("settings only the board can change");
       expect(mockProjectService.update).not.toHaveBeenCalled();
     }
+    // omitting the command is carried forward (DUR-5231), not refused
+    mockProjectService.update.mockClear();
+    mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: stored });
+    mockProjectService.update.mockResolvedValue(buildProject());
+    const carried = await request(await createProjectApp(agent))
+      .patch(`/api/projects/${projectId}`)
+      .send({ executionWorkspacePolicy: { enabled: true, defaultMode: "isolated_workspace" } });
+    expect(carried.status).toBe(200);
+    expect(mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy.workspaceStrategy.provisionCommand).toBe(
+      "pnpm install",
+    );
     // a board user may change them
     mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: stored });
     mockProjectService.update.mockResolvedValue(buildProject());
@@ -485,7 +495,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     });
 
     it("keeps a stored policy when an agent omits it, sends null, or sends it back unchanged", async () => {
-      for (const sent of [{ enabled: true }, null, { enabled: false }, { enabled: true, authorizationPolicy: policy }]) {
+      for (const sent of [{ enabled: true }, null, { enabled: true, authorizationPolicy: policy }]) {
         mockProjectService.update.mockClear();
         mockProjectService.getById.mockResolvedValue(storedProject());
         mockProjectService.update.mockResolvedValue(buildProject());

@@ -611,4 +611,77 @@ describe("issue workspace command authorization", () => {
       .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
     expect(board.status).toBe(201);
   });
+
+  describe("task mode that would switch off the project's board-set fields (DUR-5246)", () => {
+    const stored = {
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i", teardownCommand: "rm -rf x" },
+      workspaceRuntime: { services: [{ name: "web", command: "pnpm dev" }] },
+    };
+    beforeEach(() => {
+      mockProjectService.getById.mockResolvedValue({ id: PROJECT_ID, executionWorkspacePolicy: stored });
+    });
+
+    it("refuses an agent task create or PATCH with mode agent_default/shared_workspace/operator_branch", async () => {
+      const app = await createApp(agentActor);
+      for (const mode of ["agent_default", "shared_workspace", "operator_branch"]) {
+        const created = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings: { mode } });
+        expect(created.status).toBe(403);
+        expect(created.body.error).toContain("executionWorkspaceSettings.mode");
+      }
+      mockIssueService.getById.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+      mockIssueService.getByIdentifier.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+      const patched = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(patched.status).toBe(403);
+      expect(mockIssueService.create).not.toHaveBeenCalled();
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses a board_delegate token the same way", async () => {
+      const app = await createApp(delegateActor);
+      const created = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(created.status).toBe(403);
+    });
+
+    it("allows isolated_workspace, a board user, and a project with nothing stored", async () => {
+      const agentApp = await createApp(agentActor);
+      const ok = await request(agentApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Iso", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "isolated_workspace" } });
+      expect(ok.status).toBe(201);
+
+      const boardApp = await createApp(boardActor);
+      const board = await request(boardApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(board.status).toBe(201);
+
+      mockProjectService.getById.mockResolvedValue({
+        id: PROJECT_ID,
+        executionWorkspacePolicy: { enabled: true, defaultMode: "isolated_workspace" },
+      });
+      const bare = await request(agentApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Plain", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+      expect(bare.status).toBe(201);
+    });
+
+    it("lets an agent resend the task's stored mode on PATCH", async () => {
+      const issue = makeIssue({ projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).not.toBe(403);
+    });
+  });
 });

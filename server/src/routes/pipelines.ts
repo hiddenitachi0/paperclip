@@ -22,6 +22,7 @@ import {
   pipelineStages,
   pipelineTransitions,
   pipelines,
+  projects,
   routines,
   routineTriggers,
   withCompanyScope,
@@ -60,6 +61,8 @@ import { accessService } from "../services/access.js";
 import { authorizationService } from "../services/authorization.js";
 import { issueService } from "../services/issues.js";
 import { assertCompanyAccess } from "./authz.js";
+import { assertAgentStageConfigWorkspaceSettingsAllowed } from "./pipeline-stage-workspace-authz.js";
+import { isBoardOnlyBlockedActor } from "./workspace-command-authz.js";
 import {
   computePipelineHealth,
   deriveCaseType,
@@ -96,6 +99,24 @@ type PipelineRouteDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 const stageKindSchema = z.enum(["open", "working", "review", "done", "cancelled"]);
 const jsonObjectSchema = z.record(z.string(), z.unknown());
 const stageConfigSchema = z.record(z.string(), z.unknown()).default({});
+
+async function assertAgentStageWorkspaceSettingsAllowed(
+  req: Request,
+  db: Db,
+  companyId: string,
+  config: unknown,
+  storedConfig: unknown,
+) {
+  await assertAgentStageConfigWorkspaceSettingsAllowed(req, config, storedConfig, async (projectId) => {
+    const [project] = await db
+      .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
+      .limit(1);
+    return project?.executionWorkspacePolicy ?? null;
+  });
+}
+
 const casePatchSchema = z.object({
   title: z.string().trim().min(1).max(500).optional(),
   summary: z.string().max(8_000).nullable().optional(),
@@ -983,6 +1004,9 @@ export function pipelineRoutes(rawDb: Db, options: Parameters<typeof pipelineSer
         reason: decision.reason,
       });
     }
+    for (const stage of req.body.stages ?? []) {
+      await assertAgentStageWorkspaceSettingsAllowed(req, db, companyId, stage.config, null);
+    }
     try {
       const created = await svc.createPipeline({
         companyId,
@@ -1340,6 +1364,7 @@ export function pipelineRoutes(rawDb: Db, options: Parameters<typeof pipelineSer
     const companyId = await resolvePipelineCompanyId(db, pipelineId);
     await assertPipelineWriteAccess(req, { access, companyId, pipelineId });
     const actor = actorForMutation(req);
+    await assertAgentStageWorkspaceSettingsAllowed(req, db, companyId, req.body.config, null);
     try {
       const stage = await svc.createStage({
         companyId,
@@ -1363,6 +1388,14 @@ export function pipelineRoutes(rawDb: Db, options: Parameters<typeof pipelineSer
     const companyId = await resolvePipelineCompanyId(db, pipelineId);
     await assertPipelineWriteAccess(req, { access, companyId, pipelineId });
     const actor = actorForMutation(req);
+    if (isBoardOnlyBlockedActor(req) && req.body.config !== undefined) {
+      const [storedStage] = await db
+        .select({ config: pipelineStages.config })
+        .from(pipelineStages)
+        .where(and(eq(pipelineStages.id, stageId), eq(pipelineStages.pipelineId, pipelineId)))
+        .limit(1);
+      await assertAgentStageWorkspaceSettingsAllowed(req, db, companyId, req.body.config, storedStage?.config ?? null);
+    }
     try {
       res.json(await svc.updateStage({ companyId, pipelineId, stageId, patch: req.body, actor }));
     } catch (error) {

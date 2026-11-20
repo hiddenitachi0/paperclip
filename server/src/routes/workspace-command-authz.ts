@@ -324,7 +324,7 @@ const PROJECT_WORKSPACE_CODE_LOCATION_FIELDS = [
   "cleanupCommand",
 ] as const;
 
-function sameValue(a: unknown, b: unknown) {
+export function sameValue(a: unknown, b: unknown) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
@@ -435,6 +435,62 @@ export function assertAgentIssueWorkspaceOverrideAllowed(
   if (input.executionWorkspaceSettings === undefined) return;
   if (!isRecord(projectPolicy) || projectPolicy.allowIssueOverride !== false) return;
   throw forbidden(ISSUE_WORKSPACE_OVERRIDE_DISABLED_MESSAGE);
+}
+
+/**
+ * DUR-5246: a task's `executionWorkspaceSettings.mode` can switch the project's board-set fields
+ * off without naming them: a non-isolated mode drops the project's provision/teardown commands,
+ * and `agent_default` also drops its runtime services. For an agent (or delegate token) the mode
+ * is refused when it would do that and differs from what the project's own default already gives
+ * and from the task's stored mode (so a round-trip PATCH still works). `requireIsolation`
+ * projects are unaffected: isolation wins whatever the task says.
+ */
+export function collectAgentTaskModeDropPaths(
+  settings: unknown,
+  projectPolicy: unknown,
+  existingSettings?: unknown,
+): string[] {
+  if (!isRecord(settings) || !isRecord(projectPolicy)) return [];
+  const mode = settings.mode;
+  if (mode !== "shared_workspace" && mode !== "agent_default" && mode !== "operator_branch") return [];
+  if (projectPolicy.enabled !== true || projectPolicy.requireIsolation === true) return [];
+  const strategy = isRecord(projectPolicy.workspaceStrategy) ? projectPolicy.workspaceStrategy : null;
+  const dropsCommands = isNonEmptyCommand(strategy?.provisionCommand) || isNonEmptyCommand(strategy?.teardownCommand);
+  const dropsRuntime = mode === "agent_default"
+    && projectPolicy.workspaceRuntime !== undefined && projectPolicy.workspaceRuntime !== null;
+  if (!dropsCommands && !dropsRuntime) return [];
+  const defaultMode = projectPolicy.defaultMode === "isolated_workspace"
+    ? "isolated_workspace"
+    : projectPolicy.defaultMode === "operator_branch"
+      ? "operator_branch"
+      : projectPolicy.defaultMode === "adapter_default"
+        ? "agent_default"
+        : "shared_workspace";
+  if (mode === defaultMode) return [];
+  if (isRecord(existingSettings) && existingSettings.mode === mode) return [];
+  return ["executionWorkspaceSettings.mode"];
+}
+
+/**
+ * DUR-5246: every path that turns `executionWorkspaceSettings` into a task (routine runs,
+ * pipeline stage entry) must apply the same three checks as the task routes: no board-only
+ * commands/runtime, the project's `allowIssueOverride`, and no `mode` that switches the
+ * project's board-set fields off. A board user is not bound by any of them.
+ */
+export function assertAgentTaskWorkspaceSettingsAllowed(
+  req: Request,
+  executionWorkspaceSettings: unknown,
+  projectPolicy: unknown,
+  existingSettings?: unknown,
+) {
+  if (!isBoardOnlyBlockedActor(req)) return;
+  if (executionWorkspaceSettings === undefined || executionWorkspaceSettings === null) return;
+  assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths({ executionWorkspaceSettings }));
+  assertAgentIssueWorkspaceOverrideAllowed(req, { executionWorkspaceSettings }, projectPolicy);
+  assertBoardOnlyWorkspaceSettingsMutation(
+    req,
+    collectAgentTaskModeDropPaths(executionWorkspaceSettings, projectPolicy, existingSettings),
+  );
 }
 
 export function collectExecutionWorkspaceCommandPaths(input: {

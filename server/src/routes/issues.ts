@@ -150,6 +150,7 @@ import {
   assertBoardOnlyWorkspaceSettingsMutation,
   collectIssueWorkspaceCommandPaths,
   assertAgentIssueWorkspaceOverrideAllowed,
+  collectAgentTaskModeDropPaths,
   isBoardOnlyBlockedActor,
 } from "./workspace-command-authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
@@ -1546,10 +1547,16 @@ export function issueRoutes(
     req: Request,
     body: { executionWorkspaceSettings?: unknown },
     projectId: string | null | undefined,
+    existingSettings?: unknown,
   ) => {
     if (!isBoardOnlyBlockedActor(req) || body.executionWorkspaceSettings === undefined || !projectId) return;
     const project = await projectsSvc.getById(projectId);
     assertAgentIssueWorkspaceOverrideAllowed(req, body, project?.executionWorkspacePolicy ?? null);
+    // A task `mode` can switch off the project's board-set commands/services without naming them.
+    assertBoardOnlyWorkspaceSettingsMutation(
+      req,
+      collectAgentTaskModeDropPaths(body.executionWorkspaceSettings, project?.executionWorkspacePolicy ?? null, existingSettings),
+    );
   };
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -6996,7 +7003,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : existing.projectId);
+    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : existing.projectId, existing.executionWorkspaceSettings);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
     // DUR-45: never persist status:"blocked" for a cheap/status-only run's own

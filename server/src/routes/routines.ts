@@ -13,7 +13,8 @@ import {
 } from "@paperclipai/shared";
 import { trackRoutineCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { accessService, documentAnnotationService, logActivity, routineService } from "../services/index.js";
+import { accessService, documentAnnotationService, logActivity, projectService, routineService } from "../services/index.js";
+import { assertAgentTaskWorkspaceSettingsAllowed } from "./workspace-command-authz.js";
 import { assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
@@ -669,6 +670,17 @@ export function routineRoutes(
       return;
     }
     await assertBoardCanAssignTasks(req, routine.companyId);
+    // DUR-5246: the run body's executionWorkspaceSettings land on the new task unchanged, so an
+    // agent gets the same board-only / allowIssueOverride / mode checks as on the task routes.
+    if (req.body.executionWorkspaceSettings != null) {
+      const targetProjectId = req.body.projectId ?? routine.projectId ?? null;
+      const targetProject = targetProjectId ? await projectService(db).getById(targetProjectId) : null;
+      assertAgentTaskWorkspaceSettingsAllowed(
+        req,
+        req.body.executionWorkspaceSettings,
+        targetProject?.companyId === routine.companyId ? targetProject.executionWorkspacePolicy ?? null : null,
+      );
+    }
     const run = await svc.runRoutine(routine.id, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? null : null,
