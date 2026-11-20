@@ -41,8 +41,15 @@ function collectExecutionWorkspaceConfigCommandPaths(raw: unknown, prefix: strin
   return paths;
 }
 
+// DUR-5246: the board-only guard used to be "not an agent". A recovery-only
+// board_delegate token passes company access but is not a person on the board,
+// so it is treated like an agent for these fields.
+export function isBoardOnlyBlockedActor(req: Request) {
+  return req.actor.type === "agent" || req.actor.type === "board_delegate";
+}
+
 export function assertNoAgentHostWorkspaceCommandMutation(req: Request, paths: string[]) {
-  if (req.actor.type !== "agent" || paths.length === 0) return;
+  if (!isBoardOnlyBlockedActor(req) || paths.length === 0) return;
   throw forbidden(
     `Agent keys cannot modify host-executed workspace commands (${paths.join(", ")}).`,
   );
@@ -277,7 +284,7 @@ export function collectProjectWorkspaceCodeLocationChanges(
 }
 
 export function assertBoardOnlyProjectWorkspaceChange(req: Request, changed: string[] | true) {
-  if (req.actor.type !== "agent") return;
+  if (!isBoardOnlyBlockedActor(req)) return;
   if (changed !== true && changed.length === 0) return;
   throw forbidden(PROJECT_CODE_LOCATION_BOARD_ONLY_MESSAGE);
 }
@@ -305,12 +312,19 @@ export function collectIssueWorkspaceCommandPaths(input: {
 }): string[] {
   const paths: string[] = [];
   if (isRecord(input.executionWorkspaceSettings)) {
+    const settings = input.executionWorkspaceSettings;
     paths.push(
       ...collectWorkspaceStrategyCommandPaths(
-        input.executionWorkspaceSettings.workspaceStrategy,
+        settings.workspaceStrategy,
         "executionWorkspaceSettings.workspaceStrategy",
       ),
     );
+    // DUR-5246: workspaceRuntime holds service commands the server runs on the
+    // host, and a task's value beats the project's, so it is board-only here
+    // exactly as on the project. Same for the command/authorization keys.
+    for (const key of ["workspaceRuntime", "authorizationPolicy", "setupCommand", "cleanupCommand"]) {
+      if (hasOwn(settings, key)) paths.push(`executionWorkspaceSettings.${key}`);
+    }
   }
   if (isRecord(input.assigneeAdapterOverrides)) {
     const adapterConfig = input.assigneeAdapterOverrides.adapterConfig;
@@ -321,9 +335,31 @@ export function collectIssueWorkspaceCommandPaths(input: {
           "assigneeAdapterOverrides.adapterConfig.workspaceStrategy",
         ),
       );
+      if (hasOwn(adapterConfig, "workspaceRuntime")) {
+        paths.push("assigneeAdapterOverrides.adapterConfig.workspaceRuntime");
+      }
     }
   }
   return paths;
+}
+
+/**
+ * DUR-5246: `allowIssueOverride: false` on a project means tasks may not carry
+ * their own workspace settings. An agent write that names `executionWorkspaceSettings`
+ * (any value) into such a project is refused; a board user is not bound by it.
+ */
+export const ISSUE_WORKSPACE_OVERRIDE_DISABLED_MESSAGE =
+  "This project does not allow tasks to override the workspace settings. Only a person on the board can change them.";
+
+export function assertAgentIssueWorkspaceOverrideAllowed(
+  req: Request,
+  input: { executionWorkspaceSettings?: unknown },
+  projectPolicy: unknown,
+) {
+  if (!isBoardOnlyBlockedActor(req)) return;
+  if (input.executionWorkspaceSettings === undefined) return;
+  if (!isRecord(projectPolicy) || projectPolicy.allowIssueOverride !== false) return;
+  throw forbidden(ISSUE_WORKSPACE_OVERRIDE_DISABLED_MESSAGE);
 }
 
 export function collectExecutionWorkspaceCommandPaths(input: {

@@ -149,6 +149,8 @@ async function alertOwningCompanyOfCrossCompanyWriteAttempt(
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
+  assertAgentIssueWorkspaceOverrideAllowed,
+  isBoardOnlyBlockedActor,
 } from "./workspace-command-authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import {
@@ -1538,6 +1540,17 @@ export function issueRoutes(
   const instanceSettings = instanceSettingsService(db);
   const agentsSvc = agentService(db);
   const projectsSvc = projectService(db);
+  // DUR-5246: when the project says allowIssueOverride=false, an agent (or delegate
+  // token) may not send task-level workspace settings into it.
+  const assertIssueWorkspaceOverrideAllowed = async (
+    req: Request,
+    body: { executionWorkspaceSettings?: unknown },
+    projectId: string | null | undefined,
+  ) => {
+    if (!isBoardOnlyBlockedActor(req) || body.executionWorkspaceSettings === undefined || !projectId) return;
+    const project = await projectsSvc.getById(projectId);
+    assertAgentIssueWorkspaceOverrideAllowed(req, body, project?.executionWorkspacePolicy ?? null);
+  };
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
@@ -6132,6 +6145,7 @@ export function issueRoutes(
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId);
     const { watchdogDiscovery: rawWatchdogDiscovery, bragOnDone: requestedBragOnDone, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
     const watchdogProductBugFollowUp = await resolveTaskWatchdogProductBugFollowUp(
@@ -6483,6 +6497,7 @@ export function issueRoutes(
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(parent.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : parent.projectId);
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
       req.body.assigneeAgentId as string | null | undefined,
@@ -6697,6 +6712,7 @@ export function issueRoutes(
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       if (!assertBragOnDoneFieldAllowed(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
+      await assertIssueWorkspaceOverrideAllowed(req, childBody, childBody.projectId !== undefined ? childBody.projectId : sourceIssue.projectId);
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       applyPinnedAssigneeAdapterOverrides(req, childBody, null);
       await assertIssueAssigneeOverridesValid(
@@ -6980,6 +6996,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : existing.projectId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
     // DUR-45: never persist status:"blocked" for a cheap/status-only run's own

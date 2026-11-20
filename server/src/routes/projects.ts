@@ -30,6 +30,7 @@ import {
 import {
   assertBoardOnlyProjectWorkspaceChange,
   assertNoAgentHostWorkspaceCommandMutation,
+  isBoardOnlyBlockedActor,
   collectProjectWorkspaceCodeLocationChanges,
   collectDeployPolicyCommandPaths,
   collectProjectDeployTransportCommandPaths,
@@ -389,7 +390,7 @@ export function projectRoutes(rawDb: Db) {
     // agent that leaves the key out (or sends `null`) must not be able to drop it.
     // Carry the stored value forward for agent writes.
     if (
-      req.actor.type === "agent" &&
+      isBoardOnlyBlockedActor(req) &&
       body.executionWorkspacePolicy !== undefined &&
       (existing.executionWorkspacePolicy as { requireIsolation?: unknown } | null)?.requireIsolation === true
     ) {

@@ -36,6 +36,10 @@ const mockExecutionWorkspaceService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
 
+const mockProjectService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockFeedbackService = vi.hoisted(() => ({
   listIssueVotesForUser: vi.fn(),
   saveIssueVote: vi.fn(),
@@ -150,7 +154,7 @@ function registerRouteMocks() {
     }),
     issueService: () => mockIssueService,
     logActivity: mockLogActivity,
-    projectService: () => ({}),
+    projectService: () => mockProjectService,
     routineService: () => mockRoutineService,
     workProductService: () => ({}),
   }));
@@ -242,6 +246,7 @@ describe("issue workspace command authorization", () => {
       permissions: null,
     });
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
+    mockProjectService.getById.mockResolvedValue(null);
     mockFeedbackService.listIssueVotesForUser.mockResolvedValue([]);
     mockFeedbackService.saveIssueVote.mockResolvedValue({
       vote: null,
@@ -467,5 +472,143 @@ describe("issue workspace command authorization", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("host-executed workspace commands");
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+  const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
+  const agentActor = {
+    type: "agent",
+    agentId: "agent-1",
+    companyId: COMPANY_ID,
+    source: "agent_key",
+    runId: "run-1",
+  };
+  const boardActor = {
+    type: "board",
+    userId: "local-board",
+    companyIds: [COMPANY_ID],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+  };
+  const delegateActor = {
+    type: "board_delegate",
+    userId: "op-1",
+    companyIds: [COMPANY_ID],
+    delegateTokenId: "tok-1",
+    delegateName: "Recovery bot",
+    delegateScopes: ["agent.resume"],
+    source: "board_delegate_key",
+    isInstanceAdmin: true,
+  };
+  const runtimeSettings = {
+    workspaceRuntime: { services: [{ name: "web", command: "touch /tmp/paperclip-rce" }] },
+  };
+
+  it("rejects an agent creating a task with executionWorkspaceSettings.workspaceRuntime (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("executionWorkspaceSettings.workspaceRuntime");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent PATCHing a task's workspaceRuntime, null included (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    for (const executionWorkspaceSettings of [runtimeSettings, { workspaceRuntime: null }]) {
+      const res = await request(app).patch("/api/issues/issue-1").send({ executionWorkspaceSettings });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("executionWorkspaceSettings.workspaceRuntime");
+    }
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent creating a child task with a workspaceRuntime override (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(res.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent that sets a workspaceRuntime override through assigneeAdapterOverrides (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ assigneeAdapterOverrides: { adapterConfig: { workspaceRuntime: runtimeSettings.workspaceRuntime } } });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("assigneeAdapterOverrides.adapterConfig.workspaceRuntime");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set a task's workspaceRuntime on create and PATCH (DUR-5246)", async () => {
+    const app = await createApp(boardActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Board task", executionWorkspaceSettings: runtimeSettings });
+    expect(created.status).toBe(201);
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: runtimeSettings });
+    expect(patched.status).toBe(200);
+  });
+
+  it("treats a board_delegate token like an agent for task workspace commands (DUR-5246)", async () => {
+    const app = await createApp(delegateActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(created.status).toBe(403);
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree", provisionCommand: "id" } } });
+    expect(patched.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent task-level workspace override when the project sets allowIssueOverride=false (DUR-5246)", async () => {
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+    });
+    const app = await createApp(agentActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Override", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(created.status).toBe(403);
+    expect(created.body.error).toContain("does not allow tasks to override");
+    mockIssueService.getById.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+    mockIssueService.getByIdentifier.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(patched.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows agent task-level workspace settings when allowIssueOverride is true or unset, and board users when false (DUR-5246)", async () => {
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true },
+    });
+    const agentApp = await createApp(agentActor);
+    const ok = await request(agentApp)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Mode only", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "isolated_workspace" } });
+    expect(ok.status).toBe(201);
+
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+    });
+    const boardApp = await createApp(boardActor);
+    const board = await request(boardApp)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(board.status).toBe(201);
   });
 });
