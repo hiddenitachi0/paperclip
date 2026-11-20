@@ -686,7 +686,9 @@ export function InstanceGeneralSettings() {
             <p className="max-w-2xl text-sm text-muted-foreground">
               Configure how long automatic database backups are retained. Backups run roughly
               every hour and are compressed with gzip. Within the daily window all backups are
-              kept; beyond that, one backup per week and one per month are preserved.
+              kept; beyond that, one backup per week and one per month are preserved. If this
+              install uses the separate backup service, that service makes the backups and
+              follows these settings; the server does not run backups itself.
             </p>
           </div>
 

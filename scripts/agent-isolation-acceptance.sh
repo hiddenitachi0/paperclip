@@ -74,6 +74,21 @@
 #     cache; the deploy runner's root exec does not run /paperclip/.profile
 #     (negative controls e and f prove each plant works when unguarded).
 #
+# Stage 6 (server-only folders, DUR-5176) with ISOLATION_BACKUP_SIDECAR=1
+# adds docker/docker-compose.backup.yml: the hourly dumps are made by a
+# separate `backup` container into a folder the server container does not
+# have. Checked:
+#   - a dump shows up in the sidecar folder, with today's file name, made by a
+#     read-only database login (BYPASSRLS + pg_read_all_data), and restores
+#     with psql into a fresh database;
+#   - NO dump exists anywhere under /paperclip, and the backup container has
+#     no /paperclip mount (and the server no /backups);
+#   - "run backup now" answers 409 "managed by the backup service" instead of
+#     writing a dump into the server's volume;
+#   - the probe reports PASS 6 server-only-path for data/backups;
+#   - negative control (g): a dump planted where the server used to write them
+#     must be reported as a LEAK by the same probe.
+#
 # Negative controls (the harness must be able to see a leak, or a green run
 # means nothing):
 #   a. The same probe run with the container's full environment (`docker exec
@@ -101,8 +116,23 @@ if [ "$SECRETS_MODE" = file ]; then
   COMPOSE+=(-f docker/docker-compose.secrets.yml)
 fi
 
+BACKUP_SIDECAR="${ISOLATION_BACKUP_SIDECAR:-0}"
+case "$BACKUP_SIDECAR" in 0|1) ;; *) echo "ISOLATION_BACKUP_SIDECAR must be 0 or 1" >&2; exit 2 ;; esac
 ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1 2}"
+# The sidecar scenario is what makes stage 6 pass, so it enforces stage 6.
+if [ "$BACKUP_SIDECAR" = 1 ]; then
+  case " $ENFORCED_STAGES " in *" 6 "*) ;; *) ENFORCED_STAGES="$ENFORCED_STAGES 6" ;; esac
+fi
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-isolation-acceptance.XXXXXX")"
+SIDECAR_DIR="$WORK_DIR/sidecar-backups"
+SIDECAR_SECRETS_FILE="$WORK_DIR/backup.env"
+if [ "$BACKUP_SIDECAR" = 1 ]; then
+  COMPOSE+=(-f docker/docker-compose.backup.yml)
+  # Compose reads these from the shell before docker/.env. CI-only locations;
+  # production uses /root/paperclip-backups and /root/paperclip-secrets/backup.env.
+  export PAPERCLIP_BACKUP_DIR="$SIDECAR_DIR"
+  export PAPERCLIP_BACKUP_SECRETS_FILE="$SIDECAR_SECRETS_FILE"
+fi
 SERVER_SECRETS_FILE="$WORK_DIR/server-secrets.env"
 PAYLOAD_FILE="$WORK_DIR/payload.json"
 LOG_DIR="${ISOLATION_LOG_DIR:-$REPO_ROOT/.dur3994-isolation-acceptance-logs}"
@@ -601,6 +631,14 @@ stage1_server_checks() {
     return
   fi
 
+  # DUR-5176: with the backup container the server does not make dumps at all,
+  # so the spy-and-restore check below does not apply (stage 6's checks, run
+  # from main, replace it).
+  if [ "$BACKUP_SIDECAR" = 1 ]; then
+    log "stage 1: skipping the server-made backup check (the backup container makes the dumps)"
+    return
+  fi
+
   log "stage 1: backup through the server with a pg_dump spy"
   tdocker 30 exec -u 0 -i "$container" sh -c 'cat >/usr/local/bin/dur3994-pg-dump-spy && chmod 755 /usr/local/bin/dur3994-pg-dump-spy' <<'SPY'
 #!/bin/sh
@@ -662,6 +700,139 @@ print(json.dumps({k:d.get(k) for k in ("backupFile","engine","sizeBytes","pgDump
     log "PASS 1 backup-restore: $restored_count companies restored"
   else
     fail "the restored database does not match (companies: source=${source_count:-?} restored=${restored_count:-?})"
+  fi
+}
+
+# Stage 6 (DUR-5176): bring up the backup container, with its own read-only
+# database login, once the database has its schema (the server creates it).
+sidecar_start() {
+  local backup_password
+  backup_password="$(canary)"
+  # CI only: the folder is world-writable and the login file world-readable
+  # because the runner's user owns them and the container's root has no
+  # capabilities (cap_drop ALL, so no DAC_OVERRIDE). Production's are root 0700 / 0400.
+  mkdir -p "$SIDECAR_DIR"
+  chmod 777 "$SIDECAR_DIR"
+  if [ -z "$(db_query "SELECT 1 FROM pg_roles WHERE rolname='paperclip_backup'")" ]; then
+    if ! docker exec "$(tcompose 30 ps -q db)" psql -U paperclip -d paperclip -v ON_ERROR_STOP=1 -q \
+      -c "CREATE ROLE paperclip_backup LOGIN PASSWORD '$backup_password' BYPASSRLS" \
+      -c "GRANT pg_read_all_data TO paperclip_backup" >"$LOG_DIR/backup-role.log" 2>&1; then
+      fail "could not create the read-only backup login (see backup-role.log)"
+      return 1
+    fi
+  fi
+  printf 'PGUSER=paperclip_backup\nPGPASSWORD=%s\n' "$backup_password" >"$SIDECAR_SECRETS_FILE"
+  chmod 444 "$SIDECAR_SECRETS_FILE"
+  log "stage 6: starting the backup container"
+  if ! tcompose 300 up -d --no-deps backup >"$LOG_DIR/compose-backup-up.log" 2>&1; then
+    tail -30 "$LOG_DIR/compose-backup-up.log" >&2
+    fail "could not start the backup container"
+    return 1
+  fi
+}
+
+sidecar_container() { tcompose 30 ps -q backup; }
+
+sidecar_dumps() { # -> dump file names in the sidecar folder, one per line
+  tdocker 30 exec "$(sidecar_container)" sh -c 'ls /backups' 2>/dev/null | grep -E '^paperclip-[0-9]{8}-[0-9]{6}\.sql\.gz$' || true
+}
+
+# Stage 6: the dump is in the sidecar folder and nowhere under /paperclip;
+# the server cannot see the folder; it restores with psql.
+stage6_sidecar_checks() {
+  local container="$1" backup_container deadline dump status_code planted leak_report
+  backup_container="$(sidecar_container)"
+  if [ -z "$backup_container" ]; then
+    fail "the backup container is not running"
+    return
+  fi
+
+  log "stage 6: waiting for the first dump from the backup container"
+  deadline=$((SECONDS + 240))
+  dump=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    dump="$(sidecar_dumps | tail -1)"
+    [ -n "$dump" ] && break
+    sleep 5
+  done
+  if [ -z "$dump" ]; then
+    tcompose 30 logs --no-color --tail 40 backup 2>&1 | redact | sed 's/^/    /' >&2 || true
+    fail "no dump appeared in the backup folder within 240 s"
+    return
+  fi
+  log "PASS 6 sidecar-dump: $dump is in the backup folder"
+
+  # Nothing named like a dump anywhere under /paperclip (the volume agents can read).
+  if [ -n "$(tdocker 60 exec "$container" sh -c "find /paperclip -type f -name 'paperclip-*.sql*' 2>/dev/null | head -3")" ]; then
+    fail "LEAK 6 backup-dump-under-home: a dump exists under /paperclip"
+  else
+    log "PASS 6 no-dump-under-paperclip: no paperclip-*.sql* anywhere under /paperclip"
+  fi
+  # Neither container sees the other's folder.
+  if tdocker 30 inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' "$backup_container" | grep -qE '^/paperclip'; then
+    fail "the backup container has a /paperclip mount"
+  else
+    log "PASS 6 sidecar-no-paperclip-mount: the backup container has no /paperclip mount"
+  fi
+  if tdocker 30 exec "$container" sh -c 'test -e /backups' >/dev/null 2>&1; then
+    fail "the server container can see /backups"
+  else
+    log "PASS 6 server-cannot-see-backups: /backups does not exist in the server container"
+  fi
+
+  # The server no longer runs backups: the manual route says so and writes nothing.
+  local reply body
+  reply="$(tdocker 30 exec "$container" curl -s --max-time 20 -w '\n%{http_code}' -X POST "$API_BASE/api/instance/database-backups" \
+    -H 'Content-Type: application/json' --data '{}' 2>/dev/null || true)"
+  status_code="${reply##*$'\n'}"
+  body="${reply%$'\n'*}"
+  if [ "$status_code" = 409 ] && printf '%s' "$body" | grep -q 'backup_managed_externally'; then
+    log "PASS 6 manual-backup-managed: POST /api/instance/database-backups answers 409 managed by the backup service"
+  else
+    fail "the manual backup route did not answer 409 backup_managed_externally (status ${status_code:-none})"
+  fi
+  if [ -n "$(tdocker 30 exec "$container" sh -c 'ls /paperclip/instances/default/data/backups 2>/dev/null' || true)" ]; then
+    fail "the server wrote into /paperclip/instances/default/data/backups"
+  fi
+
+  log "stage 6: restoring that dump with psql into a fresh database"
+  local db_container local_copy
+  db_container="$(tcompose 30 ps -q db)"
+  local_copy="$WORK_DIR/restore-check.sql.gz"
+  if ! tdocker 120 cp "$backup_container:/backups/$dump" "$local_copy" >/dev/null 2>&1; then
+    fail "could not copy the dump out of the backup container"
+    return
+  fi
+  tdocker 60 exec "$db_container" createdb -U paperclip dur5176_restore_check >/dev/null 2>&1 || true
+  if ! gunzip -c "$local_copy" | tdocker 300 exec -i "$db_container" psql -U paperclip -d dur5176_restore_check \
+    -v ON_ERROR_STOP=1 -q >"$LOG_DIR/restore-sidecar.log" 2>&1; then
+    fail "the sidecar dump did not restore with psql (see restore-sidecar.log)"
+    return
+  fi
+  # The dump was taken right after boot, before the test companies were
+  # created, so compare the schema (table count) and that the data restored.
+  local source_tables restored_tables restored_companies
+  source_tables="$(db_query "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"
+  restored_tables="$(docker exec "$db_container" psql -U paperclip -d dur5176_restore_check -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" 2>/dev/null | tr -d '[:space:]')"
+  restored_companies="$(docker exec "$db_container" psql -U paperclip -d dur5176_restore_check -tAc 'SELECT count(*) FROM companies' 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$source_tables" ] && [ "$source_tables" -gt 0 ] && [ "$source_tables" = "$restored_tables" ] && [ -n "$restored_companies" ]; then
+    log "PASS 6 sidecar-restore: restored $restored_tables tables with psql (companies in the dump: $restored_companies)"
+  else
+    fail "the restored database does not look complete (tables: source=${source_tables:-?} restored=${restored_tables:-?})"
+  fi
+
+  # Negative control (g): the same probe must flag a dump the OLD way (as the
+  # server wrote it, readable by agents), or a green stage 6 proves nothing.
+  planted="/paperclip/instances/default/data/backups/paperclip-19990101-000000.sql.gz"
+  tdocker 30 exec -u node "$container" sh -c "mkdir -p /paperclip/instances/default/data/backups && echo '-- planted' | gzip >$planted"
+  leak_report="$(tdocker 120 exec -u node -e PROBE_ENFORCED_STAGES=6 -e PROBE_SKIP_SIGUSR1=1 "$container" sh "$PROBE_PATH" 2>/dev/null || true)"
+  printf '%s\n' "$leak_report" >"$LOG_DIR/stage6-planted-report.txt"
+  tdocker 30 exec -u node "$container" rm -f "$planted" >/dev/null 2>&1 || true
+  if printf '%s\n' "$leak_report" | grep -q '^LEAK 6 server-only-path .*/data/backups$' \
+    && printf '%s\n' "$leak_report" | grep -q '^LEAK 6 backup-dump-under-home '; then
+    log "PASS negative control (g): the probe flags a dump an agent can read"
+  else
+    fail "negative control (g): the probe did not flag a planted dump in the server's backup folder"
   fi
 }
 
@@ -947,7 +1118,11 @@ main() {
   fi
 
   log "building and booting the stack (project=$COMPOSE_PROJECT_NAME)"
-  if ! tcompose 1500 up -d --build >"$LOG_DIR/compose-up.log" 2>&1; then
+  local up_args=(up -d --build)
+  # The backup container needs its database login, which can only be created
+  # once the server has made the schema; it is started right after (sidecar_start).
+  [ "$BACKUP_SIDECAR" = 1 ] && up_args+=(--scale backup=0)
+  if ! tcompose 1500 "${up_args[@]}" >"$LOG_DIR/compose-up.log" 2>&1; then
     tail -50 "$LOG_DIR/compose-up.log" >&2
     fail "compose up failed"
     return 1
@@ -960,6 +1135,10 @@ main() {
 
   local container
   container="$(server_container)"
+
+  if [ "$BACKUP_SIDECAR" = 1 ] && ! sidecar_start; then
+    return 1
+  fi
 
   log "company B: a project folder with a canary file in it"
   local company_b other_dir
@@ -1021,6 +1200,14 @@ main() {
         fi
       done
     fi
+    if [ "$BACKUP_SIDECAR" = 1 ]; then
+      if ! printf '%s\n' "$report" | grep -q '^PASS 6 server-only-path .*/data/backups$'; then
+        fail "stage 6 check 'server-only-path .../data/backups' did not pass"
+      fi
+      if ! printf '%s\n' "$report" | grep -q '^PASS 6 backup-dump-under-home '; then
+        fail "stage 6 check 'backup-dump-under-home' did not pass"
+      fi
+    fi
     if stage_enforced 1; then
       for check in server-pid proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
         if ! printf '%s\n' "$report" | grep -q "^PASS 1 $check "; then
@@ -1042,6 +1229,9 @@ main() {
   if stage_enforced 1; then
     check_root_run_files "$container"
     stage1_server_checks "$container"
+  fi
+  if [ "$BACKUP_SIDECAR" = 1 ]; then
+    stage6_sidecar_checks "$container"
   fi
 
   log "negative control (b): an agent whose settings carry a canary must be caught"

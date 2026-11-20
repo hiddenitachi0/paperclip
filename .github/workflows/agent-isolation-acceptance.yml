@@ -51,6 +51,9 @@ on:
       - "scripts/node-module-guard.cjs"
       - "scripts/deploy-runner.sh"
       - "server/src/services/trusted-npm.ts"
+      - "docker/docker-compose.backup.yml"
+      - "scripts/backup-sidecar.sh"
+      - "server/src/routes/instance-database-backups.ts"
   push:
     branches:
       - custom
@@ -85,6 +88,9 @@ on:
       - "scripts/node-module-guard.cjs"
       - "scripts/deploy-runner.sh"
       - "server/src/services/trusted-npm.ts"
+      - "docker/docker-compose.backup.yml"
+      - "scripts/backup-sidecar.sh"
+      - "server/src/routes/instance-database-backups.ts"
 
 jobs:
   isolation-acceptance:
@@ -131,6 +137,10 @@ jobs:
         env:
           ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2' }}
           ISOLATION_SECRETS_MODE: ${{ matrix.secrets_mode }}
+          # DUR-5176: file mode is the hardened target, so it also runs the
+          # backup container (docker-compose.backup.yml) and stage 6; env mode
+          # keeps testing the server's own backup (stage 1 spy + restore).
+          ISOLATION_BACKUP_SIDECAR: ${{ matrix.secrets_mode == 'file' && '1' || '0' }}
           COMPOSE_PROJECT_NAME: dur3994-isolation-${{ matrix.secrets_mode }}
         run: ./scripts/agent-isolation-acceptance.sh
 

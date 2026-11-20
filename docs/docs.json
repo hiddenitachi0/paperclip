@@ -86,6 +86,7 @@
               "deploy/database",
               "deploy/secrets",
               "deploy/secrets-master-key-move",
+              "deploy/backup-sidecar",
               "deploy/website-sftp-deploy",
               "deploy/storage",
               "deploy/environment-variables"

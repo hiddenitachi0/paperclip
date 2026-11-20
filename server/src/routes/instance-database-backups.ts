@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { BackupRetentionPolicy, BackupStorageStats, RunDatabaseBackupResult } from "@paperclipai/db";
-import { badRequest } from "../errors.js";
+import { badRequest, conflict } from "../errors.js";
 import { assertInstanceAdmin } from "./authz.js";
 
 export type InstanceDatabaseBackupTrigger = "manual" | "scheduled";
@@ -26,6 +26,25 @@ export type InstanceDatabaseBackupService = {
 export type InstanceDatabaseBackupStorageStats = BackupStorageStats & {
   backupDir: string;
   retention: BackupRetentionPolicy;
+};
+
+/**
+ * DUR-5176: stable machine-readable code (in the error's `details.code`) the
+ * UI and scripts can key on instead of matching the message text.
+ */
+export const BACKUP_MANAGED_EXTERNALLY_CODE = "backup_managed_externally";
+
+export const BACKUP_MANAGED_EXTERNALLY_MESSAGE =
+  "Database backups are managed by the separate backup service on this install, not by the server. " +
+  "The server does not run backups or read the backup folder; see docs/deploy/backup-sidecar.";
+
+export type InstanceDatabaseBackupRoutesOptions = {
+  /**
+   * True when PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY is set: a separate
+   * container owns the dumps, so both routes answer with a clear 409 instead
+   * of touching the local backup folder.
+   */
+  managedExternally?: boolean;
 };
 
 function parseRetentionQuery(query: Record<string, unknown>): BackupRetentionPolicy | undefined {
@@ -55,17 +74,26 @@ function parseRetentionQuery(query: Record<string, unknown>): BackupRetentionPol
  * (the scheduled backup tick is one of the four consumers that must stay
  * bypass-scoped for its whole tick body, for the same reason).
  */
-export function instanceDatabaseBackupRoutes(service: InstanceDatabaseBackupService) {
+export function instanceDatabaseBackupRoutes(
+  service: InstanceDatabaseBackupService,
+  options: InstanceDatabaseBackupRoutesOptions = {},
+) {
   const router = Router();
 
   router.post("/instance/database-backups", async (req, res) => {
     assertInstanceAdmin(req);
+    if (options.managedExternally) {
+      throw conflict(BACKUP_MANAGED_EXTERNALLY_MESSAGE, { code: BACKUP_MANAGED_EXTERNALLY_CODE });
+    }
     const result = await service.runManualBackup();
     res.status(201).json(result);
   });
 
   router.get("/instance/database-backups/stats", async (req, res) => {
     assertInstanceAdmin(req);
+    if (options.managedExternally) {
+      throw conflict(BACKUP_MANAGED_EXTERNALLY_MESSAGE, { code: BACKUP_MANAGED_EXTERNALLY_CODE });
+    }
     const retention = parseRetentionQuery(req.query as Record<string, unknown>);
     res.json(await service.getStorageStats(retention));
   });
