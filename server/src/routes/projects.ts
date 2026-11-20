@@ -29,7 +29,9 @@ import {
 } from "../services/workspace-runtime.js";
 import {
   assertBoardOnlyProjectWorkspaceChange,
+  assertBoardOnlyWorkspaceSettingsMutation,
   assertNoAgentHostWorkspaceCommandMutation,
+  isBoardOnlyBlockedActor,
   collectProjectWorkspaceCodeLocationChanges,
   collectDeployPolicyCommandPaths,
   collectProjectDeployTransportCommandPaths,
@@ -298,7 +300,7 @@ export function projectRoutes(rawDb: Db) {
       readProjectPolicyEnvironmentId(projectData.executionWorkspacePolicy),
     );
     assertBoardOnlyProjectWorkspaceChange(req, workspace !== undefined ? true : []);
-    assertNoAgentHostWorkspaceCommandMutation(
+    assertBoardOnlyWorkspaceSettingsMutation(
       req,
       [
         ...collectProjectExecutionWorkspaceCommandPaths(projectData.executionWorkspacePolicy),
@@ -371,7 +373,7 @@ export function projectRoutes(rawDb: Db) {
       return;
     }
     const body = { ...req.body };
-    assertNoAgentHostWorkspaceCommandMutation(
+    assertBoardOnlyWorkspaceSettingsMutation(
       req,
       [
         ...collectDeployPolicyCommandPaths(body.deployPolicy),
@@ -380,7 +382,7 @@ export function projectRoutes(rawDb: Db) {
     );
     // A PATCH replaces the whole policy. For agent writes, keep the board-set protected fields
     // the agent left out, and refuse only when it sends a different value for one of them.
-    if (req.actor.type === "agent" && Object.prototype.hasOwnProperty.call(body, "executionWorkspacePolicy")) {
+    if (isBoardOnlyBlockedActor(req) && Object.prototype.hasOwnProperty.call(body, "executionWorkspacePolicy")) {
       const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
         body.executionWorkspacePolicy,
         existing.executionWorkspacePolicy,

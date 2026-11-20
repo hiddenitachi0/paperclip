@@ -357,7 +357,8 @@ describe("execution workspace policy helpers", () => {
         mode: "isolated_workspace",
         legacyUseProjectWorkspace: null,
       });
-      expect(config.workspaceStrategy).toEqual({ type: "git_worktree" });
+      // DUR-5246: the task's own strategy still picks the layout, but the project's command carries through.
+      expect(config.workspaceStrategy).toEqual({ type: "git_worktree", provisionCommand: "bash ./setup.sh" });
       const keeps = buildExecutionWorkspaceAdapterConfig({
         agentConfig: {},
         projectPolicy: {
@@ -437,5 +438,42 @@ describe("childMayShareParentWorkspace (DUR-5184)", () => {
     for (const mode of ["shared_workspace", "operator_branch", "adapter_managed", "cloud_sandbox", null]) {
       expect(childMayShareParentWorkspace({ parentWorkspaceMode: mode, childWorkMode: "standard" })).toBe(true);
     }
+  });
+
+  describe("task-level strategy keeps the project's commands (DUR-5246)", () => {
+    const projectPolicy = {
+      enabled: true,
+      defaultMode: "isolated_workspace" as const,
+      workspaceStrategy: {
+        type: "git_worktree" as const,
+        provisionCommand: "bash ./scripts/provision-worktree.sh",
+        teardownCommand: "bash ./scripts/teardown-worktree.sh",
+      },
+    };
+    const build = (issueStrategy: Record<string, unknown>) =>
+      buildExecutionWorkspaceAdapterConfig({
+        agentConfig: {},
+        projectPolicy,
+        issueSettings: { mode: "isolated_workspace", workspaceStrategy: issueStrategy as never },
+        mode: "isolated_workspace",
+        legacyUseProjectWorkspace: null,
+      }).workspaceStrategy;
+
+    it("carries the project's provision/teardown commands through a strategy that names none", () => {
+      expect(build({ type: "git_worktree", baseRef: "origin/dev" })).toEqual({
+        type: "git_worktree",
+        baseRef: "origin/dev",
+        provisionCommand: "bash ./scripts/provision-worktree.sh",
+        teardownCommand: "bash ./scripts/teardown-worktree.sh",
+      });
+    });
+
+    it("lets a command the task strategy names itself replace the project's, empty string included", () => {
+      expect(build({ type: "git_worktree", provisionCommand: "make setup", teardownCommand: "" })).toEqual({
+        type: "git_worktree",
+        provisionCommand: "make setup",
+        teardownCommand: "",
+      });
+    });
   });
 });

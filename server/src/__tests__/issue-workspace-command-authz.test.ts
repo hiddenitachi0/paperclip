@@ -36,6 +36,10 @@ const mockExecutionWorkspaceService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
 
+const mockProjectService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockFeedbackService = vi.hoisted(() => ({
   listIssueVotesForUser: vi.fn(),
   saveIssueVote: vi.fn(),
@@ -150,7 +154,7 @@ function registerRouteMocks() {
     }),
     issueService: () => mockIssueService,
     logActivity: mockLogActivity,
-    projectService: () => ({}),
+    projectService: () => mockProjectService,
     routineService: () => mockRoutineService,
     workProductService: () => ({}),
   }));
@@ -242,6 +246,7 @@ describe("issue workspace command authorization", () => {
       permissions: null,
     });
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
+    mockProjectService.getById.mockResolvedValue(null);
     mockFeedbackService.listIssueVotesForUser.mockResolvedValue([]);
     mockFeedbackService.saveIssueVote.mockResolvedValue({
       vote: null,
@@ -296,7 +301,7 @@ describe("issue workspace command authorization", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("host-executed workspace commands");
+    expect(res.body.error).toContain("Only a person on the board can change workspace commands");
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
@@ -465,7 +470,337 @@ describe("issue workspace command authorization", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("host-executed workspace commands");
+    expect(res.body.error).toContain("Only a person on the board can change workspace commands");
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+  const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
+  const agentActor = {
+    type: "agent",
+    agentId: "agent-1",
+    companyId: COMPANY_ID,
+    source: "agent_key",
+    runId: "run-1",
+  };
+  const boardActor = {
+    type: "board",
+    userId: "local-board",
+    companyIds: [COMPANY_ID],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+  };
+  const delegateActor = {
+    type: "board_delegate",
+    userId: "op-1",
+    companyIds: [COMPANY_ID],
+    delegateTokenId: "tok-1",
+    delegateName: "Recovery bot",
+    delegateScopes: ["agent.resume"],
+    source: "board_delegate_key",
+    isInstanceAdmin: true,
+  };
+  const runtimeSettings = {
+    workspaceRuntime: { services: [{ name: "web", command: "touch /tmp/paperclip-rce" }] },
+  };
+
+  it("rejects an agent creating a task with executionWorkspaceSettings.workspaceRuntime (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("executionWorkspaceSettings.workspaceRuntime");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent PATCHing a task's workspaceRuntime, null included (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    for (const executionWorkspaceSettings of [runtimeSettings, { workspaceRuntime: null }]) {
+      const res = await request(app).patch("/api/issues/issue-1").send({ executionWorkspaceSettings });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("executionWorkspaceSettings.workspaceRuntime");
+    }
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent creating a child task with a workspaceRuntime override (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(res.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent that sets a workspaceRuntime override through assigneeAdapterOverrides (DUR-5246)", async () => {
+    const app = await createApp(agentActor);
+    const res = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ assigneeAdapterOverrides: { adapterConfig: { workspaceRuntime: runtimeSettings.workspaceRuntime } } });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("assigneeAdapterOverrides.adapterConfig.workspaceRuntime");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set a task's workspaceRuntime on create and PATCH (DUR-5246)", async () => {
+    const app = await createApp(boardActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Board task", executionWorkspaceSettings: runtimeSettings });
+    expect(created.status).toBe(201);
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: runtimeSettings });
+    expect(patched.status).toBe(200);
+  });
+
+  it("treats a board_delegate token like an agent for task workspace commands (DUR-5246)", async () => {
+    const app = await createApp(delegateActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Exploit", executionWorkspaceSettings: runtimeSettings });
+    expect(created.status).toBe(403);
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree", provisionCommand: "id" } } });
+    expect(patched.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent task-level workspace override when the project sets allowIssueOverride=false (DUR-5246)", async () => {
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+    });
+    const app = await createApp(agentActor);
+    const created = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Override", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(created.status).toBe(403);
+    expect(created.body.error).toContain("does not allow tasks to override");
+    mockIssueService.getById.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+    mockIssueService.getByIdentifier.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+    const patched = await request(app)
+      .patch("/api/issues/issue-1")
+      .send({ executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(patched.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows agent task-level workspace settings when allowIssueOverride is true or unset, and board users when false (DUR-5246)", async () => {
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true },
+    });
+    const agentApp = await createApp(agentActor);
+    const ok = await request(agentApp)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Mode only", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "isolated_workspace" } });
+    expect(ok.status).toBe(201);
+
+    mockProjectService.getById.mockResolvedValue({
+      id: PROJECT_ID,
+      executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+    });
+    const boardApp = await createApp(boardActor);
+    const board = await request(boardApp)
+      .post(`/api/companies/${COMPANY_ID}/issues`)
+      .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+    expect(board.status).toBe(201);
+  });
+
+  describe("task mode that would switch off the project's board-set fields (DUR-5246)", () => {
+    const stored = {
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i", teardownCommand: "rm -rf x" },
+      workspaceRuntime: { services: [{ name: "web", command: "pnpm dev" }] },
+    };
+    beforeEach(() => {
+      mockProjectService.getById.mockResolvedValue({ id: PROJECT_ID, executionWorkspacePolicy: stored });
+    });
+
+    it("refuses an agent task create or PATCH with mode agent_default/shared_workspace/operator_branch", async () => {
+      const app = await createApp(agentActor);
+      for (const mode of ["agent_default", "shared_workspace", "operator_branch"]) {
+        const created = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings: { mode } });
+        expect(created.status).toBe(403);
+        expect(created.body.error).toContain("executionWorkspaceSettings.mode");
+      }
+      mockIssueService.getById.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+      mockIssueService.getByIdentifier.mockResolvedValue(makeIssue({ projectId: PROJECT_ID }));
+      const patched = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(patched.status).toBe(403);
+      expect(mockIssueService.create).not.toHaveBeenCalled();
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses a board_delegate token the same way", async () => {
+      const app = await createApp(delegateActor);
+      const created = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(created.status).toBe(403);
+    });
+
+    it("allows isolated_workspace, a board user, and a project with nothing stored", async () => {
+      const agentApp = await createApp(agentActor);
+      const ok = await request(agentApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Iso", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "isolated_workspace" } });
+      expect(ok.status).toBe(201);
+
+      const boardApp = await createApp(boardActor);
+      const board = await request(boardApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(board.status).toBe(201);
+
+      mockProjectService.getById.mockResolvedValue({
+        id: PROJECT_ID,
+        executionWorkspacePolicy: { enabled: true, defaultMode: "isolated_workspace" },
+      });
+      const bare = await request(agentApp)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Plain", projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "shared_workspace" } });
+      expect(bare.status).toBe(201);
+    });
+
+    const OTHER_PROJECT_ID = "99999999-9999-4999-8999-999999999999";
+    const policyFor = (id: string) =>
+      id === PROJECT_ID
+        ? { id, executionWorkspacePolicy: { enabled: true, allowIssueOverride: false, ...stored } }
+        : { id, executionWorkspacePolicy: null };
+
+    it("refuses an agent PATCH that moves a task with stored agent_default into a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      const issue = makeIssue({ projectId: null, executionWorkspaceSettings: { mode: "agent_default" } });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      // Moving it somewhere unprotected is fine, and so is a board user moving it.
+      const elsewhere = await request(app).patch("/api/issues/issue-1").send({ projectId: OTHER_PROJECT_ID });
+      expect(elsewhere.status).not.toBe(403);
+      const boardApp = await createApp(boardActor);
+      const board = await request(boardApp).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+      expect(board.status).not.toBe(403);
+    });
+
+    it("refuses an agent create that names only a parent in a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      mockIssueService.getById.mockResolvedValue(makeIssue({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", projectId: PROJECT_ID }));
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Child", parentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.create).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent PATCH with projectId null and an execution workspace in a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      mockExecutionWorkspaceService.getById.mockResolvedValue({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", companyId: COMPANY_ID, projectId: PROJECT_ID });
+      const issue = makeIssue({ projectId: OTHER_PROJECT_ID });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ projectId: null, executionWorkspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).toBe(403);
+    });
+
+    it("lets an agent resend the task's stored mode on PATCH", async () => {
+      const issue = makeIssue({ projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).not.toBe(403);
+    });
+    describe("workspaceStrategy.type that skips provision/teardown", () => {
+      it("refuses an agent create, PATCH and child create with a non-git_worktree type", async () => {
+        const app = await createApp(agentActor);
+        for (const type of ["project_primary", "adapter_managed", "cloud_sandbox"]) {
+          for (const executionWorkspaceSettings of [
+            { workspaceStrategy: { type } },
+            { mode: "isolated_workspace", workspaceStrategy: { type } },
+            // The run ignores these two modes and uses the project default (isolated).
+            { mode: "inherit", workspaceStrategy: { type } },
+            { mode: "reuse_existing", workspaceStrategy: { type } },
+          ]) {
+            const created = await request(app)
+              .post(`/api/companies/${COMPANY_ID}/issues`)
+              .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings });
+            expect(created.status).toBe(403);
+            expect(created.body.error).toContain("workspaceStrategy.type");
+          }
+        }
+        const issue = makeIssue({ projectId: PROJECT_ID });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const patched = await request(app)
+          .patch("/api/issues/issue-1")
+          .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(patched.status).toBe(403);
+        expect(mockIssueService.create).not.toHaveBeenCalled();
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("allows git_worktree, a board user, and an agent resending the stored type", async () => {
+        const app = await createApp(agentActor);
+        const ok = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Ok", projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } } });
+        expect(ok.status).toBe(201);
+        const boardApp = await createApp(boardActor);
+        const board = await request(boardApp)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(board.status).toBe(201);
+        const issue = makeIssue({ projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const resend = await request(app)
+          .patch("/api/issues/issue-1")
+          .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(resend.status).not.toBe(403);
+      });
+
+      it("refuses an agent PATCH that moves a task with a stored non-worktree type into the project", async () => {
+        const issue = makeIssue({ projectId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const app = await createApp(agentActor);
+        const res = await request(app).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+        expect(res.status).toBe(403);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("refuses an agent create whose parent's stored type would be copied into the project", async () => {
+        const parentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        mockIssueService.getById.mockResolvedValue(
+          makeIssue({ id: parentId, projectId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } }),
+        );
+        const app = await createApp(agentActor);
+        const res = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Child", parentId, projectId: PROJECT_ID });
+        expect(res.status).toBe(403);
+        expect(mockIssueService.create).not.toHaveBeenCalled();
+      });
+    });
   });
 });

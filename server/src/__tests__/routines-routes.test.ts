@@ -125,6 +125,10 @@ const mockAnnotationService = vi.hoisted(() => ({
   remapOpenThreadsForRoutineDocument: vi.fn(),
 }));
 
+const mockProjectService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockAccessService = vi.hoisted(() => ({
   canUser: vi.fn(),
 }));
@@ -161,6 +165,7 @@ function registerModuleMocks() {
     accessService: () => mockAccessService,
     documentAnnotationService: () => mockAnnotationService,
     logActivity: mockLogActivity,
+    projectService: () => mockProjectService,
     routineService: () => mockRoutineService,
   }));
 }
@@ -215,6 +220,7 @@ describe("routine routes", () => {
       status: "issue_created",
     });
     mockAccessService.canUser.mockResolvedValue(false);
+    mockProjectService.getById.mockResolvedValue({ id: projectId, companyId, executionWorkspacePolicy: null });
     mockLogActivity.mockResolvedValue(undefined);
     mockRoutineService.getDescriptionDocument.mockResolvedValue({
       id: "99999999-9999-4999-8999-999999999999",
@@ -651,6 +657,85 @@ describe("routine routes", () => {
     }, {
       agentId: null,
       userId: "board-user",
+    });
+  });
+
+  describe("task workspace settings on a routine run (DUR-5246)", () => {
+    const agentActor = { type: "agent", agentId, companyId, source: "agent_key", runId: "run-1" };
+    const boardActor = { type: "board", userId: "board-user", source: "session", isInstanceAdmin: true, companyIds: [companyId] };
+    const delegateActor = {
+      type: "board_delegate",
+      userId: "op-1",
+      companyIds: [companyId],
+      delegateTokenId: "tok-1",
+      delegateName: "Recovery bot",
+      delegateScopes: ["agent.resume"],
+      source: "board_delegate_key",
+      isInstanceAdmin: true,
+    };
+    const runtime = { workspaceRuntime: { services: [{ name: "x", command: "touch /tmp/rce" }] } };
+    const strategy = { workspaceStrategy: { type: "git_worktree", provisionCommand: "id" } };
+
+    it("refuses an agent run that carries workspaceRuntime or a provision command", async () => {
+      const app = await createApp(agentActor);
+      for (const executionWorkspaceSettings of [runtime, strategy]) {
+        const res = await request(app).post(`/api/routines/${routineId}/run`).send({ executionWorkspaceSettings });
+        expect(res.status).toBe(403);
+      }
+      expect(mockRoutineService.runRoutine).not.toHaveBeenCalled();
+    });
+
+    it("refuses a delegate token too (the routine routes only admit board users and agents)", async () => {
+      const app = await createApp(delegateActor);
+      const res = await request(app).post(`/api/routines/${routineId}/run`).send({ executionWorkspaceSettings: runtime });
+      expect([401, 403]).toContain(res.status);
+      expect(mockRoutineService.runRoutine).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent's settings when the project sets allowIssueOverride=false", async () => {
+      mockProjectService.getById.mockResolvedValue({
+        id: projectId,
+        companyId,
+        executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+      });
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .post(`/api/routines/${routineId}/run`)
+        .send({ executionWorkspaceSettings: { mode: "isolated_workspace" } });
+      expect(res.status).toBe(403);
+      expect(mockRoutineService.runRoutine).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent mode that would switch off the project's stored commands", async () => {
+      mockProjectService.getById.mockResolvedValue({
+        id: projectId,
+        companyId,
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "isolated_workspace",
+          workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
+        },
+      });
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .post(`/api/routines/${routineId}/run`)
+        .send({ executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).toBe(403);
+    });
+
+    it("allows an agent's plain settings, and a board user's commands", async () => {
+      const agentApp = await createApp(agentActor);
+      const ok = await request(agentApp)
+        .post(`/api/routines/${routineId}/run`)
+        .send({ executionWorkspaceSettings: { mode: "isolated_workspace" } });
+      expect(ok.status).toBe(202);
+
+      mockAccessService.canUser.mockResolvedValue(true);
+      const boardApp = await createApp(boardActor);
+      const board = await request(boardApp)
+        .post(`/api/routines/${routineId}/run`)
+        .send({ executionWorkspaceSettings: runtime });
+      expect(board.status).toBe(202);
     });
   });
 

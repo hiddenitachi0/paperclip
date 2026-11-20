@@ -214,30 +214,40 @@ describe.sequential("project workspace code-location is board-only", () => {
       mockProjectService.update.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: storedPolicy });
     });
 
-    it("lets an agent change defaultMode, with the protected fields kept", async () => {
-      const res = await patchPolicy(agentActor, { enabled: true, defaultMode: "shared_workspace" });
+    it("lets an agent resend the stored enabled/defaultMode with the protected fields kept", async () => {
+      const res = await patchPolicy(agentActor, { enabled: true, defaultMode: "isolated_workspace" });
       expect(res.status).toBe(200);
       const written = mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy;
-      expect(written.defaultMode).toBe("shared_workspace");
+      expect(written.defaultMode).toBe("isolated_workspace");
       expect(written.requireIsolation).toBe(true);
       expect(written.workspaceRuntime).toEqual(storedPolicy.workspaceRuntime);
       expect(written.workspaceStrategy).toEqual(storedPolicy.workspaceStrategy);
     }, 15000);
 
+    // DUR-5246: enabled:false / defaultMode "adapter_default" would pause the stored fields.
     it.each([
-      ["{ enabled: false }", { enabled: false }],
-      ["null", null],
-    ])("keeps the protected fields when an agent sends %s", async (_label, policy) => {
+      ["enabled", { enabled: false }],
+      ["defaultMode", { enabled: true, defaultMode: "adapter_default" }],
+    ])("refuses an agent changing %s while a board-only field is stored", async (path, policy) => {
       const res = await patchPolicy(agentActor, policy);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain(`executionWorkspacePolicy.${path}`);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    }, 15000);
+
+    it("keeps the protected fields and the stored switches when an agent sends null", async () => {
+      const res = await patchPolicy(agentActor, null);
       expect(res.status).toBe(200);
       const written = mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy;
+      expect(written.enabled).toBe(true);
+      expect(written.defaultMode).toBe("isolated_workspace");
       expect(written.requireIsolation).toBe(true);
       expect(written.workspaceRuntime).toEqual(storedPolicy.workspaceRuntime);
       expect(written.workspaceStrategy.provisionCommand).toBe("p");
     }, 15000);
 
     it("accepts the stored protected values sent back unchanged", async () => {
-      const res = await patchPolicy(agentActor, { ...storedPolicy, defaultMode: "shared_workspace" });
+      const res = await patchPolicy(agentActor, { ...storedPolicy });
       expect(res.status).toBe(200);
       expect(mockProjectService.update).toHaveBeenCalledTimes(1);
     }, 15000);

@@ -60,26 +60,41 @@ describe("carryForwardProtectedProjectPolicyFields", () => {
   };
 
   it("keeps every stored protected field when the agent leaves them out", () => {
-    expect(carryForwardProtectedProjectPolicyFields({ enabled: true, defaultMode: "shared_workspace" }, stored)).toEqual({
-      policy: { enabled: true, defaultMode: "shared_workspace", ...protectedOnly },
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: true, defaultMode: "isolated_workspace" }, stored)).toEqual({
+      policy: { enabled: true, defaultMode: "isolated_workspace", ...protectedOnly },
       changedPaths: [],
     });
   });
 
-  it("keeps them for { enabled: false } and for null (nothing else survives null)", () => {
-    expect(carryForwardProtectedProjectPolicyFields({ enabled: false }, stored)).toEqual({
-      policy: { enabled: false, ...protectedOnly },
-      changedPaths: [],
-    });
+  // DUR-5246: `enabled: false` leaves the stored fields in place but makes runs ignore them.
+  it("refuses { enabled: false } and a defaultMode change while a protected field is stored", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: false }, stored).changedPaths).toEqual([
+      "executionWorkspacePolicy.enabled",
+    ]);
+    expect(
+      carryForwardProtectedProjectPolicyFields({ enabled: true, defaultMode: "adapter_default" }, stored).changedPaths,
+    ).toEqual(["executionWorkspacePolicy.defaultMode"]);
+  });
+
+  it("for null, carries the stored switches forward too so the policy is not paused", () => {
     expect(carryForwardProtectedProjectPolicyFields(null, stored)).toEqual({
-      policy: { enabled: false, ...protectedOnly },
+      policy: { enabled: true, defaultMode: "isolated_workspace", ...protectedOnly },
       changedPaths: [],
     });
+  });
+
+  it("does not guard enabled/defaultMode when no protected field is stored", () => {
+    expect(
+      carryForwardProtectedProjectPolicyFields(
+        { enabled: false, defaultMode: "adapter_default" },
+        { enabled: true, defaultMode: "isolated_workspace" },
+      ),
+    ).toEqual({ policy: { enabled: false, defaultMode: "adapter_default" }, changedPaths: [] });
   });
 
   it("accepts the stored values sent back unchanged", () => {
-    expect(carryForwardProtectedProjectPolicyFields({ ...stored, defaultMode: "shared_workspace" }, stored)).toEqual({
-      policy: { ...stored, defaultMode: "shared_workspace" },
+    expect(carryForwardProtectedProjectPolicyFields({ ...stored }, stored)).toEqual({
+      policy: { ...stored },
       changedPaths: [],
     });
   });
@@ -139,8 +154,8 @@ describe("authorizationPolicy carry-forward", () => {
   const stored = { enabled: true, authorizationPolicy: policy };
   const path = ["executionWorkspacePolicy.authorizationPolicy"];
 
-  it("keeps it when omitted, null, or {enabled:false}", () => {
-    for (const sent of [{ enabled: true }, null, { enabled: false }]) {
+  it("keeps it when omitted or null (and refuses {enabled:false}, which would pause it)", () => {
+    for (const sent of [{ enabled: true }, null]) {
       const { policy: written, changedPaths } = carryForwardProtectedProjectPolicyFields(sent, stored);
       expect(changedPaths).toEqual([]);
       expect((written as any).authorizationPolicy).toEqual(policy);

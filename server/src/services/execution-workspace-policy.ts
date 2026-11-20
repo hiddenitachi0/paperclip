@@ -30,6 +30,29 @@ function parseExecutionWorkspaceStrategy(raw: unknown): ExecutionWorkspaceStrate
   };
 }
 
+/**
+ * DUR-5246: a task-level strategy picks the folder layout, but it must never
+ * silently drop the commands the project set. Any provision/teardown command
+ * the task's strategy names itself (only a board user can write one) wins,
+ * including an empty string; otherwise the project's command carries through.
+ */
+function mergeIssueStrategyWithProject(
+  issueStrategy: ExecutionWorkspaceStrategy | null,
+  projectStrategy: ExecutionWorkspaceStrategy | null,
+): ExecutionWorkspaceStrategy | null {
+  if (!issueStrategy) return null;
+  if (!projectStrategy) return issueStrategy;
+  return {
+    ...issueStrategy,
+    ...(issueStrategy.provisionCommand === undefined && projectStrategy.provisionCommand !== undefined
+      ? { provisionCommand: projectStrategy.provisionCommand }
+      : {}),
+    ...(issueStrategy.teardownCommand === undefined && projectStrategy.teardownCommand !== undefined
+      ? { teardownCommand: projectStrategy.teardownCommand }
+      : {}),
+  };
+}
+
 export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecutionWorkspacePolicy | null {
   const parsed = parseObject(raw);
   if (Object.keys(parsed).length === 0) return null;
@@ -274,7 +297,10 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   if (hasWorkspaceControl) {
     if (input.mode === "isolated_workspace") {
       const candidate =
-        input.issueSettings?.workspaceStrategy ??
+        mergeIssueStrategyWithProject(
+          input.issueSettings?.workspaceStrategy ?? null,
+          input.projectPolicy?.workspaceStrategy ?? null,
+        ) ??
         input.projectPolicy?.workspaceStrategy ??
         parseExecutionWorkspaceStrategy(nextConfig.workspaceStrategy) ??
         ({ type: "git_worktree" } satisfies ExecutionWorkspaceStrategy);
