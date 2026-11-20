@@ -769,6 +769,11 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     await svc.applyNewCompanyDefaults(f.companyId);
     // Self-check on; the paid finish check stays off until an owner turns it on.
     expect(await svc.get(f.companyId)).toMatchObject({ configured: true, selfReviewPasses: 1, doneCheckEnabled: false, doneCheckMaxRounds: 2 });
+    // The done-evidence gate (DUR-5179) is off by default, for new and existing companies alike.
+    expect((await svc.get(f.companyId)).doneEvidenceMode).toBe("off");
+    expect((await svc.update(f.companyId, { doneEvidenceMode: "enforce" }, { userId: "filip" })).doneEvidenceMode).toBe("enforce");
+    expect((await svc.update(f.companyId, { selfReviewPasses: 1 }, { userId: "filip" })).doneEvidenceMode).toBe("enforce");
+    await svc.update(f.companyId, { doneEvidenceMode: "off" }, { userId: "filip" });
     await svc.update(f.companyId, { selfReviewPasses: 0 }, { userId: "filip" });
     await svc.applyNewCompanyDefaults(f.companyId); // never overwrites a choice
     expect((await svc.get(f.companyId)).selfReviewPasses).toBe(0);
