@@ -183,6 +183,11 @@ import {
   pinQualityLoopPolicyFields,
 } from "../services/quality-loops.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
+import {
+  evaluateDoneEvidenceGate,
+  hasRecentIdenticalNote,
+  type DoneEvidenceGateResult,
+} from "../services/done-evidence-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
@@ -2133,6 +2138,87 @@ export function issueRoutes(
       environmentId,
       { allowedDrivers: ["local", "ssh", "sandbox"] },
     );
+  }
+
+  /**
+   * DUR-5179: whose latest comment can hold the done note. The assignee, and -- during a review
+   * stage, when the assignee is the reviewer -- the worker the task returns to.
+   */
+  function doneNoteAgentIds(issue: { assigneeAgentId?: string | null; executionState?: unknown }): string[] {
+    const ids: string[] = [];
+    if (issue.assigneeAgentId) ids.push(issue.assigneeAgentId);
+    const returnAssignee = parseIssueExecutionState(issue.executionState)?.returnAssignee;
+    if (returnAssignee?.type === "agent" && returnAssignee.agentId) ids.push(returnAssignee.agentId);
+    return ids;
+  }
+
+  /**
+   * DUR-5179: what a refused (or, in report mode, flagged) done looks like on the task.
+   * Posts the one plain-words system comment. On a refusal it also moves the task to
+   * in_review, but only where that is already allowed without inventing a review path: the
+   * task has no execution policy and a real review path exists. Otherwise the status stays.
+   */
+  async function recordDoneEvidenceOutcome(input: {
+    existing: {
+      id: string;
+      companyId: string;
+      identifier?: string | null;
+      status: string;
+      assigneeUserId?: string | null;
+      executionState?: unknown;
+      executionPolicy?: unknown;
+      monitorNextCheckAt?: Date | null;
+    };
+    result: DoneEvidenceGateResult;
+    actor: ReturnType<typeof getActorInfo>;
+  }) {
+    const { existing, result, actor } = input;
+    try {
+      // An agent retrying the same done gets the same words; say them once.
+      const alreadySaid = await hasRecentIdenticalNote(db, {
+        companyId: existing.companyId,
+        issueId: existing.id,
+        body: result.message,
+      });
+      if (!alreadySaid) await svc.addComment(existing.id, result.message, {}, { authorType: "system" });
+    } catch (err) {
+      logger.warn({ err, issueId: existing.id }, "failed to post done-evidence comment (DUR-5179)");
+    }
+    if (!result.refuse || existing.status !== "in_progress") return;
+    if (normalizeIssueExecutionPolicy(existing.executionPolicy ?? null)) return;
+    try {
+      await assertAgentInReviewReviewPath({
+        existing,
+        updateFields: { status: "in_review" },
+        actorType: actor.actorType,
+      });
+      const moved = await svc.update(existing.id, {
+        status: "in_review",
+        actorAgentId: actor.agentId ?? null,
+        actorUserId: null,
+      });
+      if (moved) {
+        await logActivity(db, {
+          companyId: existing.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: existing.id,
+          details: {
+            status: "in_review",
+            identifier: existing.identifier ?? null,
+            source: "done_evidence_gate",
+            reason: result.reason,
+            _previous: { status: existing.status },
+          },
+        });
+      }
+    } catch {
+      // No review path exists (or the move failed): leave the status as it was.
+    }
   }
 
   async function assertAgentInReviewReviewPath(input: {
@@ -7397,6 +7483,37 @@ export function issueRoutes(
       };
     }
     Object.assign(updateFields, transition.patch);
+    // DUR-5179: the gates above ask whether the named commit left this machine. This asks the
+    // next question -- is it real work on GitHub: on origin and on the project's branch,
+    // touching the files the task names, with green checks for that exact commit. Agents only;
+    // a board user is the human override. Off by default per company (done_evidence_mode);
+    // `report` posts the note and lets done go. It runs here, after the review policy, so a
+    // worker whose "done" only moves the task to review is not gated -- its reviewer is.
+    const doneEvidenceGateResult = await evaluateDoneEvidenceGate({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId ?? null,
+        description: existing.description ?? null,
+        createdAt: existing.createdAt ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+      otherNoteAgentIds: doneNoteAgentIds(existing),
+    });
+    if (doneEvidenceGateResult?.refuse) {
+      await recordDoneEvidenceOutcome({ existing, result: doneEvidenceGateResult, actor });
+      res.status(409).json({
+        error: doneEvidenceGateResult.message,
+        code: "done_evidence_missing",
+        reasons: doneEvidenceGateResult.reasons,
+      });
+      return;
+    }
     if (reviewRequest !== undefined && transition.patch.executionState === undefined) {
       const existingExecutionState = parseIssueExecutionState(existing.executionState);
       if (!existingExecutionState || existingExecutionState.status !== "pending") {
@@ -7531,6 +7648,10 @@ export function issueRoutes(
       } catch (err) {
         logger.warn({ err, issueId: issue.id }, "failed to post deploy-completion warning comment (DUR-291)");
       }
+    }
+
+    if (doneEvidenceGateResult && !doneEvidenceGateResult.refuse) {
+      await recordDoneEvidenceOutcome({ existing: issue, result: doneEvidenceGateResult, actor });
     }
 
     if (originCommitWarning) {
@@ -9515,6 +9636,40 @@ export function issueRoutes(
         },
         commentBody: req.body.body,
       });
+      // DUR-5179: an agent approving through a comment is the other way to done; same gate,
+      // read the worker's done note too (the approver's comment rarely names the commit).
+      let commentApprovalEvidenceResult: DoneEvidenceGateResult | null = null;
+      if (actor.actorType === "agent" && (typeof transition.patch.status === "string" ? transition.patch.status : "done") === "done") {
+        commentApprovalEvidenceResult = await evaluateDoneEvidenceGate({
+          db,
+          issue: {
+            id: currentIssue.id,
+            identifier: currentIssue.identifier,
+            companyId: currentIssue.companyId,
+            projectId: currentIssue.projectId ?? null,
+            description: currentIssue.description ?? null,
+            createdAt: currentIssue.createdAt ?? null,
+          },
+          actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+          requestedStatus: "done",
+          currentStatus: currentIssue.status,
+          patchComment: typeof req.body.body === "string" ? req.body.body : null,
+          otherNoteAgentIds: doneNoteAgentIds(currentIssue),
+        });
+        if (commentApprovalEvidenceResult?.refuse) {
+          // The approval itself is refused: the status stays in_review, so only the note is posted.
+          await recordDoneEvidenceOutcome({ existing: currentIssue, result: commentApprovalEvidenceResult, actor });
+          res.status(409).json({
+            error: commentApprovalEvidenceResult.message,
+            code: "done_evidence_missing",
+            reasons: commentApprovalEvidenceResult.reasons,
+          });
+          return;
+        }
+        if (commentApprovalEvidenceResult) {
+          await recordDoneEvidenceOutcome({ existing: currentIssue, result: commentApprovalEvidenceResult, actor });
+        }
+      }
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
         const nextExecutionState = transition.patch.executionState;
