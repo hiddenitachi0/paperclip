@@ -196,44 +196,74 @@ describe.sequential("project workspace code-location is board-only", () => {
     expect(mockProjectService.createWorkspace).not.toHaveBeenCalled();
   }, 15000);
 
-  // DUR-5231: a project PATCH replaces the whole executionWorkspacePolicy, so omitting a
-  // board-set protected field drops it just like naming it would change it.
-  describe("project PATCH cannot drop a board-set execution workspace policy", () => {
+  // DUR-5231: a project PATCH replaces the whole executionWorkspacePolicy. For agents the
+  // board-set protected fields are carried forward; only a different value is refused.
+  describe("project PATCH keeps a board-set execution workspace policy", () => {
     const storedPolicy = {
       enabled: true,
+      defaultMode: "isolated_workspace",
       requireIsolation: true,
       workspaceRuntime: { services: [{ name: "x", command: "id" }] },
       workspaceStrategy: { type: "git_worktree", provisionCommand: "p" },
     };
+    const patchPolicy = async (actor: Record<string, unknown>, executionWorkspacePolicy: unknown) =>
+      request(await createApp(actor)).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy });
 
     beforeEach(() => {
       mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: storedPolicy });
-      mockProjectService.update.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: null });
+      mockProjectService.update.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: storedPolicy });
     });
 
+    it("lets an agent change defaultMode, with the protected fields kept", async () => {
+      const res = await patchPolicy(agentActor, { enabled: true, defaultMode: "shared_workspace" });
+      expect(res.status).toBe(200);
+      const written = mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy;
+      expect(written.defaultMode).toBe("shared_workspace");
+      expect(written.requireIsolation).toBe(true);
+      expect(written.workspaceRuntime).toEqual(storedPolicy.workspaceRuntime);
+      expect(written.workspaceStrategy).toEqual(storedPolicy.workspaceStrategy);
+    }, 15000);
+
     it.each([
-      ["{ enabled: false }", { executionWorkspacePolicy: { enabled: false } }],
-      ["null", { executionWorkspacePolicy: null }],
-    ])("refuses an agent sending executionWorkspacePolicy: %s", async (_label, body) => {
-      const app = await createApp(agentActor);
-      const res = await request(app).patch(`/api/projects/${projectId}`).send(body);
+      ["{ enabled: false }", { enabled: false }],
+      ["null", null],
+    ])("keeps the protected fields when an agent sends %s", async (_label, policy) => {
+      const res = await patchPolicy(agentActor, policy);
+      expect(res.status).toBe(200);
+      const written = mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy;
+      expect(written.requireIsolation).toBe(true);
+      expect(written.workspaceRuntime).toEqual(storedPolicy.workspaceRuntime);
+      expect(written.workspaceStrategy.provisionCommand).toBe("p");
+    }, 15000);
+
+    it("accepts the stored protected values sent back unchanged", async () => {
+      const res = await patchPolicy(agentActor, { ...storedPolicy, defaultMode: "shared_workspace" });
+      expect(res.status).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalledTimes(1);
+    }, 15000);
+
+    it.each([
+      ["workspaceRuntime", { ...storedPolicy, workspaceRuntime: { services: [] } }],
+      ["requireIsolation", { ...storedPolicy, requireIsolation: false }],
+      ["provisionCommand", { ...storedPolicy, workspaceStrategy: { type: "git_worktree", provisionCommand: "other" } }],
+    ])("refuses an agent sending a different %s, and writes nothing", async (path, policy) => {
+      const res = await patchPolicy(agentActor, policy);
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain("workspaceRuntime");
+      expect(res.body.error).toContain(path);
+      expect(res.body.error).toContain("settings only the board can change");
       expect(mockProjectService.update).not.toHaveBeenCalled();
     }, 15000);
 
     it("lets an agent PATCH other fields without touching the policy", async () => {
-      const app = await createApp(agentActor);
-      const res = await request(app).patch(`/api/projects/${projectId}`).send({ name: "Renamed" });
+      const res = await request(await createApp(agentActor)).patch(`/api/projects/${projectId}`).send({ name: "Renamed" });
       expect(res.status).toBe(200);
       expect(mockProjectService.update).toHaveBeenCalledTimes(1);
     }, 15000);
 
     it("lets a board user clear the policy", async () => {
-      const app = await createApp(boardActor);
-      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: null });
+      const res = await patchPolicy(boardActor, null);
       expect(res.status).toBe(200);
-      expect(mockProjectService.update).toHaveBeenCalledTimes(1);
+      expect(mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy).toBeNull();
     }, 15000);
   });
 
