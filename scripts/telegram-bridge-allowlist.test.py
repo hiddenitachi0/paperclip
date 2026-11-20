@@ -97,7 +97,11 @@ class OperatorTests(BridgeTestCase):
                                 "data": "approve:9abd6c8e-4c1d-40e7-a81e-73d1481c25ef",
                                 "message": {"message_id": 6, "chat": {"id": OPERATOR}, "text": "Deploy"}})
 
-        self.cli.assert_called_once_with("approval", "approve", "9abd6c8e-4c1d-40e7-a81e-73d1481c25ef")
+        # The card is looked up first (DUR-5199: card-only kinds are refused), then approved.
+        self.assertEqual([c.args for c in self.cli.call_args_list], [
+            ("approval", "get", "9abd6c8e-4c1d-40e7-a81e-73d1481c25ef"),
+            ("approval", "approve", "9abd6c8e-4c1d-40e7-a81e-73d1481c25ef"),
+        ])
 
 
 class WhoIsAllowedTests(unittest.TestCase):

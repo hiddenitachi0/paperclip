@@ -249,6 +249,30 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     expect(mockApprovalService.create).not.toHaveBeenCalled();
   }, TEST_TIMEOUT);
 
+  it("tells a second deploy card to add its items to the open card instead (deploy_card_open)", async () => {
+    mockApprovalService.findOpenDeployApproval.mockResolvedValue({ id: "existing-deploy-1", status: "pending" });
+
+    const res = await request(await createApp())
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: {
+          kind: "deploy",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          title: "Deploy to prod",
+          note: "Deploying the latest build.",
+        },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("deploy_card_open");
+    expect(res.body.details).toEqual({ code: "deploy_card_open", existingApprovalId: "existing-deploy-1" });
+    expect(res.body.error).toBe(
+      "There is already an open deploy card for this project. Add your items to it instead.",
+    );
+  }, TEST_TIMEOUT);
+
   it("allows a legitimate second deploy approval when acknowledgedDuplicateOfApprovalId matches (DUR-138)", async () => {
     // DUR-138: deployRequestPayloadSchema is .strict(), so before the fix this
     // 400'd on "Unrecognized key(s): acknowledgedDuplicateOfApprovalId" before

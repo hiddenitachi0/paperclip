@@ -69,13 +69,17 @@ function readResultSummary(resultJson: Record<string, unknown> | null | undefine
   );
 }
 
-function extractMarkdownSection(markdown: string | null | undefined, heading: string) {
+export function extractMarkdownSection(
+  markdown: string | null | undefined,
+  heading: string,
+  maxChars: number = SUMMARY_SECTION_MAX_CHARS,
+) {
   if (!markdown) return null;
   const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^##\\s+${escaped}\\s*$([\\s\\S]*?)(?=^##\\s+|(?![\\s\\S]))`, "im");
   const match = re.exec(markdown);
   const section = match?.[1]?.trim();
-  return section ? truncateText(section, SUMMARY_SECTION_MAX_CHARS) : null;
+  return section ? truncateText(section, maxChars) : null;
 }
 
 function extractPathCandidates(...texts: Array<string | null | undefined>) {

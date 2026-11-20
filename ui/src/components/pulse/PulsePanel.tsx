@@ -96,8 +96,9 @@ function NeedsYouTab({ pulse, companyId }: { pulse: DashboardPulse | undefined; 
   const [approvingId, setApprovingId] = useState<string | null>(null);
 
   const approveMutation = useMutation({
-    mutationFn: (approvalId: string) => approvalsApi.approve(approvalId),
-    onMutate: (approvalId: string) => setApprovingId(approvalId),
+    mutationFn: ({ approvalId, cardRevision }: { approvalId: string; cardRevision?: number }) =>
+      approvalsApi.approve(approvalId, undefined, undefined, cardRevision),
+    onMutate: ({ approvalId }) => setApprovingId(approvalId),
     onSettled: () => {
       setApprovingId(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboardPulse(companyId) });
@@ -134,7 +135,7 @@ function NeedsYouTab({ pulse, companyId }: { pulse: DashboardPulse | undefined; 
             size="sm"
             className="shrink-0"
             disabled={approveMutation.isPending && approvingId === item.approvalId}
-            onClick={() => approveMutation.mutate(item.approvalId)}
+            onClick={() => approveMutation.mutate({ approvalId: item.approvalId, cardRevision: item.cardRevision })}
           >
             {approveMutation.isPending && approvingId === item.approvalId ? "Approving…" : "Approve"}
           </Button>

@@ -440,3 +440,74 @@ describe("approve() refuses card-only kinds outside the approval route", () => {
     expect(result.approval.status).toBe("approved");
   });
 });
+
+describe("approve() refuses a deploy card that changed after the approver opened it", () => {
+  const MESSAGE = "This card changed after you opened it. Look at it again before approving.";
+
+  function deployCard(revision: number | undefined, status = "pending"): ApprovalRecord {
+    return {
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status,
+      payload: {
+        kind: "deploy",
+        commit: "a".repeat(40),
+        title: "Deploy",
+        ...(revision === undefined ? {} : { cardRevision: revision }),
+      },
+      requestedByAgentId: "requester-1",
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLogActivity.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("refuses a stale revision with a 409 and plain message, and writes nothing", async () => {
+    const dbStub = createDbStub([[deployCard(3)]], []);
+    const svc = approvalService(dbStub.db as any);
+    await expect(
+      svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true, expectedCardRevision: 2 }),
+    ).rejects.toMatchObject({ status: 409, message: MESSAGE });
+    expect(dbStub.returning).not.toHaveBeenCalled();
+  });
+
+  it("refuses a changed card when the caller sent no revision at all", async () => {
+    const dbStub = createDbStub([[deployCard(2)]], []);
+    const svc = approvalService(dbStub.db as any);
+    await expect(
+      svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true }),
+    ).rejects.toMatchObject({ status: 409, message: MESSAGE });
+    expect(dbStub.returning).not.toHaveBeenCalled();
+  });
+
+  it("approves when the revision matches", async () => {
+    const approved = { ...deployCard(3), status: "approved" };
+    const dbStub = createDbStub([[deployCard(3)]], [approved]);
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true, expectedCardRevision: 3 });
+    expect(result.applied).toBe(true);
+  });
+
+  it("approves a card that was never changed (revision 1) without a revision, and one with no revision stamp", async () => {
+    for (const revision of [1, undefined]) {
+      const approved = { ...deployCard(revision), status: "approved" };
+      const dbStub = createDbStub([[deployCard(revision)]], [approved]);
+      const svc = approvalService(dbStub.db as any);
+      const result = await svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true });
+      expect(result.applied).toBe(true);
+    }
+  });
+
+  it("refuses when items land between the check and the write", async () => {
+    // First read: revision 2 (matches). The write finds nothing (the card moved to revision 3),
+    // and the re-read shows it is still waiting -- so it is refused, not reported as decided.
+    const dbStub = createDbStub([[deployCard(2)], [deployCard(3)]], []);
+    const svc = approvalService(dbStub.db as any);
+    await expect(
+      svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true, expectedCardRevision: 2 }),
+    ).rejects.toMatchObject({ status: 409, message: MESSAGE });
+  });
+});
