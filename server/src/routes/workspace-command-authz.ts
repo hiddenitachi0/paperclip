@@ -473,7 +473,10 @@ export function collectAgentTaskModeDropPaths(
   const strategyType = parsedSettings?.workspaceStrategy?.type;
   if (dropsCommands && strategyType && strategyType !== "git_worktree") {
     const existingParsed = parseIssueExecutionWorkspaceSettings(existingSettings);
-    const effectiveMode = mode ?? existingParsed?.mode ?? projectDefaultMode;
+    // The body replaces the stored settings, and the run ignores `inherit`/`reuse_existing`
+    // (it falls back to the project default), so read the mode the same way: only a concrete
+    // mode in this body counts, otherwise the project default.
+    const effectiveMode = mode && mode !== "inherit" && mode !== "reuse_existing" ? mode : projectDefaultMode;
     if (effectiveMode === "isolated_workspace" && existingParsed?.workspaceStrategy?.type !== strategyType) {
       return ["executionWorkspaceSettings.workspaceStrategy.type"];
     }

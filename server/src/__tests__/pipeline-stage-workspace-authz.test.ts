@@ -161,14 +161,16 @@ describe("pipeline stage workspace settings authorization (DUR-5246)", () => {
       workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
     }));
     for (const type of ["project_primary", "adapter_managed", "cloud_sandbox"]) {
-      await expect(
-        assertAgentStageConfigWorkspaceSettingsAllowed(
-          agent,
-          { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type } } } },
-          null,
-          loader,
-        ),
-      ).rejects.toMatchObject({ status: 403 });
+      for (const mode of [undefined, "inherit", "reuse_existing"]) {
+        await expect(
+          assertAgentStageConfigWorkspaceSettingsAllowed(
+            agent,
+            { automation: { projectId: "p", executionWorkspaceSettings: { ...(mode ? { mode } : {}), workspaceStrategy: { type } } } },
+            null,
+            loader,
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+      }
     }
     // git_worktree is what the project already uses, and a board user is not bound.
     await expect(

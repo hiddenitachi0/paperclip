@@ -737,6 +737,9 @@ describe("issue workspace command authorization", () => {
           for (const executionWorkspaceSettings of [
             { workspaceStrategy: { type } },
             { mode: "isolated_workspace", workspaceStrategy: { type } },
+            // The run ignores these two modes and uses the project default (isolated).
+            { mode: "inherit", workspaceStrategy: { type } },
+            { mode: "reuse_existing", workspaceStrategy: { type } },
           ]) {
             const created = await request(app)
               .post(`/api/companies/${COMPANY_ID}/issues`)
