@@ -258,7 +258,10 @@ UNSUPPORTED_KIND_MAX_AGE_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_
 # when the deadline passes does the card become terminal. "failure" (a build
 # that actually went red) is deliberately NOT covered by any of this: that
 # needs a person, and stays terminal exactly as before.
-CI_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS:-2700}"
+# 4 hours: several branches are merged into one deploy card per day and the
+# checks on that combined build can be slow; 45 minutes closed cards whose
+# checks were simply still running.
+CI_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS:-14400}"
 # The runner ticks every 60s; a card can legitimately wait out the whole
 # deadline above. Neither the log nor the machine-readable status feed may get
 # a line per tick for the same waiting card, or a held deploy drowns out
@@ -2054,7 +2057,15 @@ handle_ci_pending() { # aid, company_id, target_ref, decided_at, why(pending|unk
     # already seen mid-check. That combination silently deploys an unproven
     # build. Losing state before the outcome is confirmed is the bug; keep the
     # row until something durable has actually happened.
-    comment "$aid" "$company_id" "Deploy not started — the automated checks on this version had still not passed about $waited_minutes minutes after it was approved, so this deploy stopped waiting for them. Nothing was deployed and whatever was already live is untouched. Once the checks have passed, ask the agent that filed this deploy to file a new deploy approval for the same version. If the checks keep hanging or finish red, asking again will hit the same wall — someone has to fix what is failing first." "checks_timed_out"
+    # Plain words for the operator: how long the runner was prepared to wait ("4 hours"), and
+    # what to do next. Quotes the configured budget, so a changed budget never reads wrong.
+    if [ "$CI_WAIT_SECONDS" -ge 3600 ] && [ $(( CI_WAIT_SECONDS % 3600 )) -eq 0 ]; then
+      wait_phrase="$(( CI_WAIT_SECONDS / 3600 )) hours"
+      [ "$CI_WAIT_SECONDS" -eq 3600 ] && wait_phrase="1 hour"
+    else
+      wait_phrase="${wait_minutes} minutes"
+    fi
+    comment "$aid" "$company_id" "Checks did not finish within $wait_phrase. Nothing was deployed. File the card again when they are green." "checks_timed_out"
     return
   fi
 
@@ -2167,7 +2178,7 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # DUR-3967: fail-open has to survive exactly where it is justified, and only
   # there. Before this ticket a card was looked at ONCE, so exactly one GitHub
   # API sample decided it and fail-open risked one coin toss. A held card now
-  # re-samples every 60s for up to CI_WAIT_SECONDS -- ~45 chances for a single
+  # re-samples every 60s for up to CI_WAIT_SECONDS -- hundreds of chances for a single
   # unreachable API, timeout or 403 rate-limit body to turn into "unknown" and
   # ship a build we had already been told was mid-check. (The connect timeout
   # is HEALTH_CONNECT_TIMEOUT_SECONDS against api.github.com from a box that

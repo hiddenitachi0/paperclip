@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { approvalsApi } from "../api/approvals";
+import { approvalCardRevision } from "../lib/approval-card-revision";
 import { agentsApi } from "../api/agents";
 import { secretsApi } from "../api/secrets";
 import { useCompany } from "../context/CompanyContext";
@@ -104,7 +105,13 @@ export function ApprovalDetail() {
   };
 
   const approveMutation = useMutation({
-    mutationFn: (reason?: string) => approvalsApi.approve(approvalId!, undefined, reason ? { reason } : undefined),
+    mutationFn: (reason?: string) =>
+      approvalsApi.approve(
+        approvalId!,
+        undefined,
+        reason ? { reason } : undefined,
+        approval ? approvalCardRevision(approval) : undefined,
+      ),
     onSuccess: () => {
       setError(null);
       refresh();

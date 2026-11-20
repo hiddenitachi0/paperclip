@@ -25,6 +25,14 @@ export const QUALITY_SELF_REVIEW_MAX_PASSES = 3;
 export const QUALITY_DONE_CHECK_MAX_ROUNDS = 3;
 export const QUALITY_DONE_CHECK_DEFAULT_ROUNDS = 2;
 
+/**
+ * Done-gate with evidence: before an AGENT may mark a code task done, the server checks that
+ * the commit it names is on GitHub, changes the files the task names and passed its checks.
+ * off = no check; report = a note on the task, the task still closes; enforce = refused.
+ */
+export const QUALITY_DONE_EVIDENCE_MODES = ["off", "report", "enforce"] as const;
+export type QualityDoneEvidenceMode = (typeof QUALITY_DONE_EVIDENCE_MODES)[number];
+
 export interface CompanyQualityLoopSettings {
   /** True once the company has a settings row (it chose, or was created with defaults). */
   configured: boolean;
@@ -44,6 +52,8 @@ export interface CompanyQualityLoopSettings {
   effectiveDoneCheckModel: { directoryEntryId: string; name: string } | null;
   /** Agent that reviews new code tasks before they are done. Null = none. */
   defaultReviewerAgentId: string | null;
+  /** How hard the server checks an agent's "done" on a code task (commit, files, checks). */
+  doneEvidenceMode: QualityDoneEvidenceMode;
 }
 
 // The finish check spends money on a model, so it stays off until an owner turns it on.
@@ -60,6 +70,7 @@ export const updateCompanyQualityLoopSettingsSchema = z
     doneCheckMaxRounds: z.number().int().min(1).max(QUALITY_DONE_CHECK_MAX_ROUNDS).optional(),
     doneCheckDirectoryEntryId: z.string().uuid().nullable().optional(),
     defaultReviewerAgentId: z.string().uuid().nullable().optional(),
+    doneEvidenceMode: z.enum(QUALITY_DONE_EVIDENCE_MODES).optional(),
   })
   .strict();
 export type UpdateCompanyQualityLoopSettings = z.infer<typeof updateCompanyQualityLoopSettingsSchema>;
