@@ -19,6 +19,8 @@ export interface DashboardPulseApproval {
    * The status panel must show "Open" for it, never a one-tap Approve.
    */
   cardOnly: boolean;
+  /** Deploy cards only: the card's revision number as of this list, sent back on approve. */
+  cardRevision?: number;
 }
 
 export interface DashboardPulseExecution {

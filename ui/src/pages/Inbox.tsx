@@ -4,6 +4,7 @@ import { isCardOnlyApproval } from "@/lib/approval-card-only";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
 import { approvalsApi } from "../api/approvals";
+import { approvalCardRevision } from "../lib/approval-card-revision";
 import { accessApi } from "../api/access";
 import { authApi } from "../api/auth";
 import { ApiError } from "../api/client";
@@ -1465,8 +1466,9 @@ export function Inbox() {
   }, []);
 
   const approveMutation = useMutation({
-    mutationFn: (id: string) => approvalsApi.approve(id),
-    onSuccess: (_approval, id) => {
+    mutationFn: ({ id, revision }: { id: string; revision?: number }) =>
+      approvalsApi.approve(id, undefined, undefined, revision),
+    onSuccess: (_approval, { id }) => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
       navigate(`/approvals/${id}?resolved=approved`);
@@ -2643,7 +2645,7 @@ export function Inbox() {
                           approval={item.approval}
                           selected={isSelected}
                           requesterName={agentName(item.approval.requestedByAgentId)}
-                          onApprove={() => approveMutation.mutate(item.approval.id)}
+                          onApprove={() => approveMutation.mutate({ id: item.approval.id, revision: approvalCardRevision(item.approval) })}
                           onReject={(note) => rejectMutation.mutate({ id: item.approval.id, note })}
                           isPending={approveMutation.isPending || rejectMutation.isPending}
                           unreadState={nonIssueUnreadState(approvalKey)}

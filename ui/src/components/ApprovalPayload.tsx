@@ -19,6 +19,7 @@ import {
   SPENDING_LIMIT_EXPLANATION,
   spendingLimitSummary,
 } from "../lib/hire-spending-limit";
+import { Link } from "@/lib/router";
 import { workingStyleTitle } from "./WorkingStyleSection";
 
 export const typeLabel: Record<string, string> = {
@@ -204,6 +205,96 @@ export function approvalDeployChangeSummaryText(payload?: Record<string, unknown
   return record.documentationOnly === true
     ? `Changes ${fileWord} since the version running now (${live}) — written notes only.`
     : `Changes ${fileWord} since the version running now (${live}).`;
+}
+
+/**
+ * One deploy card per day: the finished items a deploy card puts live, one plain
+ * line each. Each item has a summary and, when the filer gave one, the task it
+ * belongs to (shown as a link). Returns [] for anything that is not a deploy
+ * card or carries no items (older cards), so callers can render nothing.
+ */
+export function approvalDeployItems(
+  payload?: Record<string, unknown> | null,
+): Array<{ summary: string; issueRef: string | null }> {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return [];
+  const raw = payload?.items;
+  if (!Array.isArray(raw)) return [];
+  const items: Array<{ summary: string; issueRef: string | null }> = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const summary = firstNonEmptyString(record.summary);
+    if (!summary) continue;
+    items.push({ summary, issueRef: firstNonEmptyString(record.issueId) ?? null });
+  }
+  return items;
+}
+
+/** The list of items on a deploy card, one plain line per item with its task link. */
+export function DeployItemsList({
+  payload,
+  className,
+  maxVisible,
+}: {
+  payload?: Record<string, unknown> | null;
+  className?: string;
+  /** Short views show this many lines, then say how many more the full card has. */
+  maxVisible?: number;
+}) {
+  const allItems = approvalDeployItems(payload);
+  if (allItems.length === 0) return null;
+  const items = maxVisible !== undefined ? allItems.slice(0, maxVisible) : allItems;
+  const hiddenCount = allItems.length - items.length;
+  return (
+    <div className={cn("space-y-1.5", className)} data-testid="deploy-items">
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+        {allItems.length === 1 ? "What goes live (1 item)" : `What goes live (${allItems.length} items)`}
+      </p>
+      <ul className="space-y-1 text-sm text-foreground/90">
+        {items.map((item, index) => (
+          <li key={`${index}-${item.summary}`} className="flex flex-wrap items-baseline gap-x-2 leading-6">
+            <span>{item.summary}</span>
+            {item.issueRef && (
+              <Link
+                to={`/issues/${item.issueRef}`}
+                className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-primary hover:underline"
+              >
+                {item.issueRef}
+              </Link>
+            )}
+          </li>
+        ))}
+      </ul>
+      {hiddenCount > 0 && (
+        <p className="text-xs text-muted-foreground">
+          …and {hiddenCount} more. Open the card to see all of them.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The deploy card's revision number. It goes up every time the card changes (items added),
+ * and approve sends the one the person saw, so a card that changed after it was opened is
+ * refused instead of approved unseen. Renders nothing for cards without a revision.
+ */
+export function DeployCardRevision({
+  payload,
+  className,
+}: {
+  payload?: Record<string, unknown> | null;
+  className?: string;
+}) {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const revision = payload?.cardRevision;
+  if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) return null;
+  return (
+    <p className={cn("text-xs text-muted-foreground", className)} data-testid="deploy-card-revision">
+      Card revision {revision}
+      {revision > 1 ? " — changed since it was first filed." : ""}
+    </p>
+  );
 }
 
 /**
@@ -1053,6 +1144,8 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="whitespace-pre-line leading-6 text-foreground/90">{summary}</p>
         </div>
       )}
+      <DeployItemsList payload={payload} />
+      <DeployCardRevision payload={payload} />
       {recommendedAction && (
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">

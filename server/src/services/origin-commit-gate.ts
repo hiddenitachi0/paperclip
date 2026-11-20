@@ -134,7 +134,7 @@ export async function classifyCommitAgainstCheckout(
 }
 
 /** The agent's own most recent, still-visible comment on this issue. */
-async function findLatestAgentComment(
+export async function findLatestAgentComment(
   db: Db,
   input: { companyId: string; issueId: string; agentId: string },
 ): Promise<string | null> {
