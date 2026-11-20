@@ -180,6 +180,7 @@ export type ProjectConfigFieldKey =
   | "goals"
   | "env"
   | "execution_workspace_enabled"
+  | "execution_workspace_require_isolation"
   | "execution_workspace_default_mode"
   | "execution_workspace_environment"
   | "execution_workspace_base_ref"
@@ -546,6 +547,7 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
   const hasAdditionalLegacyWorkspaces = workspaces.some((workspace) => workspace.id !== primaryCodebaseWorkspace?.id);
   const executionWorkspacePolicy = project.executionWorkspacePolicy ?? null;
   const executionWorkspacesEnabled = executionWorkspacePolicy?.enabled === true;
+  const requireIsolation = executionWorkspacePolicy?.requireIsolation === true;
   const isolatedWorkspacesEnabled = experimentalSettings?.enableIsolatedWorkspaces === true;
   const executionWorkspaceDefaultMode =
     executionWorkspacePolicy?.defaultMode === "isolated_workspace" ? "isolated_workspace" : "shared_workspace";
@@ -1249,6 +1251,35 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
           {updateWorkspace.isError && (
             <p className="text-xs text-destructive">Failed to update workspace.</p>
           )}
+        </div>
+
+        <Separator className="my-4" />
+
+        <div className="py-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <span>Always use one folder per task</span>
+                <SaveIndicator state={fieldState("execution_workspace_require_isolation")} />
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Every task gets its own copy of the code and its own branch, so agents never change each other's files.
+              </div>
+            </div>
+            {onUpdate || onFieldUpdate ? (
+              <ToggleSwitch
+                aria-label="Always use one folder per task"
+                checked={requireIsolation}
+                onCheckedChange={() =>
+                  commitField(
+                    "execution_workspace_require_isolation",
+                    updateExecutionWorkspacePolicy({ requireIsolation: !requireIsolation })!,
+                  )}
+              />
+            ) : (
+              <span className="text-xs text-muted-foreground">{requireIsolation ? "On" : "Off"}</span>
+            )}
+          </div>
         </div>
 
         {isolatedWorkspacesEnabled ? (
