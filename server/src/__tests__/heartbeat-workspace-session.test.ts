@@ -1218,6 +1218,7 @@ describe("effective run execution workspace config freshness", () => {
       requestedExecutionWorkspaceId: "workspace-old",
       requestedShouldReuseExisting: true,
       existingExecutionWorkspaceAvailable: false,
+      existingExecutionWorkspaceRebuiltAfterCleanup: false,
     });
 
     const metadata = buildWorkspaceConfigMetadata();
@@ -1255,6 +1256,51 @@ describe("effective run execution workspace config freshness", () => {
       },
     });
     expect(realizeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds a git worktree the automatic cleanup archived, but never one archived by hand or a shared checkout (DUR-5237)", () => {
+    const base = {
+      issueExecutionWorkspaceId: "workspace-old",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: "archived",
+      existingExecutionWorkspaceStrategyType: "git_worktree",
+    };
+    for (const cleanupReason of [
+      "auto_cleanup_merged_pr",
+      "auto_cleanup_finished_task",
+      "auto_cleanup_idle_run",
+    ]) {
+      expect(
+        resolveExecutionWorkspaceReuseRequestForIssue({ ...base, existingExecutionWorkspaceCleanupReason: cleanupReason }),
+      ).toEqual({
+        requestedExecutionWorkspaceId: "workspace-old",
+        requestedShouldReuseExisting: true,
+        existingExecutionWorkspaceAvailable: true,
+        existingExecutionWorkspaceRebuiltAfterCleanup: true,
+      });
+    }
+    // Archived by a person (or with no reason): still an explicit-reuse failure.
+    for (const cleanupReason of [null, undefined, "closed by operator"]) {
+      expect(
+        resolveExecutionWorkspaceReuseRequestForIssue({ ...base, existingExecutionWorkspaceCleanupReason: cleanupReason }),
+      ).toMatchObject({ existingExecutionWorkspaceAvailable: false, existingExecutionWorkspaceRebuiltAfterCleanup: false });
+    }
+    // Only git worktrees are ever archived by the cleanup; a shared checkout is not rebuilt.
+    expect(
+      resolveExecutionWorkspaceReuseRequestForIssue({
+        ...base,
+        existingExecutionWorkspaceStrategyType: "project_primary",
+        existingExecutionWorkspaceCleanupReason: "auto_cleanup_merged_pr",
+      }),
+    ).toMatchObject({ existingExecutionWorkspaceAvailable: false, existingExecutionWorkspaceRebuiltAfterCleanup: false });
+    // An active folder is not flagged as rebuilt.
+    expect(
+      resolveExecutionWorkspaceReuseRequestForIssue({
+        ...base,
+        existingExecutionWorkspaceStatus: "active",
+        existingExecutionWorkspaceCleanupReason: "auto_cleanup_merged_pr",
+      }),
+    ).toMatchObject({ existingExecutionWorkspaceAvailable: true, existingExecutionWorkspaceRebuiltAfterCleanup: false });
   });
 
   it("fails explicit reuse restore misses without realizing a fallback workspace", async () => {
