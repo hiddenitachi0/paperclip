@@ -28,7 +28,9 @@ import {
   stopRuntimeServicesForProjectWorkspace,
 } from "../services/workspace-runtime.js";
 import {
+  assertBoardOnlyProjectWorkspaceChange,
   assertNoAgentHostWorkspaceCommandMutation,
+  collectProjectWorkspaceCodeLocationChanges,
   collectDeployPolicyCommandPaths,
   collectProjectDeployTransportCommandPaths,
   collectProjectExecutionWorkspaceCommandPaths,
@@ -293,6 +295,7 @@ export function projectRoutes(rawDb: Db) {
       companyId,
       readProjectPolicyEnvironmentId(projectData.executionWorkspacePolicy),
     );
+    assertBoardOnlyProjectWorkspaceChange(req, workspace !== undefined ? true : []);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       [
@@ -480,6 +483,7 @@ export function projectRoutes(rawDb: Db) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    assertBoardOnlyProjectWorkspaceChange(req, true);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectProjectWorkspaceCommandPaths(req.body),
@@ -526,11 +530,15 @@ export function projectRoutes(rawDb: Db) {
         req,
         collectProjectWorkspaceCommandPaths(req.body),
       );
-      const workspaceExists = (await svc.listWorkspaces(id)).some((workspace) => workspace.id === workspaceId);
-      if (!workspaceExists) {
+      const currentWorkspace = (await svc.listWorkspaces(id)).find((workspace) => workspace.id === workspaceId);
+      if (!currentWorkspace) {
         res.status(404).json({ error: "Project workspace not found" });
         return;
       }
+      assertBoardOnlyProjectWorkspaceChange(
+        req,
+        collectProjectWorkspaceCodeLocationChanges(req.body, currentWorkspace as unknown as Record<string, unknown>),
+      );
       const workspace = await svc.updateWorkspace(id, workspaceId, req.body);
       if (!workspace) {
         res.status(422).json({ error: "Invalid project workspace payload" });
@@ -841,6 +849,7 @@ export function projectRoutes(rawDb: Db) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    assertBoardOnlyProjectWorkspaceChange(req, true);
     const workspace = await svc.removeWorkspace(id, workspaceId);
     if (!workspace) {
       res.status(404).json({ error: "Project workspace not found" });
