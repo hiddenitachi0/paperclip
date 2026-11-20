@@ -30,6 +30,7 @@ import {
   PRE_REVIEW_TESTS_FAILED_REASON,
   PRE_REVIEW_TESTS_PASSED_REASON,
   buildPreReviewFailureComment,
+  defaultPreReviewTestRunner,
   evaluatePreReviewQualityLoop,
   lastLines,
   waitForPreReviewCheck,
@@ -395,6 +396,84 @@ describeEmbeddedPostgres("pre-review quality loop (DB-backed, real temp repo)", 
     expect(comment).toContain("Quality loop: tests failed (round 1 of 2)");
     expect(comment).toContain("did not finish within");
   }, 30_000);
+
+  it("a shell that exits and leaves a background process is reported with its real exit code, soon, and the leftover is stopped", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-pre-review-drain-"));
+    tempDirs.push(dir);
+    const started = Date.now();
+    const result = await defaultPreReviewTestRunner({
+      command: "sleep 60 & echo BG_PID=$!; setsid sleep 6 & exit 3",
+      cwd: dir,
+      timeoutMs: 20_000,
+    });
+    expect(Date.now() - started).toBeLessThan(9_000);
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(3);
+    const pid = Number(/BG_PID=(\d+)/.exec(result.output)?.[1]);
+    expect(pid).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 30_000);
+
+  it("a pass with a left-behind background process is a pass, not a timeout", async () => {
+    const f = await seed({ testCommand: "echo ok; sleep 30 & exit 0" });
+    const w = recordingWakeup();
+    expect((await move(f, w.wakeup, { timeoutMs: 20_000 }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    const [comment] = await loopComments(f.issueId);
+    expect(comment!.split("\n")[0]).toMatch(/^Quality loop: tests passed at /);
+    expect(w.calls.map((c) => c.reason)).toEqual([PRE_REVIEW_TESTS_PASSED_REASON]);
+  }, 30_000);
+
+  it("a task cancelled or reassigned while the tests ran gets no comment and wakes nobody", async () => {
+    for (const change of ["cancel", "reassign"] as const) {
+      const f = await seed();
+      const w = recordingWakeup();
+      const runner: PreReviewTestRunner = async () => {
+        if (change === "cancel") await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.issueId));
+        else await db.update(issues).set({ assigneeAgentId: null, assigneeUserId: "someone" }).where(eq(issues.id, f.issueId));
+        return { exitCode: 1, timedOut: false, output: "FAIL" };
+      };
+      expect((await move(f, w.wakeup, { runner }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+      await waitForPreReviewCheck(f.issueId);
+      expect(await loopComments(f.issueId)).toHaveLength(0);
+      expect(w.calls).toHaveLength(0);
+    }
+  });
+
+  it("a pass is matched on the full commit: a pass for another commit with the same first 7 characters does not count", async () => {
+    const f = await seed();
+    const w = recordingWakeup();
+    const sha = git(f.repo!, "rev-parse", "HEAD");
+    const lookalike = `${sha.slice(0, 7)}${"0".repeat(33)}`;
+    await db.insert(issueComments).values({
+      companyId: f.companyId,
+      issueId: f.issueId,
+      authorType: "system",
+      body: `Quality loop: tests passed at ${sha.slice(0, 7)}\n\n\`pnpm test\` exited with code 0.\n\nFull commit: ${lookalike}`,
+    });
+    expect((await move(f, w.wakeup, { runner: passing }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    const comments = await loopComments(f.issueId);
+    expect(comments).toHaveLength(2);
+    expect(comments[1]).toContain(`Full commit: ${sha}`);
+    // And the real pass now lets the next move through.
+    expect(await move(f, w.wakeup, { runner: failing })).toBeNull();
+  });
+
+  it("says in the comment when the folder had uncommitted changes, and not when it was clean", async () => {
+    const clean = await seed();
+    const w = recordingWakeup();
+    await move(clean, w.wakeup, { runner: passing });
+    await waitForPreReviewCheck(clean.issueId);
+    expect((await loopComments(clean.issueId))[0]).not.toContain("uncommitted changes");
+
+    const dirty = await seed();
+    fs.writeFileSync(path.join(dirty.repo!, "scratch.txt"), "not committed\n");
+    await move(dirty, w.wakeup, { runner: failing });
+    await waitForPreReviewCheck(dirty.issueId);
+    expect((await loopComments(dirty.issueId))[0]).toContain("uncommitted changes");
+  });
 
   it("a workspace with no git commit: one pass lets the next move through instead of looping", async () => {
     const f = await seed();

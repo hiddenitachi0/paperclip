@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { and, eq, gt, isNull, like, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments } from "@paperclipai/db";
+import { issueComments, issues } from "@paperclipai/db";
 import {
   QUALITY_PRE_REVIEW_MAX_ROUNDS,
   QUALITY_PRE_REVIEW_TEST_TIMEOUT_MS,
@@ -66,6 +67,9 @@ const OUTPUT_TAIL_LINES = 60;
 const OUTPUT_KEEP_BYTES = 64 * 1024;
 const KILL_GRACE_MS = 5_000;
 const FORCE_SETTLE_MS = 2_000;
+// After the shell itself has exited, how long output from anything it left running is still collected.
+const EXIT_DRAIN_MS = 2_000;
+const execFileAsync = promisify(execFile);
 
 export interface PreReviewTestRunResult {
   /** Process exit code; null when it was killed (timeout) or never started. */
@@ -147,6 +151,19 @@ export const defaultPreReviewTestRunner: PreReviewTestRunner = ({ command, cwd, 
       clearTimeout(timer);
       finish({ exitCode: code, timedOut, output: output.slice(-OUTPUT_KEEP_BYTES) });
     });
+    // The shell can exit and leave a background process holding the output pipes, so "close"
+    // never comes. Collect output for a moment, then close the pipes, stop whatever was left in
+    // the process group, and report the shell's real exit code (not a timeout).
+    child.on("exit", (code) => {
+      setTimeout(() => {
+        if (settled) return;
+        clearTimeout(timer);
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        killGroup("SIGKILL");
+        finish({ exitCode: code, timedOut, output: output.slice(-OUTPUT_KEEP_BYTES) });
+      }, EXIT_DRAIN_MS).unref();
+    });
   });
 
 // One check per task at a time, in this process. A check lost to a restart is simply started
@@ -165,6 +182,29 @@ function shortSha(sha: string | null): string {
 function stripAnsi(value: string): string {
   // eslint-disable-next-line no-control-regex
   return value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+const DIRTY_FOLDER_NOTE =
+  "Note: the folder had uncommitted changes when the tests ran, so this result covers those changes too, not only the commit above.";
+
+/** True when the working folder has uncommitted or untracked changes; false when clean or unreadable. */
+async function workspaceHasUncommittedChanges(cwd: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
+      cwd,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** A pass is matched on the whole commit, not the 7-character prefix shown in the heading. */
+function passCommentPattern(headSha: string | null): string {
+  return headSha
+    ? `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}%Full commit: ${headSha}%`
+    : `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}%`;
 }
 
 export function lastLines(output: string, count = OUTPUT_TAIL_LINES): string {
@@ -224,6 +264,7 @@ export function buildPreReviewFailureComment(input: {
   headSha: string | null;
   result: PreReviewTestRunResult;
   timeoutMs: number;
+  dirty?: boolean;
 }): string {
   const last = input.round >= input.maxRounds;
   const how = input.result.timedOut
@@ -241,6 +282,7 @@ export function buildPreReviewFailureComment(input: {
   }
   lines.push(
     `Test command: \`${maskSecretLikeText(input.command)}\` (${how}). Commit: ${shortSha(input.headSha)}.`,
+    ...(input.dirty ? ["", DIRTY_FOLDER_NOTE] : []),
     "",
     `Last ${OUTPUT_TAIL_LINES} lines of output:`,
     "```",
@@ -406,7 +448,7 @@ async function startPreReviewCheck(
     // With a commit: a pass for that commit. Without one (no git HEAD to read), a pass in the
     // current loop counts, or the agent would be woken and re-tested forever.
     const passScope = headSha ? base : { ...base, since };
-    if ((await countLoopComments(db, passScope, `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}%`)) > 0) return null;
+    if ((await countLoopComments(db, passScope, passCommentPattern(headSha))) > 0) return null;
     if ((await countPreReviewFailedRounds(db, { ...base, since })) >= QUALITY_PRE_REVIEW_MAX_ROUNDS) return null;
     // The tests could not be started earlier in this loop: say so once, then stop trying.
     if ((await countLoopComments(db, { ...base, since }, `${PRE_REVIEW_COULD_NOT_RUN_PREFIX}%`)) > 0) return null;
@@ -422,8 +464,10 @@ async function startPreReviewCheck(
 
   const runner = input.runner ?? defaultPreReviewTestRunner;
   const timeoutMs = input.timeoutMs ?? QUALITY_PRE_REVIEW_TEST_TIMEOUT_MS;
+  const dirty = await workspaceHasUncommittedChanges(checkout.workspacePath);
   const job = runCheck({
     ...input,
+    dirty,
     agentId,
     sourceRunId,
     testCommand,
@@ -484,12 +528,20 @@ async function runCheck(
     since: Date | null;
     runner: PreReviewTestRunner;
     timeoutMs: number;
+    dirty: boolean;
   },
 ): Promise<void> {
   const { db, issue, agentId, sourceRunId, headSha } = input;
   const base = { companyId: issue.companyId, issueId: issue.id };
   const label = issue.identifier ?? "the task";
   const result = await input.runner({ command: input.testCommand, cwd: input.cwd, timeoutMs: input.timeoutMs });
+
+  // The tests can take minutes. If a person cancelled, finished or reassigned the task meanwhile,
+  // say nothing and wake nobody: the old agent no longer owns it.
+  if (!(await taskStillBelongsToAgent(db, issue, agentId))) {
+    logger.info({ issueId: issue.id }, "pre-review quality loop: task changed hands while the tests ran; not posting or waking");
+    return;
+  }
 
   if (result.startError) {
     await couldNotRun(db, input, sourceRunId, `The test command could not be started (${maskSecretLikeText(result.startError)}).`);
@@ -509,7 +561,13 @@ async function runCheck(
     await postLoopComment(db, {
       ...base,
       sourceRunId,
-      body: `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}\n\n\`${maskSecretLikeText(input.testCommand)}\` exited with code 0.`,
+      body: [
+        `${PRE_REVIEW_PASS_PREFIX}${shortSha(headSha)}`,
+        "",
+        `\`${maskSecretLikeText(input.testCommand)}\` exited with code 0.`,
+        ...(headSha ? ["", `Full commit: ${headSha}`] : []),
+        ...(input.dirty ? ["", DIRTY_FOLDER_NOTE] : []),
+      ].join("\n"),
     });
     await safeActivity(db, issue, agentId, sourceRunId, "issue.pre_review_tests_passed", { commit: shortSha(headSha) });
     await wakeAgent({
@@ -535,6 +593,7 @@ async function runCheck(
       headSha,
       result,
       timeoutMs: input.timeoutMs,
+      dirty: input.dirty,
     }),
   });
   await safeActivity(db, issue, agentId, sourceRunId, "issue.pre_review_tests_failed", {
@@ -556,6 +615,27 @@ async function runCheck(
       : `The tests for ${label} failed (round ${round} of ${QUALITY_PRE_REVIEW_MAX_ROUNDS}). Read the last comment from the quality loop, fix what is failing, commit, and move the task to in_review again.`,
     keySuffix: `${round}:${shortSha(headSha)}:${sourceRunId}`,
   });
+}
+
+const CLOSED_STATUSES = new Set(["cancelled", "done"]);
+
+/** Re-reads the task: still assigned to the agent that asked, and not cancelled or finished. Fails open on a read error. */
+async function taskStillBelongsToAgent(
+  db: Db,
+  issue: { id: string; companyId: string },
+  agentId: string,
+): Promise<boolean> {
+  try {
+    const [row] = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)));
+    if (!row) return false;
+    return row.assigneeAgentId === agentId && !CLOSED_STATUSES.has(row.status);
+  } catch (err) {
+    logger.warn({ err, issueId: issue.id }, "pre-review quality loop: could not re-read the task; continuing");
+    return true;
+  }
 }
 
 async function safeActivity(
