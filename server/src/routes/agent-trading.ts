@@ -18,9 +18,11 @@ import { tradingTraderService } from "../services/trading-trader.js";
  * What the Trader can do: read a strategy (spec, guidelines, recent ledger,
  * scores), request and read experiments (DUR-5018), and propose a rule change
  * that cites the experiment recommending it, which becomes a draft version plus an
- * approval card that only a person can answer. These routes never take a
- * strategy status, a mode, a wallet or an order, and nothing here activates a
- * version.
+ * approval card that only a person can answer. DUR-5019 adds the daily brief
+ * (read-only), a post-mortem note, and `changes`: applying a PAPER strategy's
+ * change itself, with no card, only from a finished experiment that passed every
+ * check at double fees (see trading-trader.ts applyChange). These routes never
+ * take a strategy status, a mode, a wallet or an order.
  */
 
 function requireAgentActor(req: Request): { agentId: string; companyId: string } {
@@ -54,6 +56,12 @@ export function agentTradingRoutes(rawDb: Db) {
   router.get("/agent-trading/strategies/:strategyId", agentScope(), async (req, res) => {
     const { companyId } = await designated(req);
     res.json(await trader.getStrategy(companyId, req.params.strategyId as string));
+  });
+
+  // DUR-5019: the daily brief, read-only: the last day's trades and stops, the scoreboard, the mistakes list and what is left of today's limits.
+  router.get("/agent-trading/daily-brief", agentScope(), async (req, res) => {
+    const { companyId } = await designated(req);
+    res.json(await trader.getDailyBrief(companyId));
   });
 
   // DUR-5018: experiments. The Trader asks for one, then reads the result; it can never apply one.
@@ -116,6 +124,57 @@ export function agentTradingRoutes(rawDb: Db) {
             ? "This exact change is already waiting for approval."
             : "These rules are already the live rules; nothing to propose.",
     });
+  });
+
+  // DUR-5019: apply an experiment's recommendation to a PAPER strategy with no card. The body names the experiment; the rules come from it.
+  router.post("/agent-trading/strategies/:strategyId/changes", agentScope(), async (req, res) => {
+    const { agentId, companyId } = await designated(req);
+    const strategyId = req.params.strategyId as string;
+    const result = await trader.applyChange(companyId, agentId, strategyId, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "trading.trader_applied_change",
+      entityType: "agent",
+      entityId: agentId,
+      details: {
+        strategyId,
+        outcome: result.outcome,
+        versionId: result.version.id,
+        versionNumber: result.version.version,
+        previousVersionId: "previousVersionId" in result ? result.previousVersionId : null,
+        experimentId: (req.body as { experimentId?: unknown } | null)?.experimentId ?? null,
+      },
+    });
+    res.status(result.outcome === "applied" ? 201 : 200).json({
+      outcome: result.outcome,
+      versionId: result.version.id,
+      versionNumber: result.version.version,
+      message:
+        result.outcome === "applied"
+          ? "The change is applied to the paper strategy. It is recorded in the ledger and will be listed in the daily summary. Mention it in your report."
+          : "These rules are already the live rules; nothing was applied.",
+    });
+  });
+
+  // DUR-5019: the Trader's short post-mortem for one strategy, with each tagged loss tied to one of the rules' own common mistakes.
+  router.post("/agent-trading/strategies/:strategyId/post-mortems", agentScope(), async (req, res) => {
+    const { agentId, companyId } = await designated(req);
+    const strategyId = req.params.strategyId as string;
+    const result = await trader.filePostMortem(companyId, agentId, strategyId, req.body);
+    await logActivity(db, {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "trading.trader_wrote_post_mortem",
+      entityType: "agent",
+      entityId: agentId,
+      details: { strategyId, ledgerEntryId: result.ledgerEntryId, tagged: result.tagged },
+    });
+    res.status(201).json(result);
   });
 
   return router;

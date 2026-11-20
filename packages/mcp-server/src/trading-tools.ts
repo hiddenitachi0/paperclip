@@ -6,9 +6,10 @@
  * answers 403 to any agent that is not the company's designated Trader.
  *
  * There is no tool here that places, cancels or sizes an order, switches a
- * strategy on or off, or touches a wallet. The only way to change a strategy
- * is `trading_propose_change`, which files an approval card that a person
- * answers.
+ * strategy on or off, or touches a wallet. A strategy's rules change only two
+ * ways: `trading_propose_change` files an approval card that a person answers,
+ * and `trading_apply_change` (DUR-5019) applies a finished experiment's own
+ * recommendation to a PAPER strategy when the server's checks all pass.
  */
 import { z } from "zod";
 import { PaperclipApiClient } from "./client.js";
@@ -89,6 +90,37 @@ export function createTradingToolDefinitions(client: PaperclipApiClient): ToolDe
         reasons: z.string().min(3).max(2000).describe("Why this change is a good idea. Shown on the card."),
       }),
       ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/proposals`, { body }),
+    ),
+    makeTool(
+      "trading_get_daily_brief",
+      "Your daily read, in one call: for every strategy the last 24 hours of trades (losses marked, with the ledger id to tag), safety stops, the rules' own list of common mistakes (with the position to tag by), the prediction scoreboard, and what you already filed or applied today and how much of today's limits is left. Read-only.",
+      z.object({}),
+      () => client.requestJson("GET", "/agent-trading/daily-brief"),
+    ),
+    makeTool(
+      "trading_write_post_mortem",
+      "Write a short plain-language post-mortem for one strategy (a few sentences, no jargon) and tag each losing trade with one of that strategy's own common mistakes. A tag needs the losing trade's ledgerEntryId and the mistake's index from the daily brief; the server refuses a tag on a trade that did not lose or a mistake the rules do not list. At most 2 per strategy per day. It is a note in the ledger; it changes nothing.",
+      z.object({
+        strategyId: z.string().uuid(),
+        text: z.string().min(10).max(2000).describe("The post-mortem, in plain words a non-trader can follow"),
+        lossTags: z
+          .array(z.object({ ledgerEntryId: z.string().uuid(), mistakeIndex: z.number().int().min(0).max(19) }))
+          .max(20)
+          .optional()
+          .describe("One entry per losing trade you can tie to a listed common mistake"),
+      }),
+      ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/post-mortems`, { body }),
+    ),
+    makeTool(
+      "trading_apply_change",
+      "Apply a finished experiment's recommendation to a PAPER strategy yourself, with no approval card. You send only the experimentId and your own words; the rules come from the experiment. The server refuses unless the experiment succeeded, recommended a change, passed every check including 'positive after fees at double fees' and 'deflated Sharpe', finished less than 72 hours ago, and was run on the rules that are live right now. It also refuses a loosened risk limit, a bigger size within 7 days of a safety stop, a person's open proposal on that strategy, and anything beyond 1 applied change per strategy and 3 per company per day. When it refuses, file the change with trading_propose_change instead. Every applied change is logged and listed in the daily summary; mention it in your report.",
+      z.object({
+        strategyId: z.string().uuid(),
+        experimentId: z.string().uuid().describe("The finished experiment whose recommendation you are applying"),
+        summary: z.string().min(3).max(500).describe("What changes, in one or two plain sentences"),
+        reasons: z.string().min(3).max(2000).describe("Why this change is a good idea"),
+      }),
+      ({ strategyId, ...body }) => client.requestJson("POST", `/agent-trading/strategies/${enc(strategyId)}/changes`, { body }),
     ),
   ];
 }

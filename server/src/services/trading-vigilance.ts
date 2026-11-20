@@ -28,7 +28,7 @@
 
 import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { tradingAlertSettings, tradingCandles, tradingDailyStats, tradingLedgerEntries, tradingRegimes, tradingStrategies } from "@paperclipai/db";
+import { tradingAlertSettings, tradingCandles, tradingDailyStats, tradingLedgerEntries, tradingRegimes, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
 import {
   TRADING_ALERT_DEFAULTS,
   TRADING_ASSETS,
@@ -372,15 +372,46 @@ export function tradingVigilanceService(db: Db, deps: TradingVigilanceDeps = {})
         .from(tradingLedgerEntries)
         .where(and(eq(tradingLedgerEntries.companyId, companyId), eq(tradingLedgerEntries.eventType, "circuit_breaker"), gte(tradingLedgerEntries.createdAt, new Date(now.getTime() - 24 * HOUR_MS))));
       if (weatherLines === null) weatherLines = await currentWeatherLines(now);
+      const traderLines = await traderChangeLines(companyId, strategies, now);
       const parts = [
         `Daily trading summary. You have ${strategies.length} paper-trading ${strategies.length === 1 ? "strategy" : "strategies"}: ${trading} trading, ${paused} paused, ${stopped} stopped by a safety rule.`,
         trades === 0 ? "Yesterday there were no trades." : `Yesterday there ${trades === 1 ? "was 1 trade" : `were ${trades} trades`}, with a result of ${formatNok(result)} on paper.`,
         (stops[0]?.n ?? 0) > 0 ? `Safety stops in the last day: ${stops[0]!.n}.` : "No safety stops in the last day.",
+        ...traderLines,
         ...(weatherLines.length > 0 ? ["Market weather now:", ...weatherLines] : []),
       ];
       if (await notify(companyId, "daily_summary", "daily_summary", `daily_summary:${today}`, parts.join("\n"), own)) sent += 1;
     }
     return sent;
+  }
+
+  /**
+   * DUR-5019: what the Trader changed in the last day, from the version rows and nothing the Trader wrote.
+   * A change it applied itself is always named here (it had no card); the proposals still waiting on a person are counted.
+   */
+  async function traderChangeLines(companyId: string, strategies: Array<{ id: string; name: string }>, now: Date): Promise<string[]> {
+    const since = new Date(now.getTime() - 24 * HOUR_MS);
+    const applied = await db
+      .select({ strategyId: tradingStrategyVersions.strategyId, version: tradingStrategyVersions.version })
+      .from(tradingStrategyVersions)
+      .where(and(eq(tradingStrategyVersions.companyId, companyId), sql`${tradingStrategyVersions.appliedByAgentId} IS NOT NULL`, gte(tradingStrategyVersions.createdAt, since)))
+      .orderBy(asc(tradingStrategyVersions.createdAt))
+      .limit(10);
+    const [waiting] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(tradingStrategyVersions)
+      .where(and(eq(tradingStrategyVersions.companyId, companyId), eq(tradingStrategyVersions.proposedByType, "agent"), eq(tradingStrategyVersions.status, "draft")));
+    const nameOf = new Map(strategies.map((s) => [s.id, s.name]));
+    const lines: string[] = [];
+    if (applied.length > 0) {
+      lines.push(
+        `The Trader changed the rules of ${applied.length === 1 ? "1 paper strategy" : `${applied.length} paper strategies`} by itself after a past-data test: ${applied
+          .map((a) => `"${nameOf.get(a.strategyId) ?? "a strategy"}" (now version ${a.version})`)
+          .join(", ")}. No approval was needed; it is recorded in the strategy ledger.`,
+      );
+    }
+    if ((waiting?.n ?? 0) > 0) lines.push(`${waiting!.n === 1 ? "1 rule change from the Trader is" : `${waiting!.n} rule changes from the Trader are`} waiting for your approval.`);
+    return lines;
   }
 
   async function currentWeatherLines(now: Date): Promise<string[]> {

@@ -1,17 +1,24 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companyCryptoSettings, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
+import { agents, companyCryptoSettings, tradingExperiments, tradingLedgerEntries, tradingStrategies, tradingStrategyVersions } from "@paperclipai/db";
 import {
+  TRADER_APPLY_REQUIRED_CHECKS,
+  TRADER_LEDGER_REASONS,
   TRADING_TRADER_EXPERIMENTS_PER_STRATEGY_PER_DAY,
+  TRADING_TRADER_LIMITS,
   TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY,
   describeTradingSpec,
   queueTradingExperimentSchema,
+  traderApplyChangeSchema,
+  traderPostMortemSchema,
   traderProposeChangeSchema,
+  tradingStrategySpecSchema,
   type AskTraderInput,
   type TradingStrategySpec,
 } from "@paperclipai/shared";
-import { forbidden, notFound, unprocessable } from "../errors.js";
+import { forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { issueService } from "./issues.js";
+import { tradingEvaluatorService } from "./trading-evaluator.js";
 import { tradingLedgerService } from "./trading-ledger.js";
 import { tradingExperimentStore, experimentSummary, type TradingExperimentRow } from "./trading-experiment-store.js";
 import { tradingVersionsService, type ProposeVersionResult } from "./trading-versions.js";
@@ -52,10 +59,40 @@ function experimentCardFacts(row: TradingExperimentRow) {
   };
 }
 
-export function tradingTraderService(db: Db, rawDb: Db = db) {
-  const versions = tradingVersionsService(db, { rawDb });
+const HOUR_MS = 3_600_000;
+
+export interface TradingTraderDeps {
+  now?: () => Date;
+  evaluator?: Pick<ReturnType<typeof tradingEvaluatorService>, "scoreboard">;
+}
+
+/**
+ * Why an experiment's result may NOT be applied without a card, or null when it may.
+ * A missing check, a missing double-fee check or a result older than the
+ * freshness limit all count as "no". Pure so the rule is tested on its own.
+ */
+export function experimentNotAppliableReason(row: Pick<TradingExperimentRow, "recommendation" | "finishedAt" | "status">, now: Date): { code: string; message: string } | null {
+  const rec = (row.recommendation ?? null) as { decision?: string; checks?: Array<{ key?: string; passed?: boolean }> } | null;
+  if (rec?.decision !== "recommend") return { code: "trading_apply_not_recommended", message: "That experiment did not recommend a change, so there is nothing to apply." };
+  const checks = Array.isArray(rec.checks) ? rec.checks : [];
+  for (const key of TRADER_APPLY_REQUIRED_CHECKS) {
+    const check = checks.find((c) => c?.key === key);
+    if (!check || check.passed !== true) {
+      return { code: "trading_apply_gate_not_passed", message: `That experiment's result did not pass the past-data check "${key}" (the one at double fees included), so it cannot be applied without a person's approval. File a proposal card instead.` };
+    }
+  }
+  if (!row.finishedAt || now.getTime() - row.finishedAt.getTime() > TRADING_TRADER_LIMITS.appliedExperimentMaxAgeHours * HOUR_MS) {
+    return { code: "trading_apply_experiment_too_old", message: `That experiment finished more than ${TRADING_TRADER_LIMITS.appliedExperimentMaxAgeHours} hours ago, so its result is stale. Run a new experiment on the live rules.` };
+  }
+  return null;
+}
+
+export function tradingTraderService(db: Db, rawDb: Db = db, deps: TradingTraderDeps = {}) {
+  const nowOf = () => deps.now?.() ?? new Date();
+  const versions = tradingVersionsService(db, { rawDb, now: deps.now });
   const ledger = tradingLedgerService(db);
   const experiments = tradingExperimentStore(db);
+  const evaluator = deps.evaluator ?? tradingEvaluatorService(db);
 
   /** The one place that decides who the Trader is. Same company, same agent, or a plain 403. */
   async function requireTrader(companyId: string, agentId: string): Promise<void> {
@@ -169,8 +206,230 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
       strategyId,
       { spec, guidelines },
       { type: "agent", id: agentId },
-      { note: { summary, reasons }, agentProposalsPerDay: TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY, experiment: experimentCardFacts(experiment) },
+      {
+        note: { summary, reasons },
+        agentProposalsPerDay: TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY,
+        agentProposalsPerCompanyPerDay: TRADING_TRADER_LIMITS.proposalsPerCompanyPerDay,
+        sizeFreezeDays: TRADING_TRADER_LIMITS.sizeFreezeDays,
+        experiment: experimentCardFacts(experiment),
+      },
     );
+  }
+
+  /**
+   * DUR-5019: apply a finished experiment's recommendation to a PAPER strategy
+   * with no card. The rules come from the experiment (the Trader sends only its
+   * id and its own words), the experiment must have passed every required
+   * check at double fees and be fresh, and the version must still be live; the
+   * version service then enforces paper-only, tighten-only risk, the size
+   * freeze after a safety stop and the daily caps under its locks. Anything
+   * short of that is refused with a plain reason and the Trader files a
+   * proposal card instead.
+   */
+  async function applyChange(companyId: string, agentId: string, strategyId: string, body: unknown) {
+    const parsed = traderApplyChangeSchema.safeParse(body);
+    if (!parsed.success) {
+      throw unprocessable("This request is not valid.", { issues: parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.join("."), message: i.message })) });
+    }
+    const { experimentId, summary, reasons } = parsed.data;
+    if (!UUID_RE.test(strategyId)) throw notFound("Trading strategy not found.");
+    const strategy = await requireStrategy(companyId, strategyId);
+    if (strategy.mode !== "paper") {
+      throw unprocessable("The Trader may only apply changes to paper strategies. File a proposal card instead.", { reason: "trader_apply_paper_only" });
+    }
+    const row = await experiments.getExperiment(companyId, strategyId, experimentId);
+    if (row.status !== "succeeded") throw unprocessable("That experiment has not finished with a result yet.", { code: "trading_experiment_not_finished", reason: "trading_experiment_not_finished" });
+    const refused = experimentNotAppliableReason(row, nowOf());
+    if (refused) throw unprocessable(refused.message, { code: refused.code, reason: refused.code });
+    const spec = tradingStrategySpecSchema.safeParse(row.recommendedSpec);
+    if (!spec.success) throw unprocessable("That experiment's recommended rules are not a valid rule book.", { reason: "trading_apply_bad_spec" });
+    // Same checks as a card: same strategy, still the live version, and the rules are exactly the recommended variant.
+    await experiments.requireCitableExperiment(companyId, strategyId, experimentId, spec.data);
+    const { version: live } = await versions.ensureActiveVersion(strategy);
+    const result = await versions.applyAgentVersion(companyId, strategyId, {
+      spec: spec.data,
+      // An experiment varies indicator settings only, so the guidelines stay as they are.
+      guidelines: live.guidelines,
+      expectedActiveVersionId: row.versionId,
+      experimentId,
+      agentId,
+      note: { summary, reasons },
+      limits: {
+        proposalsPerCompanyPerDay: TRADING_TRADER_LIMITS.proposalsPerCompanyPerDay,
+        appliesPerStrategyPerDay: TRADING_TRADER_LIMITS.appliesPerStrategyPerDay,
+        appliesPerCompanyPerDay: TRADING_TRADER_LIMITS.appliesPerCompanyPerDay,
+        sizeFreezeDays: TRADING_TRADER_LIMITS.sizeFreezeDays,
+      },
+    });
+    return { ...result, experiment: experimentCardFacts(row) };
+  }
+
+  /**
+   * DUR-5019: one short plain-language post-mortem for a strategy, stored as an
+   * append-only ledger note. Each loss tag must name a LOSING sell of this
+   * strategy and one of the live rules' own "common mistakes" (by position), so
+   * a tag is always something the rule book itself already says. The text is the
+   * Trader's own words: shown labelled, never acted on, never put into a
+   * Telegram message.
+   */
+  async function filePostMortem(companyId: string, agentId: string, strategyId: string, body: unknown) {
+    const parsed = traderPostMortemSchema.safeParse(body);
+    if (!parsed.success) {
+      throw unprocessable("This post-mortem is not valid.", { issues: parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.join("."), message: i.message })) });
+    }
+    if (!UUID_RE.test(strategyId)) throw notFound("Trading strategy not found.");
+    const strategy = await requireStrategy(companyId, strategyId);
+    const { spec, version } = await versions.ensureActiveVersion(strategy);
+    const mistakes = (spec as TradingStrategySpec).meta.commonMistakes;
+    const since = new Date(nowOf().getTime() - 24 * HOUR_MS);
+    const [recent] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(tradingLedgerEntries)
+      .where(
+        and(
+          eq(tradingLedgerEntries.companyId, companyId),
+          eq(tradingLedgerEntries.strategyId, strategyId),
+          eq(tradingLedgerEntries.eventType, "reconciliation"),
+          sql`${tradingLedgerEntries.detail}->>'reason' = ${TRADER_LEDGER_REASONS.postMortem}`,
+          gte(tradingLedgerEntries.createdAt, since),
+        ),
+      );
+    if ((recent?.n ?? 0) >= TRADING_TRADER_LIMITS.postMortemsPerStrategyPerDay) {
+      throw tooManyRequests(`At most ${TRADING_TRADER_LIMITS.postMortemsPerStrategyPerDay} post-mortems can be written for one strategy per day.`, { reason: "trader_post_mortem_daily_cap" });
+    }
+    const tags = parsed.data.lossTags;
+    const ids = [...new Set(tags.map((t) => t.ledgerEntryId))];
+    const entries = ids.length
+      ? await db
+          .select({ id: tradingLedgerEntries.id, strategyId: tradingLedgerEntries.strategyId, eventType: tradingLedgerEntries.eventType, realizedPnlNok: tradingLedgerEntries.realizedPnlNok, createdAt: tradingLedgerEntries.createdAt })
+          .from(tradingLedgerEntries)
+          .where(and(eq(tradingLedgerEntries.companyId, companyId), inArray(tradingLedgerEntries.id, ids)))
+      : [];
+    const byId = new Map(entries.map((e) => [e.id, e]));
+    const checked = tags.map((tag) => {
+      const entry = byId.get(tag.ledgerEntryId);
+      if (!entry || entry.strategyId !== strategyId) {
+        throw unprocessable("A tagged trade was not found on this strategy.", { reason: "trader_tag_unknown_trade", ledgerEntryId: tag.ledgerEntryId });
+      }
+      if (entry.eventType !== "order_filled" || entry.realizedPnlNok === null || entry.realizedPnlNok >= 0) {
+        throw unprocessable("Only a losing trade can be tagged with a mistake.", { reason: "trader_tag_not_a_loss", ledgerEntryId: tag.ledgerEntryId });
+      }
+      const mistake = mistakes[tag.mistakeIndex];
+      if (mistake === undefined) {
+        throw unprocessable(`This strategy's rules list ${mistakes.length} common mistake${mistakes.length === 1 ? "" : "s"}; ${tag.mistakeIndex} is not one of them.`, { reason: "trader_tag_unknown_mistake", mistakeIndex: tag.mistakeIndex });
+      }
+      return { ledgerEntryId: tag.ledgerEntryId, mistakeIndex: tag.mistakeIndex, mistake, lossNok: entry.realizedPnlNok };
+    });
+    const [written] = await db
+      .insert(tradingLedgerEntries)
+      .values({
+        companyId,
+        strategyId,
+        strategyVersionId: version.id,
+        eventType: "reconciliation",
+        detail: {
+          reason: TRADER_LEDGER_REASONS.postMortem,
+          writtenByAgentId: agentId,
+          label: "The Trader's own words. Check the numbers, not this text.",
+          text: parsed.data.text,
+          lossTags: checked,
+          versionNumber: version.version,
+        },
+      })
+      .returning({ id: tradingLedgerEntries.id });
+    return { ledgerEntryId: written!.id, tagged: checked.length };
+  }
+
+  /**
+   * DUR-5019: everything the Trader needs for its daily run in one read-only
+   * call: per strategy, the last day's trades (losses marked), the safety stops,
+   * the rules' common-mistakes list with positions to tag by, the scoreboard,
+   * and what it already filed or applied; plus what is left of today's limits.
+   * No wallet, key, order or secret id is read.
+   */
+  async function getDailyBrief(companyId: string) {
+    const now = nowOf();
+    const since = new Date(now.getTime() - 24 * HOUR_MS);
+    const rows = await db.select().from(tradingStrategies).where(eq(tradingStrategies.companyId, companyId)).orderBy(tradingStrategies.createdAt);
+    const strategies = [];
+    for (const strategy of rows) {
+      const { version: active, spec } = await versions.ensureActiveVersion(strategy);
+      const entries = await db
+        .select()
+        .from(tradingLedgerEntries)
+        .where(and(eq(tradingLedgerEntries.companyId, companyId), eq(tradingLedgerEntries.strategyId, strategy.id), gte(tradingLedgerEntries.createdAt, since)))
+        .orderBy(desc(tradingLedgerEntries.createdAt))
+        .limit(200);
+      const trades = entries
+        .filter((e) => e.eventType === "order_filled")
+        .slice(0, 40)
+        .map((e) => ({ ledgerEntryId: e.id, at: e.createdAt.toISOString(), nokValue: e.nokValue, feeNok: e.feeNok, realizedPnlNok: e.realizedPnlNok, isLoss: e.realizedPnlNok !== null && e.realizedPnlNok < 0, detail: e.detail }));
+      const board = await evaluator.scoreboard(companyId, strategy.id);
+      strategies.push({
+        id: strategy.id,
+        name: strategy.name,
+        asset: strategy.asset,
+        timeframe: strategy.timeframe,
+        mode: strategy.mode,
+        status: strategy.status,
+        pauseReason: strategy.pauseReason,
+        activeVersion: { id: active.id, version: active.version, readBack: describeTradingSpec(spec as TradingStrategySpec) },
+        commonMistakes: (spec as TradingStrategySpec).meta.commonMistakes.map((text, index) => ({ index, text })),
+        last24h: {
+          trades,
+          losingTrades: trades.filter((t) => t.isLoss).length,
+          safetyStops: entries.filter((e) => e.eventType === "circuit_breaker").length,
+          riskBlocks: entries.filter((e) => e.eventType === "risk_block").length,
+        },
+        scoreboard: {
+          version: board.version,
+          status: board.status,
+          criteria: board.criteria,
+          forecasters: board.forecasters.map((f) => ({ forecasterKey: f.forecasterKey, calls: f.calls, resolved: f.resolved, pending: f.pending, hitRate: f.hitRate, hitRateInterval: f.hitRateInterval })),
+          trades: board.trades,
+          verdict: board.verdict,
+        },
+      });
+    }
+    const changes = await db
+      .select({
+        id: tradingStrategyVersions.id,
+        strategyId: tradingStrategyVersions.strategyId,
+        version: tradingStrategyVersions.version,
+        status: tradingStrategyVersions.status,
+        proposedByType: tradingStrategyVersions.proposedByType,
+        appliedByAgentId: tradingStrategyVersions.appliedByAgentId,
+        appliedExperimentId: tradingStrategyVersions.appliedExperimentId,
+        approvalId: tradingStrategyVersions.approvalId,
+        createdAt: tradingStrategyVersions.createdAt,
+      })
+      .from(tradingStrategyVersions)
+      .where(and(eq(tradingStrategyVersions.companyId, companyId), eq(tradingStrategyVersions.proposedByType, "agent"), gte(tradingStrategyVersions.createdAt, since)))
+      .orderBy(desc(tradingStrategyVersions.createdAt))
+      .limit(50);
+    const [experimentCount] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(tradingExperiments)
+      .where(and(eq(tradingExperiments.companyId, companyId), eq(tradingExperiments.requestedByType, "agent"), gte(tradingExperiments.createdAt, since)));
+    const applied = changes.filter((c) => c.appliedByAgentId !== null).length;
+    return {
+      generatedAt: now.toISOString(),
+      strategies,
+      changesInLast24h: changes.map((c) => ({ ...c, createdAt: c.createdAt.toISOString(), kind: c.appliedByAgentId ? "applied" : "proposed" })),
+      limitsLeftToday: {
+        changesAcrossCompany: Math.max(0, TRADING_TRADER_LIMITS.proposalsPerCompanyPerDay - changes.length),
+        appliesAcrossCompany: Math.max(0, TRADING_TRADER_LIMITS.appliesPerCompanyPerDay - applied),
+        appliesPerStrategy: TRADING_TRADER_LIMITS.appliesPerStrategyPerDay,
+        proposalsPerStrategy: TRADING_TRADER_PROPOSALS_PER_STRATEGY_PER_DAY,
+        experimentsRequestedByYouInLast24h: experimentCount?.n ?? 0,
+        experimentsPerStrategy: TRADING_TRADER_EXPERIMENTS_PER_STRATEGY_PER_DAY,
+      },
+      rules: [
+        "You can read, write a post-mortem, run experiments, and file or apply a rule change. You cannot place or cancel an order, start or stop a strategy, or touch a wallet.",
+        "A change is applied without a card only when a finished experiment on the live rules recommended it, passed every check at double fees, and is under 72 hours old. Anything else goes out as a proposal card that cites an experiment.",
+        `Nothing you file or apply may loosen a risk limit, or make a strategy bigger within ${TRADING_TRADER_LIMITS.sizeFreezeDays} days of a safety stop.`,
+      ],
+    };
   }
 
   /** "Ask the analyst": opens a task for the Trader. The question is a person's text; it is data in the task, not an instruction to the server. */
@@ -222,5 +481,5 @@ export function tradingTraderService(db: Db, rawDb: Db = db) {
     return { ...experimentSummary(row), params: row.params, report: row.report, recommendation: row.recommendation, recommendedSpec: row.recommendedSpec };
   }
 
-  return { requireTrader, listStrategies, getStrategy, proposeChange, requestExperiment, listExperiments, getExperiment, askTrader };
+  return { requireTrader, listStrategies, getStrategy, getDailyBrief, applyChange, filePostMortem, proposeChange, requestExperiment, listExperiments, getExperiment, askTrader };
 }

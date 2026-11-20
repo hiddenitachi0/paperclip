@@ -315,6 +315,11 @@ export const tradingStrategyVersions = pgTable(
     proposedById: text("proposed_by_id").notNull(),
     approvedByUserId: text("approved_by_user_id"),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
+    // DUR-5019 (migration 0275): set at insert, never changed. A version the Trader applied itself, on the
+    // strength of a finished experiment, with no card. Nobody "approved" it, so these two columns are what
+    // the approval-pair check accepts instead of a person; both are set together or not at all.
+    appliedByAgentId: text("applied_by_agent_id"),
+    appliedExperimentId: uuid("applied_experiment_id"),
     supersededAt: timestamp("superseded_at", { withTimezone: true }),
     specDigest: text("spec_digest").notNull(),
     grandfathered: boolean("grandfathered").notNull().default(false),
@@ -337,7 +342,11 @@ export const tradingStrategyVersions = pgTable(
     // (A superseded row keeps whatever it had.)
     approvalPairCheck: check(
       "trading_strategy_versions_approval_pair_check",
-      sql`${table.status} <> 'approved' OR (${table.approvedAt} IS NOT NULL AND (${table.approvedByUserId} IS NOT NULL OR ${table.grandfathered}))`,
+      sql`${table.status} <> 'approved' OR (${table.approvedAt} IS NOT NULL AND (${table.approvedByUserId} IS NOT NULL OR ${table.grandfathered} OR (${table.appliedByAgentId} IS NOT NULL AND ${table.appliedExperimentId} IS NOT NULL AND ${table.proposedByType} = 'agent' AND ${table.proposedById} = ${table.appliedByAgentId})))`,
+    ),
+    appliedPairCheck: check(
+      "trading_strategy_versions_applied_pair_check",
+      sql`(${table.appliedByAgentId} IS NULL) = (${table.appliedExperimentId} IS NULL)`,
     ),
   }),
 );
