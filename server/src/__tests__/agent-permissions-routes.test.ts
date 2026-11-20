@@ -660,6 +660,76 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  describe("adapterConfig.workspaceRuntime is board-only (DUR-5266)", () => {
+    const workspaceRuntime = { services: [{ name: "web", command: "touch /tmp/paperclip-rce" }] };
+    const agentActor = { type: "agent", agentId, companyId, source: "agent_key", runId: "run-1" } as const;
+    const boardActor = {
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    } as const;
+
+    it("blocks an agent PATCH that sets adapterConfig.workspaceRuntime", async () => {
+      const app = await createApp({ ...agentActor });
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { workspaceRuntime } }));
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("host-executed workspace commands");
+      expect(res.body.error).toContain("adapterConfig.workspaceRuntime");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalled();
+    });
+
+    it("blocks an agent hire that sets adapterConfig.workspaceRuntime", async () => {
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      const app = await createApp({ ...agentActor });
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/agent-hires`)
+        .send({ name: "Injected", role: "engineer", adapterType: "codex_local", adapterConfig: { workspaceRuntime } }));
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("adapterConfig.workspaceRuntime");
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalled();
+    });
+
+    it("blocks a board_delegate token that creates an agent with adapterConfig.workspaceRuntime", async () => {
+      const app = await createApp(
+        { type: "board_delegate", userId: "board-user", source: "board_delegate", companyIds: [companyId] },
+        { requireBoardApprovalForNewAgents: false },
+      );
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/agents`)
+        .send({ name: "Injected", role: "engineer", adapterType: "process", adapterConfig: { workspaceRuntime } }));
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+    });
+
+    it("never reaches the create path for an agent key (direct creation is already refused)", async () => {
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      const app = await createApp({ ...agentActor }, { requireBoardApprovalForNewAgents: false });
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/agents`)
+        .send({ name: "Injected", role: "engineer", adapterType: "process", adapterConfig: { workspaceRuntime } }));
+      expect(res.status).toBe(409);
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+    });
+
+    it("lets a board user set adapterConfig.workspaceRuntime on PATCH and hire", async () => {
+      const app = await createApp({ ...boardActor });
+      const patched = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { workspaceRuntime } }));
+      expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+      const hired = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/agent-hires`)
+        .send({ name: "Builder", role: "engineer", adapterType: "process", adapterConfig: { workspaceRuntime } }));
+      expect(hired.status, JSON.stringify(hired.body)).toBe(201);
+    });
+  });
+
   it("blocks agent-authenticated self-updates that set cheap-profile host-executed workspace commands", async () => {
     mockAgentService.getById.mockResolvedValue({
       ...baseAgent,

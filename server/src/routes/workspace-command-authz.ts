@@ -84,10 +84,16 @@ export function collectAgentAdapterWorkspaceCommandPaths(
   prefix = "adapterConfig",
 ): string[] {
   if (!isRecord(adapterConfig)) return [];
-  return collectWorkspaceStrategyCommandPaths(
+  const paths = collectWorkspaceStrategyCommandPaths(
     adapterConfig.workspaceStrategy,
     `${prefix}.workspaceStrategy`,
   );
+  // DUR-5266: workspaceRuntime.services[].command in an agent's adapter config runs on the
+  // host just like the strategy commands, so it is board-only too. Naming the key at all is refused.
+  if (hasOwn(adapterConfig, "workspaceRuntime")) {
+    paths.push(prefixPath(prefix, "workspaceRuntime"));
+  }
+  return paths;
 }
 
 export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): string[] {

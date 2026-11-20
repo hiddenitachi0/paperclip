@@ -792,7 +792,12 @@ describe("issue workspace command authorization", () => {
       it("refuses an agent create whose parent's stored type would be copied into the project", async () => {
         const parentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         mockIssueService.getById.mockResolvedValue(
-          makeIssue({ id: parentId, projectId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } }),
+          makeIssue({
+            id: parentId,
+            projectId: null,
+            executionWorkspaceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } },
+          }),
         );
         const app = await createApp(agentActor);
         const res = await request(app)
@@ -800,6 +805,95 @@ describe("issue workspace command authorization", () => {
           .send({ title: "Child", parentId, projectId: PROJECT_ID });
         expect(res.status).toBe(403);
         expect(mockIssueService.create).not.toHaveBeenCalled();
+      });
+
+      describe("child tasks and lookups (DUR-5266)", () => {
+        const parentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const protectedProject = (id: string) => ({
+          id,
+          executionWorkspacePolicy: { enabled: true, allowIssueOverride: false },
+        });
+        const parent = (overrides: Record<string, unknown> = {}) =>
+          makeIssue({
+            id: parentId,
+            projectId: PROJECT_ID,
+            executionWorkspaceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } },
+            ...overrides,
+          });
+
+        it("lets an agent create a child in the parent's project when the parent carries a git_worktree type", async () => {
+          mockProjectService.getById.mockImplementation(async (id: string) => protectedProject(id));
+          mockIssueService.getById.mockResolvedValue(parent());
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post(`/api/companies/${COMPANY_ID}/issues`)
+            .send({ title: "Child", parentId });
+          expect(res.status).toBe(201);
+          const explicitSameProject = await request(app)
+            .post(`/api/companies/${COMPANY_ID}/issues`)
+            .send({ title: "Child", parentId, projectId: PROJECT_ID });
+          expect(explicitSameProject.status).toBe(201);
+        });
+
+        it("does not copy settings when the parent has no execution workspace, so a non-worktree type is not checked", async () => {
+          mockProjectService.getById.mockImplementation(async (id: string) => protectedProject(id));
+          mockIssueService.getById.mockResolvedValue(
+            parent({ projectId: null, executionWorkspaceId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } }),
+          );
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post(`/api/companies/${COMPANY_ID}/issues`)
+            .send({ title: "Child", parentId, projectId: PROJECT_ID });
+          expect(res.status).toBe(201);
+        });
+
+        it("still refuses a child that lands in a different protected project with settings copied from the parent", async () => {
+          mockProjectService.getById.mockImplementation(async (id: string) => protectedProject(id));
+          mockIssueService.getById.mockResolvedValue(parent({ projectId: "99999999-9999-4999-8999-999999999999" }));
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post(`/api/companies/${COMPANY_ID}/issues`)
+            .send({ title: "Child", parentId, projectId: PROJECT_ID });
+          expect(res.status).toBe(403);
+          expect(mockIssueService.create).not.toHaveBeenCalled();
+        });
+
+        it("skips every workspace lookup on an agent PATCH that names no project, workspace or settings", async () => {
+          const issue = makeIssue({
+            projectId: PROJECT_ID,
+            projectWorkspaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            executionWorkspaceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } },
+          });
+          mockIssueService.getById.mockResolvedValue(issue);
+          mockIssueService.getByIdentifier.mockResolvedValue(issue);
+          // A board PATCH never runs the override check, so its lookup counts are the baseline
+          // the rest of the route needs; an agent PATCH that moves nothing must add none.
+          const lookups = () => ({
+            executionWorkspaces: mockExecutionWorkspaceService.getById.mock.calls.length,
+            projects: mockProjectService.getById.mock.calls.length,
+            selects: mockDbSelectFrom.mock.calls.length,
+          });
+          const boardApp = await createApp(boardActor);
+          const beforeBoard = lookups();
+          const boardRes = await request(boardApp).patch("/api/issues/issue-1").send({ title: "Renamed" });
+          expect(boardRes.status).not.toBe(403);
+          const boardCost = {
+            executionWorkspaces: lookups().executionWorkspaces - beforeBoard.executionWorkspaces,
+            projects: lookups().projects - beforeBoard.projects,
+            selects: lookups().selects - beforeBoard.selects,
+          };
+          const app = await createApp(agentActor);
+          const beforeAgent = lookups();
+          const res = await request(app).patch("/api/issues/issue-1").send({ title: "Renamed" });
+          expect(res.status).not.toBe(403);
+          expect({
+            executionWorkspaces: lookups().executionWorkspaces - beforeAgent.executionWorkspaces,
+            projects: lookups().projects - beforeAgent.projects,
+            selects: lookups().selects - beforeAgent.selects,
+          }).toEqual(boardCost);
+        });
       });
     });
   });
