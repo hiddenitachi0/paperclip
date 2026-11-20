@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   collectProjectExecutionWorkspaceCommandPaths,
-  collectProjectExecutionWorkspacePolicyDropPaths,
+  carryForwardProtectedProjectPolicyFields,
 } from "../routes/workspace-command-authz.js";
 
 // DUR-5228: agent keys must not set host-run service commands or the operator's
@@ -43,63 +43,118 @@ describe("collectProjectExecutionWorkspaceCommandPaths", () => {
   });
 });
 
-// DUR-5231: leaving a protected field out of a replacing write drops it.
-describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
+// DUR-5231: for agent writes the stored protected fields are carried forward; only a
+// different value is a change.
+describe("carryForwardProtectedProjectPolicyFields", () => {
   const stored = {
     enabled: true,
+    defaultMode: "isolated_workspace",
     requireIsolation: true,
     workspaceRuntime: { services: [{ name: "x", command: "id" }] },
     workspaceStrategy: { type: "git_worktree", provisionCommand: "p", teardownCommand: "t" },
   };
-  const all = [
-    "executionWorkspacePolicy.workspaceRuntime",
-    "executionWorkspacePolicy.workspaceStrategy.provisionCommand",
-    "executionWorkspacePolicy.workspaceStrategy.teardownCommand",
-  ];
+  const protectedOnly = {
+    requireIsolation: true,
+    workspaceRuntime: stored.workspaceRuntime,
+    workspaceStrategy: stored.workspaceStrategy,
+  };
 
-  it("treats { enabled: false } as dropping every protected field", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual(all);
+  it("keeps every stored protected field when the agent leaves them out", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: true, defaultMode: "shared_workspace" }, stored)).toEqual({
+      policy: { enabled: true, defaultMode: "shared_workspace", ...protectedOnly },
+      changedPaths: [],
+    });
   });
 
-  it("treats null as dropping every protected field", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual(all);
+  it("keeps them for { enabled: false } and for null (nothing else survives null)", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: false }, stored)).toEqual({
+      policy: { enabled: false, ...protectedOnly },
+      changedPaths: [],
+    });
+    expect(carryForwardProtectedProjectPolicyFields(null, stored)).toEqual({
+      policy: { enabled: false, ...protectedOnly },
+      changedPaths: [],
+    });
   });
 
-  it("flags only the field that changed", () => {
+  it("accepts the stored values sent back unchanged", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ ...stored, defaultMode: "shared_workspace" }, stored)).toEqual({
+      policy: { ...stored, defaultMode: "shared_workspace" },
+      changedPaths: [],
+    });
+  });
+
+  it("adds back only the strategy command the agent left out", () => {
+    const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
+      { enabled: true, workspaceStrategy: { type: "git_worktree", baseRef: "main", provisionCommand: "p" } },
+      stored,
+    );
+    expect(changedPaths).toEqual([]);
+    expect((policy as any).workspaceStrategy).toEqual({
+      type: "git_worktree",
+      baseRef: "main",
+      provisionCommand: "p",
+      teardownCommand: "t",
+    });
+  });
+
+  it("lists each protected field the agent sets to a different value", () => {
     expect(
-      collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, workspaceRuntime: { services: [] } }, stored),
-    ).toEqual(["executionWorkspacePolicy.workspaceRuntime"]);
+      carryForwardProtectedProjectPolicyFields(
+        {
+          enabled: true,
+          requireIsolation: false,
+          workspaceRuntime: { services: [] },
+          workspaceStrategy: { provisionCommand: "other", teardownCommand: null },
+        },
+        stored,
+      ).changedPaths,
+    ).toEqual([
+      "executionWorkspacePolicy.requireIsolation",
+      "executionWorkspacePolicy.workspaceRuntime",
+      "executionWorkspacePolicy.workspaceStrategy.provisionCommand",
+      "executionWorkspacePolicy.workspaceStrategy.teardownCommand",
+    ]);
   });
 
-  it("allows a write that keeps the protected fields, and a project with none stored", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, enabled: false }, stored)).toEqual([]);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, { enabled: true })).toEqual([]);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, null)).toEqual([]);
+  it("refuses an agent setting a protected field the project does not have yet", () => {
+    expect(
+      carryForwardProtectedProjectPolicyFields({ enabled: true, requireIsolation: true, workspaceRuntime: { services: [] } }, { enabled: true })
+        .changedPaths,
+    ).toEqual(["executionWorkspacePolicy.requireIsolation", "executionWorkspacePolicy.workspaceRuntime"]);
+  });
+
+  it("leaves the policy alone when nothing protected is stored", () => {
+    expect(carryForwardProtectedProjectPolicyFields(null, { enabled: true })).toEqual({ policy: null, changedPaths: [] });
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: false }, null)).toEqual({
+      policy: { enabled: false },
+      changedPaths: [],
+    });
   });
 });
 
-// DUR-5242: a stored authorizationPolicy cannot be dropped or rewritten by omission.
-describe("authorizationPolicy drop paths", () => {
-  const stored = { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: true } } };
+// DUR-5242: a stored authorizationPolicy is carried forward for agents; only a different value is refused.
+describe("authorizationPolicy carry-forward", () => {
+  const policy = { protectedAgent: { requiresApproval: true } };
+  const stored = { enabled: true, authorizationPolicy: policy };
   const path = ["executionWorkspacePolicy.authorizationPolicy"];
 
-  it("flags omitted, null, and {enabled:false} writes", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: true }, stored)).toEqual(path);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual(path);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual(path);
+  it("keeps it when omitted, null, or {enabled:false}", () => {
+    for (const sent of [{ enabled: true }, null, { enabled: false }]) {
+      const { policy: written, changedPaths } = carryForwardProtectedProjectPolicyFields(sent, stored);
+      expect(changedPaths).toEqual([]);
+      expect((written as any).authorizationPolicy).toEqual(policy);
+    }
   });
 
-  it("flags a substituted policy", () => {
-    expect(
-      collectProjectExecutionWorkspacePolicyDropPaths(
-        { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: false } } },
-        stored,
-      ),
-    ).toEqual(path);
+  it("accepts the stored value sent back unchanged", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ ...stored }, stored).changedPaths).toEqual([]);
   });
 
-  it("allows a write that keeps it, and a project with none stored", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored }, stored)).toEqual([]);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: true }, { enabled: true })).toEqual([]);
+  it("flags a rewritten, emptied or nulled policy, and one set where none is stored", () => {
+    for (const sent of [{ protectedAgent: { requiresApproval: false } }, {}, null]) {
+      expect(carryForwardProtectedProjectPolicyFields({ enabled: true, authorizationPolicy: sent }, stored).changedPaths).toEqual(path);
+    }
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: true, authorizationPolicy: policy }, { enabled: true }).changedPaths).toEqual(path);
   });
 });
