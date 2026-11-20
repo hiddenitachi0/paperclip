@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, executionWorkspaces, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, executionWorkspaces, heartbeatRuns, issueComments, issues, projects } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -47,6 +47,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -169,7 +170,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     expect(found.map((c) => c.branchName)).toEqual(["run-aaaa1111"]);
     expect(found[0]!.flagIssueId).toBeNull();
     // Keeping it must not throw for lack of an issue to comment on.
-    await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBeUndefined();
+    await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBe(false);
   });
 
   it("puts an idle issue-less run-<id> folder in the prompt pass unless a run is live on it (DUR-5184)", async () => {
@@ -269,6 +270,104 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     }
     const found = await createDbWorktreeCleanupDeps(db).listCandidates(now, 7);
     expect(found.map((c) => c.branchName).sort()).toEqual(["git_worktree", "local_fs"]);
+  });
+
+  it("only offers a shared folder once every non-archived row for it qualifies, and never while a run is in it (DUR-5236)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "A", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const folder = (name: string) => `/paperclip/x/repo/.paperclip/worktrees/${name}`;
+    const addRow = async (cwd: string, branch: string, issueStatus: string | null, extra: Partial<typeof executionWorkspaces.$inferInsert> = {}) => {
+      const id = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: branch, status: "active", providerType: "git_worktree", cwd, branchName: branch,
+        lastUsedAt: new Date(now.getTime() - 5 * DAY), ...extra,
+      });
+      if (issueStatus) {
+        await db.insert(issues).values({
+          id: randomUUID(), companyId, title: branch, status: issueStatus, executionWorkspaceId: id,
+          completedAt: issueStatus === "done" ? new Date(now.getTime() - 20 * DAY) : null,
+        });
+      }
+      return id;
+    };
+    // Two rows, one folder, the second row's task still open: the folder must stay.
+    await addRow(folder("half"), "half", "done");
+    await addRow(folder("half"), "half", "in_progress");
+    // Two rows, one folder, both done: offered once, with the other row riding along.
+    const both1 = await addRow(folder("both"), "both", "done");
+    const both2 = await addRow(folder("both"), "both", "done");
+    // A row of another type (no linked task) on the same folder still blocks it.
+    await addRow(folder("other-type"), "other-type", "done");
+    await addRow(folder("other-type"), "other-type", null, { strategyType: "project_primary", providerType: "local_fs" });
+    // Rows that disagree about the branch are not touched.
+    await addRow(folder("branches"), "branch-one", "done");
+    await addRow(folder("branches"), "branch-two", "done");
+    // A run is working in the folder (queued or running), named by its path only.
+    for (const [name, status] of [["busy-running", "running"], ["busy-queued", "queued"]] as const) {
+      await addRow(folder(name), name, "done");
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(), companyId, agentId, status,
+        contextSnapshot: { paperclipWorkspace: { cwd: folder(name) } },
+      });
+    }
+    await addRow(folder("run-id-folder"), "run-aaaa0001", "done");
+    await addRow(folder("idle"), "idle", "done");
+
+    const deps = createDbWorktreeCleanupDeps(db);
+    const finished = await deps.listCandidates(now, 7);
+    expect(finished.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["both", "idle", "run-id-folder"]);
+    const merged = await deps.listMergedCandidates!(now);
+    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["both", "idle", "run-id-folder"]);
+
+    const bothCandidate = finished.find((c) => c.cwd.endsWith("/both"))!;
+    expect([bothCandidate.executionWorkspaceId, ...bothCandidate.siblingWorkspaces!.map((w) => w.id)].sort()).toEqual([both1, both2].sort());
+
+    // The in-use check runs again right before removal and sees a run that started after listing.
+    const idle = finished.find((c) => c.cwd.endsWith("/idle"))!;
+    expect(await deps.isInUse!(idle)).toBe(false);
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(), companyId, agentId, status: "running",
+      contextSnapshot: { paperclipWorkspace: { worktreePath: idle.cwd } },
+    });
+    expect(await deps.isInUse!(idle)).toBe(true);
+
+    // Archiving the folder archives every row for it, and counts toward the daily cap.
+    expect(await deps.removedSince!(new Date(now.getTime() - DAY))).toBe(0);
+    await deps.markCleaned(bothCandidate, bothCandidate.cwd, "finished_task");
+    const rows = await db.select().from(executionWorkspaces);
+    expect(rows.filter((r) => r.cwd?.endsWith("/both")).map((r) => r.status)).toEqual(["archived", "archived"]);
+    expect(await deps.removedSince!(new Date(Date.now() - DAY))).toBe(2);
+  });
+
+  it("posts one unsaved-work comment per task and reports whether it posted (DUR-5236)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    const wsId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(executionWorkspaces).values({
+      id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+      name: "f", status: "active", providerType: "git_worktree",
+      cwd: "/paperclip/x/repo/.paperclip/worktrees/f", branchName: "f",
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "f", status: "done", executionWorkspaceId: wsId, completedAt: new Date(now.getTime() - 10 * DAY),
+    });
+    const deps = createDbWorktreeCleanupDeps(db);
+    const [candidate] = await deps.listCandidates(now, 7);
+    expect(await deps.flagUnsavedWork(candidate!, "dirty")).toBe(true);
+    expect(await deps.flagUnsavedWork(candidate!, "dirty")).toBe(false);
   });
 
   it("removes a merged, idle git_worktree workspace and keeps an unmerged one, end to end (DUR-5236)", async () => {
