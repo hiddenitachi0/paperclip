@@ -111,6 +111,11 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
   if (hasOwn(policy, "authorizationPolicy")) {
     paths.push("executionWorkspacePolicy.authorizationPolicy");
   }
+  // DUR-5258: the trust resolver also reads a top-level trustPreset/reviewPreset from the
+  // project policy, so they are board-only for the same reason.
+  for (const key of ["trustPreset", "reviewPreset"] as const) {
+    if (hasOwn(policy, key)) paths.push(`executionWorkspacePolicy.${key}`);
+  }
   return paths;
 }
 
@@ -123,8 +128,9 @@ function isNonEmptyCommand(value: unknown) {
  * leaves a board-set protected field out (or sends `null`, or `{ enabled: false }`) would wipe
  * it without ever naming it. For agent writes the stored protected fields are carried forward
  * into the new policy instead, and the write is refused only when the agent sends a *different*
- * value. Protected fields: requireIsolation, workspaceRuntime, authorizationPolicy and the
- * strategy provision/teardown commands. Everything else in the policy stays editable.
+ * value. Protected fields: requireIsolation, workspaceRuntime, authorizationPolicy, a top-level
+ * trustPreset/reviewPreset and the strategy provision/teardown commands (plus the strategy type
+ * while a command is stored). Everything else in the policy stays editable.
  *
  * `changedPaths` lists protected fields the agent set to a value other than the stored one.
  * `policy` is what should be written: the agent's policy plus the carried-forward fields.
@@ -152,7 +158,9 @@ export function carryForwardProtectedProjectPolicyFields(
 
   // Whole-value fields. authorizationPolicy (DUR-5242) decides whether assignments into the
   // project need approval, so it is board-only like the host-run workspaceRuntime.
-  for (const key of ["workspaceRuntime", "authorizationPolicy"] as const) {
+  // DUR-5258: a top-level trustPreset/reviewPreset is read by the trust resolver too, so it is
+  // carried forward the same way (omitted -> kept, different value -> refused).
+  for (const key of ["workspaceRuntime", "authorizationPolicy", "trustPreset", "reviewPreset"] as const) {
     const storedValue = stored[key] ?? null;
     if (named(key)) {
       if (!sameValue(next![key], storedValue)) changedPaths.push(`executionWorkspacePolicy.${key}`);
@@ -174,10 +182,28 @@ export function carryForwardProtectedProjectPolicyFields(
       carriedCommands[key] = storedCommand;
     }
   }
-  if (Object.keys(carriedCommands).length > 0) {
+  // DUR-5258: the stored commands only run for a typed strategy, so while the board has a
+  // command stored the strategy `type` is protected too: left out -> kept, different -> refused.
+  let carriedType: unknown;
+  if (
+    storedStrategy
+    && storedStrategy.type !== undefined
+    && (isNonEmptyCommand(storedStrategy.provisionCommand) || isNonEmptyCommand(storedStrategy.teardownCommand))
+  ) {
+    if (nextStrategy && nextStrategy.type !== undefined) {
+      if (!sameValue(nextStrategy.type, storedStrategy.type)) {
+        changedPaths.push("executionWorkspacePolicy.workspaceStrategy.type");
+      }
+    } else {
+      carriedType = storedStrategy.type;
+    }
+  }
+  if (Object.keys(carriedCommands).length > 0 || carriedType !== undefined) {
     // Strategy left out or not an object: keep the stored one whole. Otherwise keep the
-    // agent's strategy and add back only the commands it left out.
-    carried.workspaceStrategy = nextStrategy ? { ...nextStrategy, ...carriedCommands } : storedStrategy;
+    // agent's strategy and add back only the commands/type it left out.
+    carried.workspaceStrategy = nextStrategy
+      ? { ...nextStrategy, ...carriedCommands, ...(carriedType !== undefined ? { type: carriedType } : {}) }
+      : storedStrategy;
   }
 
   // DUR-5246: `enabled: false` or `defaultMode: "adapter_default"` leaves the stored fields in

@@ -53,7 +53,7 @@ import {
 } from "../services/deploy-policy-validation.js";
 import { checkGitHubTokenForRepo, GitHubTokenCheckError } from "../services/github-token-check.js";
 import { GITHUB_TOKEN_SECRET_NAMES } from "@paperclipai/shared";
-import { agents, projectWorkspaces } from "@paperclipai/db";
+import { agents, projectWorkspaces, projects } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { HttpError, unprocessable } from "../errors.js";
 
@@ -383,9 +383,20 @@ export function projectRoutes(rawDb: Db) {
     // A PATCH replaces the whole policy. For agent writes, keep the board-set protected fields
     // the agent left out, and refuse only when it sends a different value for one of them.
     if (isBoardOnlyBlockedActor(req) && Object.prototype.hasOwnProperty.call(body, "executionWorkspacePolicy")) {
+      // DUR-5258: the parsed policy drops a top-level trustPreset/reviewPreset, but the trust
+      // resolver reads them from the stored row, so read those two from the raw column.
+      const rawStored = await db
+        .select({ policy: projects.executionWorkspacePolicy })
+        .from(projects)
+        .where(eq(projects.id, id))
+        .then((rows) => rows[0]?.policy ?? null);
+      const storedPresets: Record<string, unknown> = {};
+      for (const key of ["trustPreset", "reviewPreset"] as const) {
+        if (rawStored && rawStored[key] !== undefined && rawStored[key] !== null) storedPresets[key] = rawStored[key];
+      }
       const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
         body.executionWorkspacePolicy,
-        existing.executionWorkspacePolicy,
+        { ...(existing.executionWorkspacePolicy ?? {}), ...storedPresets },
       );
       assertNoAgentProtectedProjectSettingChange(req, changedPaths);
       body.executionWorkspacePolicy = policy;
