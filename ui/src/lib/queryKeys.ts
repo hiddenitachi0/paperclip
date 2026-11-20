@@ -364,6 +364,10 @@ export const queryKeys = {
     backtest: (companyId: string, strategyId: string, runId: string) => ["trading-backtest", companyId, strategyId, runId] as const,
     marketWeather: (companyId: string) => ["trading-market-weather", companyId] as const,
     marketWeatherHistory: (companyId: string, asset: string) => ["trading-market-weather", companyId, asset] as const,
+    templates: (companyId: string) => ["trading-templates", companyId] as const,
+    shadowCells: (companyId: string) => ["trading-shadow-cells", companyId] as const,
+    selectorDecisions: (companyId: string) => ["trading-selector-decisions", companyId] as const,
+    selectorDecision: (companyId: string, decisionId: string) => ["trading-selector-decision", companyId, decisionId] as const,
   },
   // Crypto wallets for agents.
   cryptoWallets: {

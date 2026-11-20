@@ -75,6 +75,8 @@ export interface Config {
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
+  /** DUR-5176: true when a separate backup service owns the dumps (PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY). */
+  databaseBackupManagedExternally: boolean;
   databaseBackupIntervalMinutes: number;
   databaseBackupRetentionDays: number;
   databaseBackupDir: string;
@@ -375,10 +377,15 @@ export function loadConfig(): Config {
     companyDeletionEnvRaw !== undefined
       ? companyDeletionEnvRaw === "true"
       : deploymentMode === "local_trusted";
+  // DUR-5176: when a separate backup service (docker/docker-compose.backup.yml)
+  // owns the dumps, the server neither schedules nor runs backups and never
+  // touches the local backup folder. Opt-in; unset keeps today's behaviour.
+  const databaseBackupManagedExternally = process.env.PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY === "true";
   const databaseBackupEnabled =
-    process.env.PAPERCLIP_DB_BACKUP_ENABLED !== undefined
+    !databaseBackupManagedExternally &&
+    (process.env.PAPERCLIP_DB_BACKUP_ENABLED !== undefined
       ? process.env.PAPERCLIP_DB_BACKUP_ENABLED === "true"
-      : (fileDatabaseBackup?.enabled ?? true);
+      : (fileDatabaseBackup?.enabled ?? true));
   const databaseBackupIntervalMinutes = Math.max(
     1,
     Number(process.env.PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES) ||
@@ -450,6 +457,7 @@ export function loadConfig(): Config {
     ),
     embeddedPostgresPort: fileConfig?.database.embeddedPostgresPort ?? 54329,
     databaseBackupEnabled,
+    databaseBackupManagedExternally,
     databaseBackupIntervalMinutes,
     databaseBackupRetentionDays,
     databaseBackupDir,

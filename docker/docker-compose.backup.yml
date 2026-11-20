@@ -1,0 +1,82 @@
+# DUR-5176 (plan: DUR-5063 option A): hourly database dumps made by a separate
+# `backup` container, written to a host folder the server and the agents cannot
+# see.
+#
+# Why: agents run as the same Linux user as the server, so every dump the
+# server itself wrote into /paperclip/instances/default/data/backups was
+# readable (and deletable) by any agent. No file permission can fix that while
+# the server is the one writing. This overlay moves the job out:
+#
+#   docker compose --env-file .env -f docker/docker-compose.yml \
+#     -f docker/docker-compose.prod.yml -f docker/docker-compose.secrets.yml \
+#     -f docker/docker-compose.backup.yml up -d
+#
+#  - `backup` runs the same postgres:17-alpine image as `db`, with NO
+#    /paperclip mount and no mount shared with `server`. Its only writable
+#    place is the host folder below, mounted nowhere else.
+#  - The folder (default /root/paperclip-backups, root-owned, mode 0700) holds
+#    the same paperclip-YYYYMMDD-HHMMSS.sql.gz files as before, with the same
+#    48h / daily / weekly / monthly retention (scripts/backup-sidecar.sh).
+#  - The database login comes from a root-only file (default
+#    /root/paperclip-secrets/backup.env, mode 0400), mounted as the Docker
+#    secret /run/secrets/paperclip_backup, the same pattern as
+#    docker-compose.secrets.yml. It is never in this file, the image or logs.
+#    The file holds two lines:
+#      PGUSER=paperclip_backup
+#      PGPASSWORD=<password>
+#    See docs/deploy/backup-sidecar.md for the role to create.
+#  - The container runs as root *inside its own container* (so it can write the
+#    root-owned 0700 folder and read the root-only secret) with every Linux
+#    capability dropped, no new privileges and a read-only root filesystem. That
+#    is not the agents' uid and nothing is shared with them.
+#  - The server is told the job is not its own (PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY):
+#    it stops the scheduled backup, and "run backup now" / backup storage stats
+#    answer "managed by the backup service" instead of touching its local folder.
+#
+# Without this overlay nothing changes: the server keeps making its own dumps.
+services:
+  server:
+    environment:
+      PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY: "true"
+
+  backup:
+    image: postgres:17-alpine
+    init: true
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup-sidecar.sh"]
+    command: ["run"]
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: paperclip
+      BACKUP_INTERVAL_MINUTES: "${PAPERCLIP_BACKUP_INTERVAL_MINUTES:-60}"
+      BACKUP_DAILY_DAYS: "${PAPERCLIP_BACKUP_DAILY_DAYS:-7}"
+      BACKUP_WEEKLY_WEEKS: "${PAPERCLIP_BACKUP_WEEKLY_WEEKS:-4}"
+      BACKUP_MONTHLY_MONTHS: "${PAPERCLIP_BACKUP_MONTHLY_MONTHS:-1}"
+    secrets:
+      - paperclip_backup
+    volumes:
+      # The host folder: root-owned, 0700, mounted into this container only.
+      - ${PAPERCLIP_BACKUP_DIR:-/root/paperclip-backups}:/backups
+      - ../scripts/backup-sidecar.sh:/usr/local/bin/backup-sidecar.sh:ro
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/usr/local/bin/backup-sidecar.sh", "healthcheck"]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 1h
+    depends_on:
+      db:
+        condition: service_healthy
+
+secrets:
+  paperclip_backup:
+    file: ${PAPERCLIP_BACKUP_SECRETS_FILE:-/root/paperclip-secrets/backup.env}

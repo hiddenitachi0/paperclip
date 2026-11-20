@@ -621,6 +621,10 @@ Environment overrides:
 - `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES=<minutes>`
 - `PAPERCLIP_DB_BACKUP_RETENTION_DAYS=<days>`
 - `PAPERCLIP_DB_BACKUP_DIR=/absolute/or/~/path`
+- `PAPERCLIP_DB_BACKUP_MANAGED_EXTERNALLY=true` — a separate backup container
+  (`docker/docker-compose.backup.yml`) makes the dumps instead; the server
+  schedules and runs none, and the manual-backup and backup-stats routes answer
+  409 "managed by the backup service". See `docs/deploy/backup-sidecar.md`.
 
 DB backups are not full instance filesystem backups. For full local disaster
 recovery, also back up local storage files and the local encrypted secrets key if
