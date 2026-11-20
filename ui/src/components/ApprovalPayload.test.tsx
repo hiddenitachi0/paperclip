@@ -21,6 +21,7 @@ import {
   approvalDeployTargetCommitText,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
+  approvalChecksOverrideNote,
   approvalIsRollbackDeploy,
   approvalLabel,
   approvalTargetBadge,
@@ -210,6 +211,31 @@ describe("approvalDeployChangeSummaryText (pointless-deploy-card guard)", () => 
   });
 });
 
+describe("approvalChecksOverrideNote (DUR-5183)", () => {
+  it("says in one plain line that a card was filed before checks finished or despite failed checks", () => {
+    expect(
+      approvalChecksOverrideNote({
+        kind: "deploy",
+        checksOverride: { state: "pending", failedChecks: [], pendingChecks: ["build", "unit tests"] },
+      }),
+    ).toBe("Filed before this version's checks finished (still running: build, unit tests)");
+    expect(
+      approvalChecksOverrideNote({
+        kind: "deploy",
+        checksOverride: { state: "failed", failedChecks: ["unit tests"], pendingChecks: [] },
+      }),
+    ).toBe("Filed although this version failed its checks: unit tests");
+  });
+
+  it("is null for an ordinary card, a non-deploy card or a malformed stamp", () => {
+    expect(approvalChecksOverrideNote({ kind: "deploy", commit: "abc1234" })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "merge_pr", checksOverride: { state: "failed", failedChecks: ["x"] } })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "deploy", checksOverride: "yes" })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "deploy", checksOverride: { state: "green" } })).toBeNull();
+    expect(approvalChecksOverrideNote(null)).toBeNull();
+  });
+});
+
 describe("approvalIsRollbackDeploy (DUR-3952)", () => {
   it("is true only for a deploy filed with allowBackwardDeploy", () => {
     expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234", allowBackwardDeploy: true })).toBe(true);
@@ -297,6 +323,30 @@ describe("ApprovalPayloadRenderer", () => {
     expect(text).toContain("Will run exactly this on the server");
     expect(text).toContain("systemctl restart paperclip-telegram-bridge.service");
     expect(text.indexOf("systemctl restart")).toBeLessThan(text.indexOf("so the new code is used"));
+    act(() => root.unmount());
+  });
+
+  it("lists a strategy's new rules and written guidelines in words before it can be approved", () => {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "trading_strategy_version",
+            title: 'Trading strategy "Steady": new rules (version 7)',
+            readBack: ["Buys when the 20-day average rises above the 50-day average.", "Never puts more than 10% into one coin."],
+            guidelines: "Stay calm in sudden dips.",
+            pastDataTest: "not yet tested on past data",
+          }}
+        />,
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Buys when the 20-day average rises above the 50-day average.");
+    expect(text).toContain("Never puts more than 10% into one coin.");
+    expect(text).toContain("Stay calm in sudden dips.");
+    expect(text).toContain("These rules are not yet tested on past data.");
     act(() => root.unmount());
   });
 

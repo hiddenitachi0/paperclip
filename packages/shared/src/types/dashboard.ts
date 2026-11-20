@@ -13,6 +13,12 @@ export interface DashboardPulseApproval {
   title: string | null;
   requestedByAgentName: string | null;
   createdAt: string;
+  /**
+   * True when this card can only be approved from its own page, where the full
+   * change is shown first (deploys, wallet payments, a strategy's new rules).
+   * The status panel must show "Open" for it, never a one-tap Approve.
+   */
+  cardOnly: boolean;
   /** Deploy cards only: the card's revision number as of this list, sent back on approve. */
   cardRevision?: number;
 }

@@ -144,6 +144,10 @@ describeEmbeddedPostgres("dashboardService.pulse", () => {
     expect(pulse.needsYou).toHaveLength(4);
     const deployItem = pulse.needsYou.find((item) => item.title === "ship the pulse endpoint");
     expect(deployItem).toMatchObject({ type: "deploy", requestedByAgentName: "Backend Engineer" });
+    // Deploys must be opened and read in full; a plain merge request can be answered from the list.
+    expect(deployItem?.cardOnly).toBe(true);
+    expect(pulse.needsYou.find((item) => item.type === "merge_pr")?.cardOnly).toBe(false);
+    expect(pulse.needsYou.find((item) => item.type === "hire_agent")?.cardOnly).toBe(false);
   });
 
   it("reports active executions from issues with a live executionRunId, and recent completions within the 12h window", async () => {

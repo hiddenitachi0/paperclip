@@ -2777,7 +2777,9 @@ registry.registerPath({
     params: z.object({ companyId: z.string() }),
     body: jsonBody(createApprovalSchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  // 422 also covers a deploy card whose version's checks are still running or failed
+  // (code deploy_ci_pending / deploy_ci_failed); the board may file anyway with allowUnfinishedChecks.
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -3134,6 +3136,18 @@ registry.registerPath({
   summary: "The current and previously live versions of a project, per the deploy runner's log",
   request: { params: z.object({ companyId: z.string(), projectId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/projects/{projectId}/ci-status",
+  tags: ["deploy-runner"],
+  summary: "State of the checks (green, pending, failed, none, unknown) of one version of a project's deploy repository",
+  request: {
+    params: z.object({ companyId: z.string(), projectId: z.string() }),
+    query: z.object({ sha: z.string() }),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
 });
 
 // ─── Dashboard ───────────────────────────────────────────────────────────────

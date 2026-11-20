@@ -14,6 +14,7 @@ import {
   approvalLabel,
   approvalTechnicalReference,
   approvalDeployBranchInfo,
+  approvalChecksOverrideNote,
   approvalIsRollbackDeploy,
   approvalIsPersonaRequest,
   approvalUnsupportedDeployKindWarning,
@@ -315,6 +316,11 @@ export function ApprovalDetail() {
               {approvalIsRollbackDeploy(payload) && (
                 <p className="mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
                   Rollback — approving moves production back to an older version and drops whatever shipped after it
+                </p>
+              )}
+              {approvalChecksOverrideNote(payload) && (
+                <p className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                  {approvalChecksOverrideNote(payload)}
                 </p>
               )}
             </div>
