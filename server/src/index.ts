@@ -132,7 +132,7 @@ import { twoFactorGate } from "./auth/two-factor-gate.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
-import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
+import { startWorktreeCleanup, worktreeCleanupDryRunFromEnv } from "./services/worktree-cleanup.js";
 import { bragOnDoneService } from "./services/brag-on-done.js";
 import { codeRenderService } from "./services/code-renders.js";
 import { contractDeadlineReminderService } from "./services/contract-deadline-reminders.js";
@@ -2503,12 +2503,39 @@ export async function startServer(): Promise<StartedServer> {
     );
   }
 
-  // DUR-4497: daily removal of finished-task agent worktrees (fail-closed;
-  // see worktree-cleanup.ts). On by default; PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false
-  // is the kill switch.
+  // DUR-4497: removal of finished-task agent worktrees (fail-closed; see
+  // worktree-cleanup.ts). On by default, but DUR-5236: it only PREVIEWS -- every sweep logs one
+  // line per folder it would remove and deletes nothing -- until an operator sets
+  // PAPERCLIP_WORKTREE_CLEANUP_LIVE=true after reading that preview.
+  // PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false is the kill switch;
+  // PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN=true forces preview even when LIVE is set.
+  // Caps while live: PAPERCLIP_WORKTREE_CLEANUP_MAX_REMOVALS per sweep (default 25) and
+  // PAPERCLIP_WORKTREE_CLEANUP_MAX_PER_DAY per rolling 24h (default 50).
   if (process.env.PAPERCLIP_WORKTREE_CLEANUP_ENABLED !== "false") {
-    logger.info("Finished-task worktree cleanup enabled");
-    startWorktreeCleanup(db);
+    const worktreeCleanupLive = !worktreeCleanupDryRunFromEnv(process.env);
+    const positiveInt = (name: string) => {
+      const n = Number.parseInt(process.env[name] ?? "", 10);
+      return Number.isInteger(n) && n > 0 ? n : undefined;
+    };
+    const maxRemovals = positiveInt("PAPERCLIP_WORKTREE_CLEANUP_MAX_REMOVALS");
+    const maxRemovalsPerDay = positiveInt("PAPERCLIP_WORKTREE_CLEANUP_MAX_PER_DAY");
+    logger.info(
+      { dryRun: !worktreeCleanupLive },
+      worktreeCleanupLive
+        ? "Finished-task worktree cleanup enabled (LIVE: removing folders)"
+        : "Finished-task worktree cleanup enabled in preview mode (removes nothing; set PAPERCLIP_WORKTREE_CLEANUP_LIVE=true to go live)",
+    );
+    startWorktreeCleanup(
+      db,
+      undefined,
+      undefined,
+      undefined,
+      {
+        dryRun: !worktreeCleanupLive,
+        ...(maxRemovals ? { maxRemovals } : {}),
+        ...(maxRemovalsPerDay ? { maxRemovalsPerDay } : {}),
+      },
+    );
   }
 
   // DUR-386: bound cross_company_access_log the same way. Bypass-scoped

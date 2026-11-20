@@ -43,9 +43,85 @@ describe("pipeline stage workspace settings authorization (DUR-5246)", () => {
     await expect(
       assertAgentStageConfigWorkspaceSettingsAllowed(
         agent,
-        { onEnter: { executionWorkspaceSettings: { mode: "isolated_workspace" } } },
+        { onEnter: { projectId: "p", executionWorkspaceSettings: { mode: "isolated_workspace" } } },
         null,
         noPolicy,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses an agent's settings when no project is named on the step (routine's own project applies at dispatch)", async () => {
+    const loader = vi.fn(async () => null);
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { onEnter: { type: "run_routine", routineId: "r", executionWorkspaceSettings: { mode: "agent_default" } } },
+        null,
+        loader,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    // A board user, and an agent resending the board's stored value, are fine.
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        board,
+        { onEnter: { routineId: "r", executionWorkspaceSettings: { mode: "agent_default" } } },
+        null,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
+    const stored = { onEnter: { routineId: "r", executionWorkspaceSettings: { mode: "agent_default" } } };
+    await expect(assertAgentStageConfigWorkspaceSettingsAllowed(agent, stored, stored, loader)).resolves.toBeUndefined();
+  });
+
+  it("does not treat a changed project or routine as a round-trip", async () => {
+    const protectedPolicy = {
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
+    };
+    const loader = vi.fn(async (id: string) => (id === "B" ? protectedPolicy : null));
+    const settings = { mode: "agent_default" };
+    const stored = { onEnter: { projectId: "A", routineId: "r", executionWorkspaceSettings: settings } };
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { onEnter: { projectId: "B", routineId: "r", executionWorkspaceSettings: settings } },
+        stored,
+        loader,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(loader).toHaveBeenCalledWith("B");
+    // Same project, new routine: re-checked against the project, which does not protect anything for A.
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { onEnter: { projectId: "A", routineId: "r2", executionWorkspaceSettings: settings } },
+        stored,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reads the old mode names the way the run does", async () => {
+    const loader = vi.fn(async () => ({
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
+    }));
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { onEnter: { projectId: "B", executionWorkspaceSettings: { mode: "project_primary" } } },
+        null,
+        loader,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { onEnter: { projectId: "B", executionWorkspaceSettings: { mode: "isolated" } } },
+        null,
+        loader,
       ),
     ).resolves.toBeUndefined();
   });
@@ -77,5 +153,41 @@ describe("pipeline stage workspace settings authorization (DUR-5246)", () => {
         loader,
       ),
     ).rejects.toMatchObject({ status: 403 });
+  });
+  it("refuses an agent's workspaceStrategy.type that skips the project's provision/teardown commands", async () => {
+    const loader = vi.fn(async () => ({
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
+    }));
+    for (const type of ["project_primary", "adapter_managed", "cloud_sandbox"]) {
+      for (const mode of [undefined, "inherit", "reuse_existing"]) {
+        await expect(
+          assertAgentStageConfigWorkspaceSettingsAllowed(
+            agent,
+            { automation: { projectId: "p", executionWorkspaceSettings: { ...(mode ? { mode } : {}), workspaceStrategy: { type } } } },
+            null,
+            loader,
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+      }
+    }
+    // git_worktree is what the project already uses, and a board user is not bound.
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } } } },
+        null,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        board,
+        { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } } },
+        null,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
   });
 });

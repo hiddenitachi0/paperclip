@@ -260,6 +260,19 @@ d("tradingEvaluatorService", () => {
       expect(await evaluator.resolveDue(now)).toBe(0);
     });
 
+    it("resolves and scores an AI call like any other probabilistic forecaster, as its own forecaster key (DUR-5020)", async () => {
+      const s = await seedStrategy({ prediction: { horizonBars: 1 } });
+      await seedOld([
+        oldRow(s, 0, { forecasterKind: "llm", forecasterKey: "llm:trader", probability: 0.8, probabilitySource: "llm", direction: "up", indicatorSnapshot: { source: "llm_trader", reason: "test" } }),
+      ]);
+      const start = Date.UTC(2026, 0, 1);
+      const bars: TradingCandle[] = [101, 102].map((c, i) => ({ openTime: new Date(start + i * TF_MS), open: 100, high: c + 1, low: c - 1, close: c, volume: 1 }));
+      const evaluator = tradingEvaluatorService(db, { marketData: fakeTradingMarketData({ candles: { BTC: { candles: bars } } }) });
+      expect(await evaluator.resolveDue(new Date(start + 10 * TF_MS))).toBe(1);
+      const [row] = await db.select().from(tradingPredictions).where(and(eq(tradingPredictions.strategyId, s.strategyId), eq(tradingPredictions.forecasterKey, "llm:trader")));
+      expect(row).toMatchObject({ forecasterKind: "llm", outcome: "hit", probability: 0.8 });
+    });
+
     it("leaves a call pending until its outcome bar exists, and never resolves a call whose time has not come", async () => {
       const s = await seedStrategy();
       await seedOld([oldRow(s, 0)]);

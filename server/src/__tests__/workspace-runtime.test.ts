@@ -2366,6 +2366,48 @@ describe("realizeExecutionWorkspace", () => {
     expect(actualHead).toBe(expectedHead);
   }, 15_000);
 
+  it("rebuilds a cleaned-up folder from the project branch when the task's branch is gone too (DUR-5237)", async () => {
+    const repoRoot = await createTempRepo();
+    const branchName = "PAP-460-cleaned-up-and-branch-deleted";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", branchName);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", branchName, worktreePath, "HEAD"]);
+    // What the automatic cleanup leaves behind: folder removed, branch deleted.
+    await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+    await runGit(repoRoot, ["branch", "-D", branchName]);
+    const baseHead = await readGit(repoRoot, ["rev-parse", "HEAD"]);
+
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-cleaned-up",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName,
+      },
+      issue: { id: "issue-460", identifier: "PAP-460", title: "Cleaned up" },
+      agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+    });
+
+    expect(restored?.cwd).toBe(worktreePath);
+    expect(restored?.created).toBe(true);
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe(branchName);
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD"])).resolves.toBe(baseHead);
+  }, 15_000);
+
   it("repairs a clean persisted git worktree branch mismatch when both branches point at the same commit", async () => {
     const repoRoot = await createTempRepo();
     const expectedBranch = "PAP-454-repair-clean-branch-mismatch";

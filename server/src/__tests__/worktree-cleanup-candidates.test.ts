@@ -1,16 +1,38 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, executionWorkspaces, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, executionWorkspaces, heartbeatRuns, issueComments, issues, projects } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { createDbWorktreeCleanupDeps } from "../services/worktree-cleanup.js";
+import {
+  createDbMergedWorktreeCleanupDeps,
+  createDbWorktreeCleanupDeps,
+  runWorktreeCleanup,
+} from "../services/worktree-cleanup.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 const DAY = 24 * 60 * 60 * 1000;
+
+function sh(cwd: string, ...args: string[]) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    },
+  });
+}
 
 // DUR-4497: only done/cancelled tasks older than N days may become candidates;
 // open tasks are never returned regardless of age.
@@ -24,6 +46,8 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -60,7 +84,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
       wsByKey.set(c.key, wsId);
       await db.insert(executionWorkspaces).values({
         id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-        name: c.key, status: "active", providerType: "local_fs", sourceIssueId: null,
+        name: c.key, status: "active", providerType: "git_worktree", sourceIssueId: null,
         cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.key}`, branchName: c.key,
       });
       const at = c.ageDays === null ? null : new Date(now.getTime() - c.ageDays * DAY);
@@ -74,7 +98,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     const sharedWs = randomUUID();
     await db.insert(executionWorkspaces).values({
       id: sharedWs, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-      name: "shared", status: "active", providerType: "local_fs",
+      name: "shared", status: "active", providerType: "git_worktree",
       cwd: "/paperclip/x/repo/.paperclip/worktrees/shared", branchName: "shared",
     });
     await db.insert(issues).values([
@@ -110,7 +134,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
       const wsId = randomUUID();
       await db.insert(executionWorkspaces).values({
         id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-        name: c.key, status: "active", providerType: "local_fs", sourceIssueId: null,
+        name: c.key, status: "active", providerType: "git_worktree", sourceIssueId: null,
         cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.key}`, branchName: c.key,
         lastUsedAt: new Date(now.getTime() - c.idleMinutes * 60_000),
       });
@@ -136,7 +160,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     for (const [branch, ageDays] of [["run-aaaa1111", 10], ["run-bbbb2222", 2], ["hand-made", 400]] as const) {
       await db.insert(executionWorkspaces).values({
         id: randomUUID(), companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-        name: branch, status: "active", providerType: "local_fs",
+        name: branch, status: "active", providerType: "git_worktree",
         cwd: `/paperclip/x/repo/.paperclip/worktrees/${branch}`, branchName: branch,
         lastUsedAt: new Date(now.getTime() - ageDays * DAY),
       });
@@ -146,7 +170,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     expect(found.map((c) => c.branchName)).toEqual(["run-aaaa1111"]);
     expect(found[0]!.flagIssueId).toBeNull();
     // Keeping it must not throw for lack of an issue to comment on.
-    await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBeUndefined();
+    await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBe(false);
   });
 
   it("puts an idle issue-less run-<id> folder in the prompt pass unless a run is live on it (DUR-5184)", async () => {
@@ -170,7 +194,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
       const wsId = randomUUID();
       await db.insert(executionWorkspaces).values({
         id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-        name: c.branch, status: "active", providerType: "local_fs",
+        name: c.branch, status: "active", providerType: "git_worktree",
         cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.branch}`, branchName: c.branch,
         lastUsedAt: new Date(now.getTime() - c.idleMinutes * 60_000),
       });
@@ -207,7 +231,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
       const runId = randomUUID();
       await db.insert(executionWorkspaces).values({
         id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
-        name: c.key, status: "active", providerType: "local_fs",
+        name: c.key, status: "active", providerType: "git_worktree",
         cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.key}`, branchName: c.key,
         lastUsedAt: new Date(now.getTime() - 120 * 60_000),
       });
@@ -226,4 +250,192 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     const merged = await deps.listMergedCandidates!(now);
     expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["no-run", "run-finished"]);
   });
+  it("selects worktrees by the providerType production writes (git_worktree) and still accepts legacy local_fs, never other types (DUR-5236)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    for (const providerType of ["git_worktree", "local_fs", "remote_sandbox"]) {
+      const wsId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: providerType, status: "active", providerType,
+        cwd: `/paperclip/x/repo/.paperclip/worktrees/${providerType}`, branchName: providerType,
+      });
+      await db.insert(issues).values({
+        id: randomUUID(), companyId, title: providerType, status: "done", executionWorkspaceId: wsId,
+        completedAt: new Date(now.getTime() - 10 * DAY),
+      });
+    }
+    const found = await createDbWorktreeCleanupDeps(db).listCandidates(now, 7);
+    expect(found.map((c) => c.branchName).sort()).toEqual(["git_worktree", "local_fs"]);
+  });
+
+  it("only offers a shared folder once every non-archived row for it qualifies, and never while a run is in it (DUR-5236)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "A", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const folder = (name: string) => `/paperclip/x/repo/.paperclip/worktrees/${name}`;
+    const addRow = async (cwd: string, branch: string, issueStatus: string | null, extra: Partial<typeof executionWorkspaces.$inferInsert> = {}) => {
+      const id = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: branch, status: "active", providerType: "git_worktree", cwd, branchName: branch,
+        lastUsedAt: new Date(now.getTime() - 5 * DAY), ...extra,
+      });
+      if (issueStatus) {
+        await db.insert(issues).values({
+          id: randomUUID(), companyId, title: branch, status: issueStatus, executionWorkspaceId: id,
+          completedAt: issueStatus === "done" ? new Date(now.getTime() - 20 * DAY) : null,
+        });
+      }
+      return id;
+    };
+    // Two rows, one folder, the second row's task still open: the folder must stay.
+    await addRow(folder("half"), "half", "done");
+    await addRow(folder("half"), "half", "in_progress");
+    // Two rows, one folder, both done: offered once, with the other row riding along.
+    const both1 = await addRow(folder("both"), "both", "done");
+    const both2 = await addRow(folder("both"), "both", "done");
+    // A row of another type (no linked task) on the same folder still blocks it.
+    await addRow(folder("other-type"), "other-type", "done");
+    await addRow(folder("other-type"), "other-type", null, { strategyType: "project_primary", providerType: "local_fs" });
+    // Rows that disagree about the branch are not touched.
+    await addRow(folder("branches"), "branch-one", "done");
+    await addRow(folder("branches"), "branch-two", "done");
+    // A run is working in the folder (queued or running), named by its path only.
+    for (const [name, status] of [["busy-running", "running"], ["busy-queued", "queued"]] as const) {
+      await addRow(folder(name), name, "done");
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(), companyId, agentId, status,
+        contextSnapshot: { paperclipWorkspace: { cwd: folder(name) } },
+      });
+    }
+    await addRow(folder("run-id-folder"), "run-aaaa0001", "done");
+    await addRow(folder("idle"), "idle", "done");
+
+    const deps = createDbWorktreeCleanupDeps(db);
+    const finished = await deps.listCandidates(now, 7);
+    expect(finished.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["both", "idle", "run-id-folder"]);
+    const merged = await deps.listMergedCandidates!(now);
+    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["both", "idle", "run-id-folder"]);
+
+    const bothCandidate = finished.find((c) => c.cwd.endsWith("/both"))!;
+    expect([bothCandidate.executionWorkspaceId, ...bothCandidate.siblingWorkspaces!.map((w) => w.id)].sort()).toEqual([both1, both2].sort());
+
+    // The in-use check runs again right before removal and sees a run that started after listing.
+    const idle = finished.find((c) => c.cwd.endsWith("/idle"))!;
+    expect(await deps.isInUse!(idle)).toBe(false);
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(), companyId, agentId, status: "running",
+      contextSnapshot: { paperclipWorkspace: { worktreePath: idle.cwd } },
+    });
+    expect(await deps.isInUse!(idle)).toBe(true);
+
+    // Archiving the folder archives every row for it, and counts toward the daily cap.
+    expect(await deps.removedSince!(new Date(now.getTime() - DAY))).toBe(0);
+    await deps.markCleaned(bothCandidate, bothCandidate.cwd, "finished_task");
+    const rows = await db.select().from(executionWorkspaces);
+    expect(rows.filter((r) => r.cwd?.endsWith("/both")).map((r) => r.status)).toEqual(["archived", "archived"]);
+    expect(await deps.removedSince!(new Date(Date.now() - DAY))).toBe(2);
+  });
+
+  it("posts one unsaved-work comment per task and reports whether it posted (DUR-5236)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    const wsId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(executionWorkspaces).values({
+      id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+      name: "f", status: "active", providerType: "git_worktree",
+      cwd: "/paperclip/x/repo/.paperclip/worktrees/f", branchName: "f",
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "f", status: "done", executionWorkspaceId: wsId, completedAt: new Date(now.getTime() - 10 * DAY),
+    });
+    const deps = createDbWorktreeCleanupDeps(db);
+    const [candidate] = await deps.listCandidates(now, 7);
+    expect(await deps.flagUnsavedWork(candidate!, "dirty")).toBe(true);
+    expect(await deps.flagUnsavedWork(candidate!, "dirty")).toBe(false);
+  });
+
+  it("removes a merged, idle git_worktree workspace and keeps an unmerged one, end to end (DUR-5236)", async () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "wt-cleanup-e2e-")));
+    try {
+      const origin = path.join(root, "origin.git");
+      const repo = path.join(root, "repo");
+      sh(root, "init", "-q", "--bare", "-b", "main", origin);
+      sh(root, "clone", "-q", origin, repo);
+      fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+      sh(repo, "add", ".");
+      sh(repo, "commit", "-q", "-m", "init");
+      sh(repo, "push", "-q", "origin", "HEAD:main");
+      sh(repo, "fetch", "-q", "origin");
+
+      const addBranchWorktree = (name: string) => {
+        const wt = path.join(repo, ".paperclip", "worktrees", name);
+        sh(repo, "worktree", "add", "-b", name, wt, "origin/main");
+        fs.writeFileSync(path.join(wt, `${name}.txt`), "f\n");
+        sh(wt, "add", ".");
+        sh(wt, "commit", "-q", "-m", name);
+        sh(wt, "push", "-q", "origin", name);
+        return wt;
+      };
+      const mergedWt = addBranchWorktree("pr-merged");
+      const openWt = addBranchWorktree("pr-open");
+      const scratch = path.join(root, "scratch");
+      sh(root, "clone", "-q", origin, scratch);
+      sh(scratch, "merge", "-q", "--no-ff", "-m", "Merge pr-merged", "origin/pr-merged");
+      sh(scratch, "push", "-q", "origin", "HEAD:main");
+      sh(repo, "pull", "-q", "--ff-only", "origin", "main");
+
+      const companyId = randomUUID();
+      const projectId = randomUUID();
+      const now = new Date();
+      await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+      await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+      const wsIds: Record<string, string> = {};
+      for (const [branch, cwd] of [["pr-merged", mergedWt], ["pr-open", openWt]] as const) {
+        const wsId = randomUUID();
+        wsIds[branch] = wsId;
+        await db.insert(executionWorkspaces).values({
+          id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+          name: branch, status: "active", providerType: "git_worktree", cwd, branchName: branch,
+          lastUsedAt: new Date(now.getTime() - 2 * 60 * 60_000),
+        });
+        await db.insert(issues).values({
+          id: randomUUID(), companyId, title: branch, status: "done", completedAt: now, executionWorkspaceId: wsId,
+        });
+      }
+
+      const deps = createDbMergedWorktreeCleanupDeps(db);
+      const dry = await runWorktreeCleanup(deps, { now, dryRun: true });
+      expect(dry).toMatchObject({ considered: 2, wouldRemove: 1, kept: 1, removed: 0 });
+      expect(fs.existsSync(mergedWt)).toBe(true);
+
+      const result = await runWorktreeCleanup(deps, { now });
+      expect(result).toMatchObject({ considered: 2, removed: 1, kept: 1, branchesDeleted: 1 });
+      expect(fs.existsSync(mergedWt)).toBe(false);
+      expect(sh(repo, "branch", "--list", "pr-merged")).toBe("");
+      expect(fs.existsSync(openWt)).toBe(true);
+      expect(sh(repo, "branch", "--list", "pr-open")).toContain("pr-open");
+      const rows = await db.select().from(executionWorkspaces);
+      const status = (b: string) => rows.find((r) => r.id === wsIds[b])!.status;
+      expect(status("pr-merged")).toBe("archived");
+      expect(status("pr-open")).toBe("active");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

@@ -1,6 +1,7 @@
 import type { Request } from "express";
 import { PROJECT_WORKSPACE_TEST_COMMAND_KEY } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
+import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,10 +84,16 @@ export function collectAgentAdapterWorkspaceCommandPaths(
   prefix = "adapterConfig",
 ): string[] {
   if (!isRecord(adapterConfig)) return [];
-  return collectWorkspaceStrategyCommandPaths(
+  const paths = collectWorkspaceStrategyCommandPaths(
     adapterConfig.workspaceStrategy,
     `${prefix}.workspaceStrategy`,
   );
+  // DUR-5266: workspaceRuntime.services[].command in an agent's adapter config runs on the
+  // host just like the strategy commands, so it is board-only too. Naming the key at all is refused.
+  if (hasOwn(adapterConfig, "workspaceRuntime")) {
+    paths.push(prefixPath(prefix, "workspaceRuntime"));
+  }
+  return paths;
 }
 
 export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): string[] {
@@ -477,23 +484,41 @@ export function collectAgentTaskModeDropPaths(
   existingSettings?: unknown,
 ): string[] {
   if (!isRecord(settings) || !isRecord(projectPolicy)) return [];
-  const mode = settings.mode;
-  if (mode !== "shared_workspace" && mode !== "agent_default" && mode !== "operator_branch") return [];
+  // Use the same reading of `mode` the run does: the old names `project_primary` and `isolated`
+  // still resolve to `shared_workspace` and `isolated_workspace` there.
+  const parsedSettings = parseIssueExecutionWorkspaceSettings(settings);
+  const mode = parsedSettings?.mode;
   if (projectPolicy.enabled !== true || projectPolicy.requireIsolation === true) return [];
   const strategy = isRecord(projectPolicy.workspaceStrategy) ? projectPolicy.workspaceStrategy : null;
   const dropsCommands = isNonEmptyCommand(strategy?.provisionCommand) || isNonEmptyCommand(strategy?.teardownCommand);
-  const dropsRuntime = mode === "agent_default"
-    && projectPolicy.workspaceRuntime !== undefined && projectPolicy.workspaceRuntime !== null;
-  if (!dropsCommands && !dropsRuntime) return [];
-  const defaultMode = projectPolicy.defaultMode === "isolated_workspace"
+  const projectDefaultMode = projectPolicy.defaultMode === "isolated_workspace"
     ? "isolated_workspace"
     : projectPolicy.defaultMode === "operator_branch"
       ? "operator_branch"
       : projectPolicy.defaultMode === "adapter_default"
         ? "agent_default"
         : "shared_workspace";
-  if (mode === defaultMode) return [];
-  if (isRecord(existingSettings) && existingSettings.mode === mode) return [];
+  // `workspaceStrategy.type` is the other switch: the run keeps the task's type, and any type
+  // other than `git_worktree` returns the shared checkout before the project's provision/teardown
+  // commands are reached. It only matters when the run would otherwise be isolated (a
+  // non-isolated mode already drops the commands and is judged below).
+  const strategyType = parsedSettings?.workspaceStrategy?.type;
+  if (dropsCommands && strategyType && strategyType !== "git_worktree") {
+    const existingParsed = parseIssueExecutionWorkspaceSettings(existingSettings);
+    // The body replaces the stored settings, and the run ignores `inherit`/`reuse_existing`
+    // (it falls back to the project default), so read the mode the same way: only a concrete
+    // mode in this body counts, otherwise the project default.
+    const effectiveMode = mode && mode !== "inherit" && mode !== "reuse_existing" ? mode : projectDefaultMode;
+    if (effectiveMode === "isolated_workspace" && existingParsed?.workspaceStrategy?.type !== strategyType) {
+      return ["executionWorkspaceSettings.workspaceStrategy.type"];
+    }
+  }
+  if (mode !== "shared_workspace" && mode !== "agent_default" && mode !== "operator_branch") return [];
+  const dropsRuntime = mode === "agent_default"
+    && projectPolicy.workspaceRuntime !== undefined && projectPolicy.workspaceRuntime !== null;
+  if (!dropsCommands && !dropsRuntime) return [];
+  if (mode === projectDefaultMode) return [];
+  if (parseIssueExecutionWorkspaceSettings(existingSettings)?.mode === mode) return [];
   return ["executionWorkspaceSettings.mode"];
 }
 
