@@ -15,7 +15,7 @@ on:
       enforced_stages:
         description: "Stages whose checks must pass (space separated)"
         required: false
-        default: "0 1 2"
+        default: "0 1 2 7"
   workflow_call: {}
   pull_request:
     branches:
@@ -135,7 +135,7 @@ jobs:
 
       - name: Run agent isolation acceptance test
         env:
-          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2' }}
+          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2 7' }}
           ISOLATION_SECRETS_MODE: ${{ matrix.secrets_mode }}
           # DUR-5176: file mode is the hardened target, so it also runs the
           # backup container (docker-compose.backup.yml) and stage 6; env mode
