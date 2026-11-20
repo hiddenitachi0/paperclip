@@ -12,6 +12,8 @@ import {
 } from "@paperclipai/db";
 import {
   TRADING_BASELINE_KEYS,
+  TRADING_LLM_FORECASTER_KEY,
+  TRADING_LLM_FORECAST_MAX_AGE_MS,
   TRADING_RESOLVER_VERSION,
   atrSeries,
   baselineCall,
@@ -38,6 +40,7 @@ import {
   tradeMetrics,
   tradingCandleMarket,
   tradingStrategySpecSchema,
+  tradingLlmForecastWindowMs,
   tradingTimeframeMs,
   trailingBaseRateUp,
   verdictPlanOf,
@@ -51,7 +54,7 @@ import {
   type TradingTimeframe,
 } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
-import { notFound } from "../errors.js";
+import { conflict, notFound } from "../errors.js";
 import { ccxtTradingMarketData, isTradingMarketDataError, type TradingMarketDataSource } from "./trading-market-data.js";
 import { tradingLedgerService } from "./trading-ledger.js";
 import { listCandles } from "./trading-candle-store.js";
@@ -543,6 +546,100 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
     return result;
   }
 
+  // ─── The AI's own calls (DUR-5020) ────────────────────────────────────
+
+  /**
+   * One probability call by the Trader agent, written to the same ledger as
+   * every other forecaster (forecaster_kind 'llm', key llm:trader) and scored
+   * forward only. Everything that matters is chosen here, never by the caller:
+   * the bar (the one that just closed), the reference price (that bar's close),
+   * the horizon and flat band (the live version's), the direction (from the
+   * probability) and the time (decided_at is left to the database clock, which
+   * the ledger trigger enforces). The reason is free text kept next to the call;
+   * nothing reads it. This touches no order, position, wallet or strategy row,
+   * and a backtest never reads the ledger: a model has seen the past in
+   * training, so only calls made before the outcome count.
+   */
+  async function logLlmForecast(companyId: string, input: { strategyId: string; probabilityUp: number; reason: string }) {
+    const [strategy] = await db.select().from(tradingStrategies).where(and(eq(tradingStrategies.id, input.strategyId), eq(tradingStrategies.companyId, companyId)));
+    if (!strategy) throw notFound("Trading strategy not found.");
+    const [version] = strategy.activeVersionId ? await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.id, strategy.activeVersionId)) : [];
+    const parsed = version && version.status === "approved" ? tradingStrategySpecSchema.safeParse(version.spec) : null;
+    if (!version || !parsed?.success) throw conflict("This strategy has no approved rules yet, so there is no version to log a call against.");
+    const spec = parsed.data;
+    const timeframe = spec.universe.decisionTimeframe as TradingTimeframe;
+    const asset = strategy.asset as TradingAsset;
+    const tf = tradingTimeframeMs(timeframe);
+    const now = nowOf();
+    const barCloseAt = new Date(Math.floor(now.getTime() / tf) * tf);
+    const age = now.getTime() - barCloseAt.getTime();
+    const horizonBars = spec.prediction.horizonBars;
+    // The call is scored from the bar's close, so the window is capped at 2% of the horizon: after that the live price already tells part of the outcome.
+    const windowMs = tradingLlmForecastWindowMs(tf, horizonBars);
+    if (age > windowMs) {
+      const capped = windowMs < TRADING_LLM_FORECAST_MAX_AGE_MS;
+      const span = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} seconds` : `${Math.round(ms / 60_000)} minutes`);
+      const next = new Date(barCloseAt.getTime() + tf).toISOString();
+      throw conflict(
+        capped
+          ? `Too late for this bar: this strategy looks ${horizonBars} ${timeframe} bar${horizonBars === 1 ? "" : "s"} ahead, so a call is only accepted within ${span(windowMs)} of the close (2% of that horizon); the ${timeframe} bar closed ${span(age)} ago. After that the live price already shows part of the outcome. A strategy with a horizon this short can hardly take a model call at all. Try again just after the next bar closes at ${next}.`
+          : `Too late for this bar: the ${timeframe} bar closed ${span(age)} ago and a call must be logged within ${span(windowMs)} of the close, because it is scored from that close. Try again just after the next bar closes at ${next}.`,
+        { reason: capped ? "look_ahead_window" : "bar_too_old", windowMs, nextBarCloseAt: next },
+      );
+    }
+    const loaded = await closedBars(asset, timeframe, now);
+    if ("error" in loaded || loaded.lastCloseAt.getTime() !== barCloseAt.getTime()) {
+      throw conflict("The exchange has not published the newest closed bar yet. Try again in a minute.", { reason: "bar_not_published" });
+    }
+    const bars = loaded.bars;
+    const last = bars[bars.length - 1]!;
+    const horizon = horizonBars;
+    const flatBandPct = spec.prediction.flatBandPct;
+    const base = trailingBaseRateUp(bars, timeframe, horizon, flatBandPct, barCloseAt);
+    const regime = computeTradingRegime(bars);
+    const direction = input.probabilityUp > 0.5 ? "up" : "down";
+    const [row] = await db
+      .insert(tradingPredictions)
+      .values({
+        companyId,
+        strategyId: strategy.id,
+        specVersion: version.version,
+        forecasterKind: "llm",
+        forecasterKey: TRADING_LLM_FORECASTER_KEY,
+        asset,
+        timeframe,
+        barCloseAt,
+        // decidedAt is not set: the column defaults to the database clock and the ledger trigger refuses any other value.
+        dataCutoffAt: barCloseAt,
+        horizonBars: horizon,
+        resolvesAt: new Date(barCloseAt.getTime() + horizon * tf),
+        kind: "direction",
+        direction,
+        probability: input.probabilityUp,
+        probabilitySource: "llm",
+        referencePrice: last.close,
+        flatBandPct,
+        regime: { trend: regime.trend, volatility: regime.volatility, squeeze: regime.squeeze },
+        indicatorSnapshot: { source: "llm_trader", reason: input.reason, baseRateUp: base.baseRateUp, baseRateSamples: base.up + base.down },
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (!row) throw conflict("You already logged a call for this strategy and bar. A call is never changed or replaced; the next bar can have its own.", { reason: "already_logged" });
+    return {
+      id: row.id,
+      forecasterKey: row.forecasterKey,
+      strategyId: row.strategyId,
+      specVersion: row.specVersion,
+      asset: row.asset,
+      direction: row.direction,
+      probabilityUp: row.probability,
+      referencePrice: row.referencePrice,
+      barCloseAt: row.barCloseAt,
+      decidedAt: row.decidedAt,
+      resolvesAt: row.resolvesAt,
+    };
+  }
+
   // ─── The scoreboard (read side) ───────────────────────────────────────
 
   async function roundTrips(strategyId: string): Promise<RoundTrip[]> {
@@ -703,7 +800,7 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
     };
   }
 
-  return { boot, tick, scoreboard, resolveDue, computeVerdicts };
+  return { boot, tick, scoreboard, resolveDue, computeVerdicts, logLlmForecast };
 }
 
 export type TradingEvaluatorService = ReturnType<typeof tradingEvaluatorService>;

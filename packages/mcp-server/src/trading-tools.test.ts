@@ -32,6 +32,7 @@ describe("trading MCP tools", () => {
       "trading_get_daily_brief",
       "trading_write_post_mortem",
       "trading_apply_change",
+      "trading_log_forecast",
     ]);
     for (const t of tools) {
       expect(Object.keys(t.schema.shape).some((k) => /key|secret|wallet|order|status|mode|side|quantity/i.test(k))).toBe(false);
@@ -73,6 +74,22 @@ describe("trading MCP tools", () => {
     ]);
     // the apply tool sends no rules at all: the server takes them from the experiment
     expect(JSON.parse(String((fetchMock.mock.calls[2]![1] as RequestInit).body))).toEqual({ experimentId, summary: "Slower fast average", reasons: "It held at double fees" });
+  });
+
+  it("logs a forecast with only a probability and a reason: no time, price or bar can be sent", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "x" }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const log = tool("trading_log_forecast");
+    expect(Object.keys(log.schema.shape).sort()).toEqual(["probabilityUp", "reason", "strategyId"]);
+    await log.execute({ strategyId, probabilityUp: 0.62, reason: "Funding is cooling and the bar closed above the range." });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(`${(init as RequestInit).method} ${String(url).replace("http://localhost:3100", "")}`).toBe(`POST /api/agent-trading/strategies/${strategyId}/forecasts`);
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ probabilityUp: 0.62, reason: "Funding is cooling and the bar closed above the range." });
+    // out-of-range certainty is refused before any request
+    fetchMock.mockClear();
+    const refused = await log.execute({ strategyId, probabilityUp: 1, reason: "Certain." });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(refused)).toMatch(/error|Invalid|too_big/i);
   });
 
   it("will not even send a proposal that cites no experiment", async () => {
