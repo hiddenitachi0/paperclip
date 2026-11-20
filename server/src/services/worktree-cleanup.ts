@@ -19,11 +19,21 @@ export const DEFAULT_MERGED_WORKTREE_SWEEP_INTERVAL_MS = 15 * 60 * 1_000;
 /** DUR-5184: a worktree used more recently than this is never removed by the merged pass. */
 export const MERGED_WORKTREE_IDLE_MS = 30 * 60 * 1_000;
 
+/**
+ * DUR-5236: most worktrees one sweep may remove. Production holds ~1,000 worktree rows that
+ * were never selected before, so the first live sweeps would otherwise delete all of them at
+ * once. The rest wait for the next sweep. Kept (not removed) worktrees do not count.
+ */
+export const DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_SWEEP = 25;
+
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_FETCH_TIMEOUT_MS = 120_000;
 
 /** First line of the "has unsaved work" flag comment; also the de-dupe key. */
 export const WORKTREE_UNSAVED_WORK_MARKER = "<!-- worktree-cleanup:unsaved-work -->";
+
+/** DUR-5236: execution_workspaces.provider_type values that can back a managed worktree. */
+export const WORKTREE_PROVIDER_TYPES = ["git_worktree", "local_fs"];
 
 const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
 /**
@@ -359,12 +369,26 @@ export interface WorktreeCleanupResult {
   failed: number;
   /** DUR-5184: local branches deleted with `git branch -d` after their worktree was removed. */
   branchesDeleted: number;
+  /** DUR-5236: dry run only -- worktrees that passed every safety check and would have been removed. */
+  wouldRemove: number;
+  /** DUR-5236: true when the per-sweep removal cap stopped the sweep early. */
+  capped: boolean;
+  dryRun: boolean;
 }
 
 export async function runWorktreeCleanup(
   deps: WorktreeCleanupDeps,
-  opts: { now?: Date; defaultRetentionDays?: number } = {},
+  opts: {
+    now?: Date;
+    defaultRetentionDays?: number;
+    /** DUR-5236: evaluate everything but remove, flag, or mark nothing; report `wouldRemove`. */
+    dryRun?: boolean;
+    /** DUR-5236: stop after this many removals (default 25). */
+    maxRemovals?: number;
+  } = {},
 ): Promise<WorktreeCleanupResult> {
+  const dryRun = opts.dryRun === true;
+  const maxRemovals = Math.max(1, opts.maxRemovals ?? DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_SWEEP);
   const now = opts.now ?? new Date();
   const candidates = await deps.listCandidates(now, opts.defaultRetentionDays ?? DEFAULT_WORKTREE_CLEANUP_RETENTION_DAYS);
   const evaluate = deps.evaluate ?? evaluateWorktreeForRemoval;
@@ -377,9 +401,16 @@ export async function runWorktreeCleanup(
     kept: 0,
     failed: 0,
     branchesDeleted: 0,
+    wouldRemove: 0,
+    capped: false,
+    dryRun,
   };
 
   for (const candidate of candidates) {
+    if (!dryRun && result.removed >= maxRemovals) {
+      result.capped = true;
+      break;
+    }
     try {
       const mergedPass = candidate.mode === "merged_pr" || candidate.mode === "idle_run";
       const verdict = await evaluate(candidate.cwd, candidate.branchName, {
@@ -389,7 +420,11 @@ export async function runWorktreeCleanup(
       });
       if (verdict.action === "keep") {
         result.kept += 1;
-        if (!mergedPass) await deps.flagUnsavedWork(candidate, verdict.reason);
+        if (!mergedPass && !dryRun) await deps.flagUnsavedWork(candidate, verdict.reason);
+        continue;
+      }
+      if (dryRun) {
+        result.wouldRemove += 1;
         continue;
       }
       try {
@@ -436,7 +471,9 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
       .where(
         and(
           eq(executionWorkspaces.strategyType, "git_worktree"),
-          eq(executionWorkspaces.providerType, "local_fs"),
+          // DUR-5236: heartbeat writes "git_worktree" for every worktree it creates; "local_fs"
+          // is the column default and may exist on older rows. Accept both.
+          inArray(executionWorkspaces.providerType, WORKTREE_PROVIDER_TYPES),
           ne(executionWorkspaces.status, "archived"),
           like(executionWorkspaces.cwd, "%/.paperclip/worktrees/%"),
         ),
@@ -711,6 +748,7 @@ export function startWorktreeCleanup(
   intervalMs: number = DEFAULT_WORKTREE_CLEANUP_INTERVAL_MS,
   defaultRetentionDays: number = DEFAULT_WORKTREE_CLEANUP_RETENTION_DAYS,
   mergedIntervalMs: number = DEFAULT_MERGED_WORKTREE_SWEEP_INTERVAL_MS,
+  options: { dryRun?: boolean; maxRemovals?: number } = {},
 ): () => void {
   const deps = createDbWorktreeCleanupDeps(db);
   const mergedDeps = createDbMergedWorktreeCleanupDeps(db);
@@ -726,9 +764,9 @@ export function startWorktreeCleanup(
         running = false;
       });
   };
-  const tick = guarded("Worktree cleanup sweep", () => runWorktreeCleanup(deps, { defaultRetentionDays }));
+  const tick = guarded("Worktree cleanup sweep", () => runWorktreeCleanup(deps, { defaultRetentionDays, ...options }));
   const mergedTick = guarded("Merged-branch worktree sweep", () =>
-    runWorktreeCleanup(mergedDeps, { defaultRetentionDays }),
+    runWorktreeCleanup(mergedDeps, { defaultRetentionDays, ...options }),
   );
   const timer = setInterval(tick, intervalMs);
   const mergedTimer = setInterval(mergedTick, mergedIntervalMs);

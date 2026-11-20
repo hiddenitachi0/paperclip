@@ -194,6 +194,31 @@ describe("worktree cleanup (DUR-4497)", () => {
       expect(fs.existsSync(open)).toBe(true);
     });
 
+    it("DUR-5236: dry run reports what it would remove and touches nothing", async () => {
+      const clean = addWorktree("dry-clean");
+      const dirty = addWorktree("dry-dirty");
+      fs.writeFileSync(path.join(dirty, "scratch.txt"), "x\n");
+      const { deps, flagged, cleaned } = setup([cand("1", clean, "dry-clean"), cand("2", dirty, "dry-dirty")]);
+      const result = await runWorktreeCleanup(deps, { dryRun: true });
+      expect(result).toMatchObject({ considered: 2, removed: 0, kept: 1, wouldRemove: 1, dryRun: true, capped: false });
+      expect(cleaned).toEqual([]);
+      expect(flagged).toEqual([]); // no comments posted in a dry run
+      expect(fs.existsSync(clean)).toBe(true);
+      expect(sh(repo, "branch", "--list", "dry-clean")).toContain("dry-clean");
+    });
+
+    it("DUR-5236: stops after maxRemovals and leaves the rest for the next sweep", async () => {
+      const wts = ["cap-a", "cap-b", "cap-c"].map((n) => addWorktree(n));
+      const { deps, cleaned } = setup(wts.map((wt, i) => cand(String(i), wt, path.basename(wt))));
+      const first = await runWorktreeCleanup(deps, { maxRemovals: 2 });
+      expect(first).toMatchObject({ considered: 3, removed: 2, capped: true });
+      expect(cleaned).toEqual(["0", "1"]);
+      expect(fs.existsSync(wts[2]!)).toBe(true);
+      const second = await runWorktreeCleanup(setup([cand("2", wts[2]!, "cap-c")]).deps, { maxRemovals: 2 });
+      expect(second).toMatchObject({ removed: 1, capped: false });
+      expect(fs.existsSync(wts[2]!)).toBe(false);
+    });
+
     describe("after a PR merges", () => {
       function mergeIntoMain(branch: string) {
         // What GitHub's "Create a merge commit" does, done through a scratch clone of origin.

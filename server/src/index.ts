@@ -2505,10 +2505,23 @@ export async function startServer(): Promise<StartedServer> {
 
   // DUR-4497: daily removal of finished-task agent worktrees (fail-closed;
   // see worktree-cleanup.ts). On by default; PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false
-  // is the kill switch.
+  // is the kill switch. DUR-5236: PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN=true runs every
+  // sweep without removing anything and logs `wouldRemove`;
+  // PAPERCLIP_WORKTREE_CLEANUP_MAX_REMOVALS caps removals per sweep (default 25).
   if (process.env.PAPERCLIP_WORKTREE_CLEANUP_ENABLED !== "false") {
-    logger.info("Finished-task worktree cleanup enabled");
-    startWorktreeCleanup(db);
+    const worktreeCleanupDryRun = process.env.PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN === "true";
+    const parsedMax = Number.parseInt(process.env.PAPERCLIP_WORKTREE_CLEANUP_MAX_REMOVALS ?? "", 10);
+    logger.info({ dryRun: worktreeCleanupDryRun }, "Finished-task worktree cleanup enabled");
+    startWorktreeCleanup(
+      db,
+      undefined,
+      undefined,
+      undefined,
+      {
+        dryRun: worktreeCleanupDryRun,
+        ...(Number.isInteger(parsedMax) && parsedMax > 0 ? { maxRemovals: parsedMax } : {}),
+      },
+    );
   }
 
   // DUR-386: bound cross_company_access_log the same way. Bypass-scoped
