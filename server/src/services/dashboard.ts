@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { agents, approvals, budgetPolicies, companies, costEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import type { DashboardPulse } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import { isApprovalCardOnlyKind } from "./approvals.js";
 import { budgetService } from "./budgets.js";
 import { sumCostCents } from "./cost-sql.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
@@ -308,6 +309,7 @@ export function dashboardService(db: Db, deps: DashboardServiceDeps = {}) {
             ? (agentNameById.get(row.requestedByAgentId) ?? null)
             : null,
           createdAt: row.createdAt.toISOString(),
+          cardOnly: isApprovalCardOnlyKind(row),
           // Deploy cards: the revision this list holds, sent back on approve so a card that
           // changed since is refused instead of approved unseen.
           ...(kind === "deploy" && typeof (row.payload as Record<string, unknown> | null)?.cardRevision === "number"

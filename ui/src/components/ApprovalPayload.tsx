@@ -629,6 +629,9 @@ export function BoardApprovalPayload({
   if (firstNonEmptyString(payload.kind) === "operator_action") {
     return <OperatorActionPayloadContent payload={nextPayload} />;
   }
+  if (firstNonEmptyString(payload.kind) === "trading_strategy_version") {
+    return <TradingStrategyVersionPayloadContent payload={nextPayload} />;
+  }
   if (firstNonEmptyString(payload.kind) === "report_script_version") {
     return <ReportScriptVersionPayloadContent payload={nextPayload} approvalId={approvalId} companyId={companyId} />;
   }
@@ -1078,6 +1081,63 @@ function OperatorActionPayloadContent({ payload }: { payload: Record<string, unk
         </div>
       )}
       {secretName && <PayloadField label="Value from" value={`secret "${secretName}"`} />}
+    </div>
+  );
+}
+
+/**
+ * A trading strategy's new rules. Approving switches the strategy to exactly
+ * these rules, so the card lists every rule in words and shows the written
+ * guidelines before the owner decides. Both come from the stored draft.
+ */
+function TradingStrategyVersionPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const intro = firstNonEmptyString(payload.plainSummary, payload.summary);
+  const rules = Array.isArray(payload.readBack)
+    ? payload.readBack.filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    : [];
+  const guidelines = firstNonEmptyString(payload.guidelines);
+  const untested = firstNonEmptyString(payload.pastDataTest);
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">New rules</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {intro && rules.length === 0 && <p className="whitespace-pre-line leading-6 text-foreground/90">{intro}</p>}
+      {untested && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+          <p className="leading-6 text-foreground">These rules are {untested}.</p>
+        </div>
+      )}
+      {rules.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            What the strategy will do
+          </p>
+          <ul className="space-y-1 text-sm text-foreground/90">
+            {rules.map((rule, index) => (
+              <li key={`${index}-${rule}`} className="flex items-start gap-2">
+                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                <span className="leading-6">{rule}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {guidelines && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Written guidelines</p>
+          <p className="whitespace-pre-line rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 leading-6 text-foreground/90">
+            {guidelines}
+          </p>
+        </div>
+      )}
+      <p className="text-xs leading-5 text-muted-foreground">
+        Approving switches the strategy to exactly these rules from its next check. It trades play money only.
+      </p>
     </div>
   );
 }

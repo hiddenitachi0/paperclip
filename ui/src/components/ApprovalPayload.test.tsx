@@ -326,6 +326,30 @@ describe("ApprovalPayloadRenderer", () => {
     act(() => root.unmount());
   });
 
+  it("lists a strategy's new rules and written guidelines in words before it can be approved", () => {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "trading_strategy_version",
+            title: 'Trading strategy "Steady": new rules (version 7)',
+            readBack: ["Buys when the 20-day average rises above the 50-day average.", "Never puts more than 10% into one coin."],
+            guidelines: "Stay calm in sudden dips.",
+            pastDataTest: "not yet tested on past data",
+          }}
+        />,
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Buys when the 20-day average rises above the 50-day average.");
+    expect(text).toContain("Never puts more than 10% into one coin.");
+    expect(text).toContain("Stay calm in sudden dips.");
+    expect(text).toContain("These rules are not yet tested on past data.");
+    act(() => root.unmount());
+  });
+
   it("renders request_board_approval payload fields without falling back to raw JSON", () => {
     const root = createRoot(container);
 
