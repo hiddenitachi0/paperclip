@@ -83,6 +83,12 @@ function registerModuleMocks() {
     personaService: () => mockPersonaService,
     secretService: () => mockSecretService,
   }));
+  // DUR-5222: filing now looks the PR's head up on GitHub and refuses when it cannot; this suite
+  // is about something else, so keep it off the network (the lookup has its own tests).
+  vi.doMock("../services/merge-card-head-commit.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/merge-card-head-commit.js")>()),
+    withResolvedMergePrHeadCommit: async (_db: unknown, _companyId: string, payload: Record<string, unknown>) => payload,
+  }));
   vi.doMock("../services/deploy-branches.js", () => ({
     resolveProjectDeployBranches: mockResolveProjectDeployBranches,
     resolveProjectDeployBranchesByProjectId: vi.fn(),
@@ -327,6 +333,8 @@ describe("DUR-3964 (c): a merge card with nothing left to merge is refused at fi
       // card can later have a security review requested against it) -- that's the one call
       // this test still expects. It's not this suite's `/compare/` ancestor check, which has
       // nothing to ask about until a commit exists.
+      // DUR-5222: this is the one test that wants the real head lookup, so undo the suite's stub.
+      vi.doUnmock("../services/merge-card-head-commit.js");
       mockGhFetch.mockResolvedValue(new Response(JSON.stringify({ head: { sha: COMMIT } }), { status: 200 }));
       const app = await createAgentApp();
 
