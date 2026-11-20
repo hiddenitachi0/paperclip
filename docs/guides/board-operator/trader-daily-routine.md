@@ -88,13 +88,18 @@ stored in the same prediction ledger as the rules and the baselines, as forecast
 - The call carries only `probabilityUp` (0.01 to 0.99, never exactly 0.5) and a short `reason`. The server
   picks the bar, the reference price (that bar's close), the horizon and the flat band; the database stamps
   `decided_at` with its own clock. Any time, bar, price or version field in the request is refused.
-- A call is accepted only **within 15 minutes after a decision bar closes** (4h bars close at 00, 04, 08, 12, 16
-  and 20 UTC), because it is scored from that close; later it is refused and the Trader waits for the next
-  close. One call per strategy and bar, never edited or replaced.
+- A call is accepted only **within a short window after a decision bar closes** (4h bars close at 00, 04, 08, 12,
+  16 and 20 UTC), because it is scored from that close; later it is refused (409, reason `bar_too_old` or
+  `look_ahead_window`) and the Trader waits for the next close. The window is the **smaller of 15 minutes and 2%
+  of the strategy's horizon** (horizon bars x bar length), so the Trader cannot read the live price and call an
+  outcome it mostly already knows. For the default 4h x 6 strategy that is the full 15 minutes (2% of 24 hours is
+  28.8 minutes); for 4h x 2 it is 9.6 minutes; for 1h x 1 it is 72 seconds and for 15m x 1 it is 18 seconds, which
+  in practice means a strategy with a horizon that short takes no model calls. One call per strategy and bar,
+  never edited or replaced.
 - It is scored forward only, like every forecaster. It is **never backtested**: a model has seen the past in
   training. It has no effect on orders, and the reason is only a note next to the call; web or news text may
   inform it but never reaches the trading engine.
-- The 06:30 UTC review above is **not** inside that 15-minute window, so it cannot log a forecast. Nothing
+- The 06:30 UTC review above is **not** inside that window, so it cannot log a forecast. Nothing
   logs forecasts until the owner adds a second schedule routine for the Trader, for example
   `{ "kind": "schedule", "cronExpression": "3 8 * * *", "timezone": "UTC" }` (one bar a day; `3 */4 * * *` would
   log all six, at six times the model cost against the $3/day cap). The task text can be as short as: "Call

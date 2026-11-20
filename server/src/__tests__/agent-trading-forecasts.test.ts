@@ -5,7 +5,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { activityLog, agents, companies, companyCryptoSettings, createDb, tradingLedgerEntries, tradingOrders, tradingPredictions, tradingStrategies, type Db } from "@paperclipai/db";
+import { activityLog, agents, companies, companyCryptoSettings, createDb, tradingLedgerEntries, tradingOrders, tradingPredictions, tradingStrategies, tradingStrategyVersions, type Db } from "@paperclipai/db";
 import { TRADING_LLM_FORECASTER_KEY, tradingTimeframeMs, type CreateTradingStrategyInput, type TradingCandle, type TradingRiskConfig } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
@@ -155,6 +155,49 @@ d("trading_log_forecast route (DUR-5020)", () => {
     // the exchange has not published the newest bar: the previous bar is never used instead
     const lagging = await request(app(s.companyId, s.traderId, { marketData: market(new Date(close.getTime() - TF_MS)) })).post(url(s.strategyId)).send(body());
     expect(lagging.status).toBe(409);
+    expect(await rowsOf(s.strategyId)).toHaveLength(0);
+  });
+
+  it("accepts a call at the close + 14 minutes for the default 4h x 6 strategy (the window is the full 15 minutes: 2% of the horizon is 28.8)", async () => {
+    const s = await seed();
+    const res = await request(app(s.companyId, s.traderId, { now: new Date(close.getTime() + 14 * 60_000) })).post(url(s.strategyId)).send(body());
+    expect(res.status).toBe(201);
+    // ...and refuses it a minute after the 15-minute window, with the plain stale-bar reason
+    const s2 = await seed();
+    const late = await request(app(s2.companyId, s2.traderId, { now: new Date(close.getTime() + 16 * 60_000) })).post(url(s2.strategyId)).send(body());
+    expect(late.status).toBe(409);
+    expect(late.body.details?.reason ?? late.body.reason).toBe("bar_too_old");
+  });
+
+  it("refuses a call at the close + 14 minutes for a 15m x 1 strategy: the window is 2% of the horizon (18 seconds), not 15 minutes", async () => {
+    const s = await seed();
+    // the same strategy, moved to a new approved version with a 15-minute decision bar that predicts one bar ahead (a version's rules never change in place)
+    const [strategy] = await db.select().from(tradingStrategies).where(eq(tradingStrategies.id, s.strategyId));
+    const [version] = await db.select().from(tradingStrategyVersions).where(eq(tradingStrategyVersions.id, strategy!.activeVersionId!));
+    const spec = version!.spec as any;
+    await db.update(tradingStrategyVersions).set({ status: "superseded", supersededAt: new Date() }).where(eq(tradingStrategyVersions.id, version!.id));
+    const [short] = await db
+      .insert(tradingStrategyVersions)
+      .values({
+        companyId: s.companyId,
+        strategyId: s.strategyId,
+        version: version!.version + 1,
+        spec: { ...spec, universe: { ...spec.universe, decisionTimeframe: "15m" }, prediction: { ...spec.prediction, horizonBars: 1 } },
+        status: "approved",
+        proposedByType: "user",
+        proposedById: "owner-1",
+        approvedByUserId: "owner-1",
+        approvedAt: new Date(),
+        specDigest: "a".repeat(64),
+      })
+      .returning();
+    await db.update(tradingStrategies).set({ activeVersionId: short!.id }).where(eq(tradingStrategies.id, s.strategyId));
+    const close15 = new Date(Math.floor(Date.now() / (15 * 60_000)) * 15 * 60_000);
+    const late = await request(app(s.companyId, s.traderId, { now: new Date(close15.getTime() + 14 * 60_000) })).post(url(s.strategyId)).send(body());
+    expect(late.status).toBe(409);
+    expect(late.body.details?.reason ?? late.body.reason).toBe("look_ahead_window");
+    expect(late.body.details?.windowMs ?? late.body.windowMs).toBe(18_000);
+    expect(JSON.stringify(late.body)).toContain("18 seconds");
     expect(await rowsOf(s.strategyId)).toHaveLength(0);
   });
 

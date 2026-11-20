@@ -40,6 +40,7 @@ import {
   tradeMetrics,
   tradingCandleMarket,
   tradingStrategySpecSchema,
+  tradingLlmForecastWindowMs,
   tradingTimeframeMs,
   trailingBaseRateUp,
   verdictPlanOf,
@@ -572,10 +573,18 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
     const now = nowOf();
     const barCloseAt = new Date(Math.floor(now.getTime() / tf) * tf);
     const age = now.getTime() - barCloseAt.getTime();
-    if (age > TRADING_LLM_FORECAST_MAX_AGE_MS) {
+    const horizonBars = spec.prediction.horizonBars;
+    // The call is scored from the bar's close, so the window is capped at 2% of the horizon: after that the live price already tells part of the outcome.
+    const windowMs = tradingLlmForecastWindowMs(tf, horizonBars);
+    if (age > windowMs) {
+      const capped = windowMs < TRADING_LLM_FORECAST_MAX_AGE_MS;
+      const span = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} seconds` : `${Math.round(ms / 60_000)} minutes`);
+      const next = new Date(barCloseAt.getTime() + tf).toISOString();
       throw conflict(
-        `Too late for this bar: the ${timeframe} bar closed ${Math.round(age / 60_000)} minutes ago and a call must be logged within ${Math.round(TRADING_LLM_FORECAST_MAX_AGE_MS / 60_000)} minutes of the close, because it is scored from that close. Try again just after the next bar closes at ${new Date(barCloseAt.getTime() + tf).toISOString()}.`,
-        { reason: "bar_too_old", nextBarCloseAt: new Date(barCloseAt.getTime() + tf).toISOString() },
+        capped
+          ? `Too late for this bar: this strategy looks ${horizonBars} ${timeframe} bar${horizonBars === 1 ? "" : "s"} ahead, so a call is only accepted within ${span(windowMs)} of the close (2% of that horizon); the ${timeframe} bar closed ${span(age)} ago. After that the live price already shows part of the outcome. A strategy with a horizon this short can hardly take a model call at all. Try again just after the next bar closes at ${next}.`
+          : `Too late for this bar: the ${timeframe} bar closed ${span(age)} ago and a call must be logged within ${span(windowMs)} of the close, because it is scored from that close. Try again just after the next bar closes at ${next}.`,
+        { reason: capped ? "look_ahead_window" : "bar_too_old", windowMs, nextBarCloseAt: next },
       );
     }
     const loaded = await closedBars(asset, timeframe, now);
@@ -584,7 +593,7 @@ export function tradingEvaluatorService(db: Db, deps: TradingEvaluatorDeps = {})
     }
     const bars = loaded.bars;
     const last = bars[bars.length - 1]!;
-    const horizon = spec.prediction.horizonBars;
+    const horizon = horizonBars;
     const flatBandPct = spec.prediction.flatBandPct;
     const base = trailingBaseRateUp(bars, timeframe, horizon, flatBandPct, barCloseAt);
     const regime = computeTradingRegime(bars);
