@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "../components/StatusBadge";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { TradingDisclaimer } from "../components/TradingDisclaimer";
+import { TradingScoreboardSection } from "../components/TradingScoreboard";
 import { TradingStrategyVersions } from "../components/TradingStrategyVersions";
 import { TradingStrategyChat } from "../components/TradingStrategyChat";
 import { TradingPastDataCard } from "../components/TradingPastDataCard";
@@ -254,6 +255,8 @@ export function TradingStrategyDetail() {
             />
             <StatTile label="Last check error" value={summary.lastTickError ?? "None"} tone={summary.lastTickError ? "bad" : undefined} />
           </div>
+
+          {scoreboardQuery.data && scoreboardQuery.data.version !== null ? <TradingScoreboardSection board={scoreboardQuery.data} /> : null}
 
           <div className="rounded-lg border border-border p-4">
             <div className="mb-2 flex items-center gap-2">
