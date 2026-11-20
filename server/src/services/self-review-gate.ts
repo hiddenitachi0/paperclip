@@ -17,6 +17,12 @@ import { serverChildProcessEnv } from "./runtime-env.js";
 
 const execFileAsync = promisify(execFile);
 
+// The workspace folder is agent-writable, so its .git/config can plant core.fsmonitor, hooks, or
+// diff.external/textconv programs. Every git call the server makes there strips the server's
+// secrets from the environment and turns those hooks off.
+const HARDENED_GIT_CONFIG_ARGS = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] as const;
+const HARDENED_GIT_ENV = { GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" } as const;
+
 /**
  * DUR-22 slice 1: a bounded, one-time "review your own diff before handing off" pass
  * inserted before a code issue moves to in_review/done. See:
@@ -320,8 +326,21 @@ export async function getChangedFilePathsForIssueWorkspace(
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", resolved.workspacePath, "diff", "--name-only", `${resolved.baseRef}...HEAD`],
-      { cwd: resolved.workspacePath, maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES },
+      [
+        ...HARDENED_GIT_CONFIG_ARGS,
+        "-C",
+        resolved.workspacePath,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        `${resolved.baseRef}...HEAD`,
+      ],
+      {
+        cwd: resolved.workspacePath,
+        maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
+        env: serverChildProcessEnv(HARDENED_GIT_ENV),
+      },
     );
     return stdout
       .split(/\r?\n/)
@@ -348,8 +367,20 @@ export async function getChangedDiffContentForIssueWorkspace(
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", resolved.workspacePath, "diff", `${resolved.baseRef}...HEAD`],
-      { cwd: resolved.workspacePath, maxBuffer: RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES },
+      [
+        ...HARDENED_GIT_CONFIG_ARGS,
+        "-C",
+        resolved.workspacePath,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        `${resolved.baseRef}...HEAD`,
+      ],
+      {
+        cwd: resolved.workspacePath,
+        maxBuffer: RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES,
+        env: serverChildProcessEnv(HARDENED_GIT_ENV),
+      },
     );
     return stdout;
   } catch {
@@ -373,11 +404,11 @@ export async function getCurrentHeadShaForIssueWorkspace(
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", resolved.workspacePath, "rev-parse", "HEAD"],
+      [...HARDENED_GIT_CONFIG_ARGS, "-C", resolved.workspacePath, "rev-parse", "HEAD"],
       {
         cwd: resolved.workspacePath,
         maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
-        env: serverChildProcessEnv({ GIT_CONFIG_NOSYSTEM: "1" }),
+        env: serverChildProcessEnv(HARDENED_GIT_ENV),
       },
     );
     const sha = stdout.trim();
