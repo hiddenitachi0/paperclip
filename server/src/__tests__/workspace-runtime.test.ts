@@ -4899,3 +4899,136 @@ describe("normalizeAdapterManagedRuntimeServices", () => {
     });
   });
 });
+
+describe("parallel-safe workspaces (DUR-5184)", () => {
+  const agent = { id: "agent-1", name: "Codex Coder", companyId: "company-1" };
+
+  function realize(repoRoot: string, issue: { id: string; identifier: string; title: string } | null, runId?: string) {
+    return realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: null,
+      },
+      config: { workspaceStrategy: { type: "git_worktree", branchTemplate: "{{issue.identifier}}-{{slug}}" } },
+      issue,
+      runId,
+      agent,
+    });
+  }
+
+  it("gives two issues two folders and a reset in one leaves the other's unpushed commit intact", async () => {
+    const repoRoot = await createTempRepo();
+    const a = await realize(repoRoot, { id: "i-a", identifier: "NOR-1", title: "First" });
+    const b = await realize(repoRoot, { id: "i-b", identifier: "NOR-2", title: "Second" });
+    expect(a.cwd).not.toBe(b.cwd);
+    expect(a.branchName).not.toBe(b.branchName);
+
+    await fs.writeFile(path.join(b.cwd, "work.txt"), "unpushed\n", "utf8");
+    await runGit(b.cwd, ["add", "work.txt"]);
+    await runGit(b.cwd, ["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "b work"]);
+    const bHead = await readGit(b.cwd, ["rev-parse", "HEAD"]);
+
+    await fs.writeFile(path.join(a.cwd, "scratch.txt"), "x\n", "utf8");
+    await runGit(a.cwd, ["reset", "--hard", "HEAD"]);
+    await runGit(a.cwd, ["clean", "-fd"]);
+
+    expect(await readGit(b.cwd, ["rev-parse", "HEAD"])).toBe(bHead);
+    expect(await fs.readFile(path.join(b.cwd, "work.txt"), "utf8")).toBe("unpushed\n");
+    // Realizing A again must not touch B either.
+    await realize(repoRoot, { id: "i-a", identifier: "NOR-1", title: "First" });
+    expect(await readGit(b.cwd, ["rev-parse", "HEAD"])).toBe(bHead);
+  });
+
+  it("gives each run without an issue its own run-<shortRunId> branch and folder", async () => {
+    const repoRoot = await createTempRepo();
+    const first = await realize(repoRoot, null, "11111111-aaaa-bbbb-cccc-000000000001");
+    const second = await realize(repoRoot, null, "22222222-aaaa-bbbb-cccc-000000000002");
+    expect(first.branchName).toBe("run-11111111");
+    expect(second.branchName).toBe("run-22222222");
+    expect(first.cwd).not.toBe(second.cwd);
+    expect(first.cwd).not.toBe(repoRoot);
+    expect(path.basename(first.cwd)).toBe("run-11111111");
+    expect(await readGit(first.cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("run-11111111");
+    // Never the old shared "issue" branch.
+    expect(await readGit(repoRoot, ["branch", "--list", "issue*"])).toBe("");
+  });
+
+  it("warns that an issue-less run in the shared checkout is not isolated", async () => {
+    const repoRoot = await createTempRepo();
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: null,
+      },
+      config: {},
+      issue: null,
+      runId: "33333333-aaaa-bbbb-cccc-000000000003",
+      agent,
+    });
+    expect(workspace.cwd).toBe(repoRoot);
+    expect(workspace.warnings.join("\n")).toContain("requireIsolation");
+  });
+
+  it("lets a provision command link shared dependencies into every fresh worktree", async () => {
+    const repoRoot = await createTempRepo();
+    const shared = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-shared-deps-"));
+    await fs.writeFile(path.join(shared, "marker"), "installed once\n", "utf8");
+    await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+    // The recipe documented in doc/workspace-shared-dependencies.md.
+    await fs.writeFile(
+      path.join(repoRoot, "scripts", "provision.sh"),
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'if [ "$PAPERCLIP_WORKSPACE_CREATED" = "true" ]; then',
+        '  ln -s "$SHARED_DEPS_DIR" "$PAPERCLIP_WORKSPACE_PATH/.venv"',
+        "fi",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await runGit(repoRoot, ["add", "scripts/provision.sh"]);
+    await runGit(repoRoot, ["commit", "-m", "Add provision script"]);
+    const previous = process.env.SHARED_DEPS_DIR;
+    process.env.SHARED_DEPS_DIR = shared;
+    try {
+      const make = (identifier: string) =>
+        realizeExecutionWorkspace({
+          base: {
+            baseCwd: repoRoot,
+            source: "project_primary",
+            projectId: "project-1",
+            workspaceId: "workspace-1",
+            repoUrl: null,
+            repoRef: null,
+          },
+          config: {
+            workspaceStrategy: {
+              type: "git_worktree",
+              branchTemplate: "{{issue.identifier}}-{{slug}}",
+              provisionCommand: "bash ./scripts/provision.sh",
+            },
+          },
+          issue: { id: identifier, identifier, title: "Deps" },
+          agent,
+        });
+      const one = await make("NOR-10");
+      const two = await make("NOR-11");
+      expect(await fs.readFile(path.join(one.cwd, ".venv", "marker"), "utf8")).toBe("installed once\n");
+      expect(await fs.readFile(path.join(two.cwd, ".venv", "marker"), "utf8")).toBe("installed once\n");
+      // Reusing worktree one runs the command again with created=false and must not fail on the existing link.
+      await expect(make("NOR-10")).resolves.toMatchObject({ created: false });
+    } finally {
+      if (previous === undefined) delete process.env.SHARED_DEPS_DIR;
+      else process.env.SHARED_DEPS_DIR = previous;
+    }
+  });
+});

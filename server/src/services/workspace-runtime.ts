@@ -395,6 +395,12 @@ function renderWorkspaceTemplate(template: string, input: {
   });
 }
 
+/** `run-<first 8 hex chars of the run id>`; null when there is no usable run id. */
+export function runScopedBranchName(runId: string | null | undefined): string | null {
+  const short = (runId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  return short.length > 0 ? `run-${short}` : null;
+}
+
 function sanitizeBranchName(value: string): string {
   return value
     .trim()
@@ -1687,18 +1693,26 @@ export async function realizeExecutionWorkspace(input: {
   config: Record<string, unknown>;
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
+  /** DUR-5184: names the private branch of a run that has no issue (`run-<shortRunId>`). */
+  runId?: string | null;
   recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RealizedExecutionWorkspace> {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
   const strategyType = asString(rawStrategy.type, "project_primary");
   if (strategyType !== "git_worktree") {
+    const sharedWarnings = await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd);
+    if (!input.issue) {
+      sharedWarnings.push(
+        "This run has no issue and is working in the project's shared checkout, which other runs may also use. Do not commit or reset there; set requireIsolation on the project policy to give every run its own worktree.",
+      );
+    }
     return {
       ...input.base,
       strategy: "project_primary",
       cwd: input.base.baseCwd,
       branchName: null,
       worktreePath: null,
-      warnings: await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd),
+      warnings: sharedWarnings,
       created: false,
       baseRefSha: null,
     };
@@ -1706,7 +1720,10 @@ export async function realizeExecutionWorkspace(input: {
 
   const repoRoot = await resolveGitOwnerRepoRoot(input.base.baseCwd);
   const branchTemplate = asString(rawStrategy.branchTemplate, "{{issue.identifier}}-{{slug}}");
-  const renderedBranch = renderWorkspaceTemplate(branchTemplate, {
+  // DUR-5184: a run without an issue has no identifier to put in the branch name,
+  // so the template used to render a shared "issue" branch/folder. Give it its own.
+  const runScopedBranch = !input.issue ? runScopedBranchName(input.runId) : null;
+  const renderedBranch = runScopedBranch ?? renderWorkspaceTemplate(branchTemplate, {
     issue: input.issue,
     agent: input.agent,
     projectId: input.base.projectId,

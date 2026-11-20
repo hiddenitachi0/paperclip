@@ -40,6 +40,7 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
     typeof parsed.defaultProjectWorkspaceId === "string" ? parsed.defaultProjectWorkspaceId : undefined;
   const allowIssueOverride =
     typeof parsed.allowIssueOverride === "boolean" ? parsed.allowIssueOverride : undefined;
+  const requireIsolation = parsed.requireIsolation === true;
   const normalizedDefaultMode = (() => {
     if (
       defaultMode === "shared_workspace" ||
@@ -57,6 +58,7 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
     enabled,
     ...(normalizedDefaultMode ? { defaultMode: normalizedDefaultMode } : {}),
     ...(allowIssueOverride !== undefined ? { allowIssueOverride } : {}),
+    ...(requireIsolation ? { requireIsolation: true } : {}),
     ...(defaultProjectWorkspaceId ? { defaultProjectWorkspaceId } : {}),
     ...(workspaceStrategy ? { workspaceStrategy } : {}),
     ...(parsed.workspaceRuntime && typeof parsed.workspaceRuntime === "object" && !Array.isArray(parsed.workspaceRuntime)
@@ -84,8 +86,17 @@ export function gateProjectExecutionWorkspacePolicy(
   projectPolicy: ProjectExecutionWorkspacePolicy | null,
   isolatedWorkspacesEnabled: boolean,
 ): ProjectExecutionWorkspacePolicy | null {
-  if (!isolatedWorkspacesEnabled) return null;
+  // DUR-5184: requireIsolation is an operator's safety setting, not an
+  // experiment, so it survives the experimental flag being off.
+  if (!isolatedWorkspacesEnabled) {
+    return projectPolicy?.requireIsolation ? projectPolicy : null;
+  }
   return projectPolicy;
+}
+
+/** True when the project demands a private git worktree for every run. */
+export function projectRequiresIsolation(projectPolicy: ProjectExecutionWorkspacePolicy | null): boolean {
+  return projectPolicy?.requireIsolation === true;
 }
 
 export function parseIssueExecutionWorkspaceSettings(raw: unknown): IssueExecutionWorkspaceSettings | null {
@@ -155,6 +166,7 @@ export function resolveExecutionWorkspaceEnvironmentId(input: {
 export function defaultIssueExecutionWorkspaceSettingsForProject(
   projectPolicy: ProjectExecutionWorkspacePolicy | null,
 ): IssueExecutionWorkspaceSettings | null {
+  if (projectRequiresIsolation(projectPolicy)) return { mode: "isolated_workspace" };
   if (!projectPolicy?.enabled) return null;
   return {
     mode:
@@ -188,6 +200,9 @@ export function resolveExecutionWorkspaceMode(input: {
   issueSettings: IssueExecutionWorkspaceSettings | null;
   legacyUseProjectWorkspace: boolean | null;
 }): ParsedExecutionWorkspaceMode {
+  // DUR-5184: wins over the issue's own setting, the project default and the
+  // legacy per-assignee opt-out.
+  if (projectRequiresIsolation(input.projectPolicy)) return "isolated_workspace";
   const issueMode = input.issueSettings?.mode;
   if (issueMode && issueMode !== "inherit" && issueMode !== "reuse_existing") {
     return issueMode;
@@ -214,7 +229,8 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   issueProjectWorkspaceId?: string | null;
 }): Record<string, unknown> {
   const nextConfig = { ...input.agentConfig };
-  const projectHasPolicy = Boolean(input.projectPolicy?.enabled);
+  const requireIsolation = projectRequiresIsolation(input.projectPolicy);
+  const projectHasPolicy = Boolean(input.projectPolicy?.enabled) || requireIsolation;
   const issueHasWorkspaceOverrides = Boolean(
     input.issueSettings?.mode ||
     input.issueSettings?.workspaceStrategy ||
@@ -224,11 +240,18 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
 
   if (hasWorkspaceControl) {
     if (input.mode === "isolated_workspace") {
-      const strategy =
+      const candidate =
         input.issueSettings?.workspaceStrategy ??
         input.projectPolicy?.workspaceStrategy ??
         parseExecutionWorkspaceStrategy(nextConfig.workspaceStrategy) ??
         ({ type: "git_worktree" } satisfies ExecutionWorkspaceStrategy);
+      // A required-isolation project can never end up on the shared checkout,
+      // even if a stored strategy says project_primary: keep its worktree
+      // settings (baseRef, branchTemplate, provisionCommand) but force the type.
+      const strategy: ExecutionWorkspaceStrategy =
+        requireIsolation && candidate.type !== "git_worktree"
+          ? { ...candidate, type: "git_worktree" }
+          : candidate;
       nextConfig.workspaceStrategy = strategy as unknown as Record<string, unknown>;
     } else {
       delete nextConfig.workspaceStrategy;

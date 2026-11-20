@@ -88,4 +88,62 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     await db.update(companies).set({ worktreeCleanupRetentionDays: 1 });
     expect(await names()).toEqual(["cancelled-old", "done-old", "done-recent"]);
   });
+
+  it("selects idle worktrees of done/cancelled/in_review tasks for the merged pass, never open ones (DUR-5184)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+
+    const cases: Array<{ key: string; status: string; idleMinutes: number }> = [
+      { key: "review-idle", status: "in_review", idleMinutes: 120 },
+      { key: "done-just-now", status: "done", idleMinutes: 120 },
+      { key: "review-busy", status: "in_review", idleMinutes: 5 },
+      { key: "progress-idle", status: "in_progress", idleMinutes: 600 },
+      { key: "blocked-idle", status: "blocked", idleMinutes: 600 },
+      { key: "todo-idle", status: "todo", idleMinutes: 600 },
+    ];
+    for (const c of cases) {
+      const wsId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: c.key, status: "active", providerType: "local_fs", sourceIssueId: null,
+        cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.key}`, branchName: c.key,
+        lastUsedAt: new Date(now.getTime() - c.idleMinutes * 60_000),
+      });
+      await db.insert(issues).values({
+        id: randomUUID(), companyId, title: c.key, status: c.status, executionWorkspaceId: wsId,
+        completedAt: c.status === "done" ? now : null,
+      });
+    }
+    const deps = createDbWorktreeCleanupDeps(db);
+    const merged = await deps.listMergedCandidates!(now);
+    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["done-just-now", "review-idle"]);
+    expect(merged.every((c) => c.mode === "merged_pr")).toBe(true);
+    // The retention-days pass is unchanged: the 'done' task was completed just now, so it is not eligible yet.
+    expect(await deps.listCandidates(now, 7)).toEqual([]);
+  });
+
+  it("makes an idle issue-less run-<id> worktree eligible after the retention period, and nothing else without an issue (DUR-5184)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    for (const [branch, ageDays] of [["run-aaaa1111", 10], ["run-bbbb2222", 2], ["hand-made", 400]] as const) {
+      await db.insert(executionWorkspaces).values({
+        id: randomUUID(), companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: branch, status: "active", providerType: "local_fs",
+        cwd: `/paperclip/x/repo/.paperclip/worktrees/${branch}`, branchName: branch,
+        lastUsedAt: new Date(now.getTime() - ageDays * DAY),
+      });
+    }
+    const deps = createDbWorktreeCleanupDeps(db);
+    const found = await deps.listCandidates(now, 7);
+    expect(found.map((c) => c.branchName)).toEqual(["run-aaaa1111"]);
+    expect(found[0]!.flagIssueId).toBeNull();
+    // Keeping it must not throw for lack of an issue to comment on.
+    await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBeUndefined();
+  });
 });

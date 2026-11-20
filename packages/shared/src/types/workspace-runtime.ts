@@ -149,6 +149,12 @@ export interface ProjectExecutionWorkspacePolicy {
   enabled: boolean;
   defaultMode?: ProjectExecutionWorkspaceDefaultMode;
   allowIssueOverride?: boolean;
+  /**
+   * DUR-5184: when true every run of the project gets its own git worktree
+   * (never the shared project checkout), whatever the issue or the default mode
+   * says, and whether or not the experimental isolated-workspaces flag is on.
+   */
+  requireIsolation?: boolean;
   defaultProjectWorkspaceId?: string | null;
   environmentId?: string | null;
   workspaceStrategy?: ExecutionWorkspaceStrategy | null;

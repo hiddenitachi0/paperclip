@@ -12653,6 +12653,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           base: executionWorkspaceBase,
           config: hostExecutionWorkspaceConfig,
           issue: issueRef,
+          runId: run.id,
           agent: {
             id: agent.id,
             name: agent.name,

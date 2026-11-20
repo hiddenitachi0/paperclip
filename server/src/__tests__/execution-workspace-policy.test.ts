@@ -280,4 +280,104 @@ describe("execution workspace policy helpers", () => {
       ),
     ).toEqual({ enabled: true, defaultMode: "isolated_workspace" });
   });
+
+  describe("requireIsolation (DUR-5184)", () => {
+    const required = { enabled: true, defaultMode: "shared_workspace", requireIsolation: true } as const;
+
+    it("parses requireIsolation and drops anything that is not literally true", () => {
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true, requireIsolation: true })).toMatchObject({
+        requireIsolation: true,
+      });
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true, requireIsolation: "true" })).not.toHaveProperty(
+        "requireIsolation",
+      );
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true })).not.toHaveProperty("requireIsolation");
+    });
+
+    it("keeps the policy when the experimental flag is off, and still drops an ordinary one", () => {
+      expect(gateProjectExecutionWorkspacePolicy(required, false)).toEqual(required);
+      expect(gateProjectExecutionWorkspacePolicy({ enabled: true, defaultMode: "isolated_workspace" }, false)).toBeNull();
+    });
+
+    it("forces isolated_workspace over the project default, the issue setting and the legacy opt-out", () => {
+      expect(
+        resolveExecutionWorkspaceMode({ projectPolicy: required, issueSettings: null, legacyUseProjectWorkspace: null }),
+      ).toBe("isolated_workspace");
+      for (const mode of ["shared_workspace", "operator_branch", "agent_default"] as const) {
+        expect(
+          resolveExecutionWorkspaceMode({
+            projectPolicy: required,
+            issueSettings: { mode },
+            legacyUseProjectWorkspace: false,
+          }),
+        ).toBe("isolated_workspace");
+      }
+    });
+
+    it("applies even when the policy is not otherwise enabled", () => {
+      expect(
+        resolveExecutionWorkspaceMode({
+          projectPolicy: { enabled: false, requireIsolation: true },
+          issueSettings: null,
+          legacyUseProjectWorkspace: null,
+        }),
+      ).toBe("isolated_workspace");
+    });
+
+    it("defaults new issues of the project to isolated_workspace", () => {
+      expect(defaultIssueExecutionWorkspaceSettingsForProject(required)).toEqual({ mode: "isolated_workspace" });
+    });
+
+    it("forces the git_worktree strategy over a stored project_primary one but keeps its worktree settings", () => {
+      const config = buildExecutionWorkspaceAdapterConfig({
+        agentConfig: {},
+        projectPolicy: {
+          ...required,
+          workspaceStrategy: { type: "project_primary", baseRef: "origin/custom", provisionCommand: "bash ./setup.sh" },
+        },
+        issueSettings: { mode: "shared_workspace", workspaceStrategy: { type: "project_primary" } },
+        mode: "isolated_workspace",
+        legacyUseProjectWorkspace: null,
+      });
+      expect(config.workspaceStrategy).toEqual({ type: "git_worktree" });
+      const keeps = buildExecutionWorkspaceAdapterConfig({
+        agentConfig: {},
+        projectPolicy: {
+          ...required,
+          workspaceStrategy: { type: "project_primary", baseRef: "origin/custom", provisionCommand: "bash ./setup.sh" },
+        },
+        issueSettings: null,
+        mode: "isolated_workspace",
+        legacyUseProjectWorkspace: null,
+      });
+      expect(keeps.workspaceStrategy).toEqual({
+        type: "git_worktree",
+        baseRef: "origin/custom",
+        provisionCommand: "bash ./setup.sh",
+      });
+    });
+
+    it("gives the Nordstrand policy (shared_workspace + project_primary) a worktree once required", () => {
+      const nordstrand = {
+        enabled: true,
+        defaultMode: "shared_workspace",
+        workspaceStrategy: { type: "project_primary" },
+      } as const;
+      const mode = resolveExecutionWorkspaceMode({
+        projectPolicy: { ...nordstrand, requireIsolation: true },
+        issueSettings: null,
+        legacyUseProjectWorkspace: null,
+      });
+      expect(mode).toBe("isolated_workspace");
+      expect(
+        buildExecutionWorkspaceAdapterConfig({
+          agentConfig: {},
+          projectPolicy: { ...nordstrand, requireIsolation: true },
+          issueSettings: null,
+          mode,
+          legacyUseProjectWorkspace: null,
+        }).workspaceStrategy,
+      ).toMatchObject({ type: "git_worktree" });
+    });
+  });
 });
