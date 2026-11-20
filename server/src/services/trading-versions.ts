@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { approvals, tradingLedgerEntries, tradingStrategies, tradingStrategyVersions, withCompanyScope, type Db } from "@paperclipai/db";
 import {
+  TRADER_LEDGER_REASONS,
   TRADING_NOT_TESTED_ON_PAST_DATA,
   TRADING_STRATEGY_VERSION_APPROVAL_KIND,
   canonicalTradingJson,
@@ -16,6 +17,7 @@ import {
   tradingRuleBookSchema,
   tradingRuleConfigSchema,
   tradingRuleVersionLabel,
+  tradingSizeIncreases,
   tradingStrategySpecSchema,
   type TradingRuleBook,
   type TradingRuleBookInput,
@@ -127,9 +129,26 @@ export interface ProposeVersionOptions {
   note?: TradingProposalNote;
   /** Refuse when this many agent proposals were already filed for the strategy in the last 24 hours. */
   agentProposalsPerDay?: number;
+  /** DUR-5019: the same, across every strategy of the company (cards and applied changes together). Counted under a company-wide lock. */
+  agentProposalsPerCompanyPerDay?: number;
+  /** DUR-5019: an agent's proposal may not make the strategy bigger within this many days of a safety stop. */
+  sizeFreezeDays?: number;
   /** DUR-5018: facts about the experiment the proposal cites, shown on the card. Like the note, never compared and never acted on. */
   experiment?: Record<string, unknown>;
 }
+
+export interface ApplyAgentVersionInput {
+  spec: TradingStrategySpec;
+  guidelines: string;
+  /** The version the experiment was run on. Applying is refused unless it is still the live version, checked under the strategy's lock. */
+  expectedActiveVersionId: string;
+  experimentId: string;
+  agentId: string;
+  note: TradingProposalNote;
+  limits: { proposalsPerCompanyPerDay: number; appliesPerStrategyPerDay: number; appliesPerCompanyPerDay: number; sizeFreezeDays: number };
+}
+
+export type ApplyAgentVersionResult = { outcome: "applied"; version: TradingStrategyVersionRow; previousVersionId: string | null } | { outcome: "unchanged"; version: TradingStrategyVersionRow };
 
 function tradingVersionCardTitle(strategyName: string, versionNumber: number): string {
   return `Trading strategy "${strategyName}": new rules (version ${versionNumber})`;
@@ -204,6 +223,76 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         throw unprocessable(`An agent can only tighten the risk limits, never loosen them. These would be looser: ${loosened.join(", ")}.`, { loosened });
       }
     }
+  }
+
+  // ─── The Trader's limits (DUR-5019) ────────────────────────────────────
+
+  /** When the strategy last hit a safety stop (a drawdown or loss limit, or a data breaker) within `days` days, else null. */
+  async function lastSafetyStopAt(handle: Db, companyId: string, strategyId: string, days: number): Promise<Date | null> {
+    const since = new Date(nowOf().getTime() - days * 86_400_000);
+    const [row] = await handle
+      .select({ createdAt: tradingLedgerEntries.createdAt })
+      .from(tradingLedgerEntries)
+      .where(
+        and(
+          eq(tradingLedgerEntries.companyId, companyId),
+          eq(tradingLedgerEntries.strategyId, strategyId),
+          eq(tradingLedgerEntries.eventType, "circuit_breaker"),
+          gte(tradingLedgerEntries.createdAt, since),
+        ),
+      )
+      .orderBy(desc(tradingLedgerEntries.createdAt))
+      .limit(1);
+    return row?.createdAt ?? null;
+  }
+
+  /** No agent change may make a strategy bigger within `days` days of one of its safety stops. A change that does not make it bigger is never blocked here. */
+  async function assertNoSizeIncreaseAfterStop(handle: Db, companyId: string, strategyId: string, activeSpec: TradingStrategySpec | null, spec: TradingStrategySpec, days: number) {
+    if (!activeSpec) return;
+    const increases = tradingSizeIncreases(activeSpec, spec);
+    if (increases.length === 0) return;
+    const stopAt = await lastSafetyStopAt(handle, companyId, strategyId, days);
+    if (stopAt) {
+      throw unprocessable(
+        `This strategy hit a safety stop on ${stopAt.toISOString().slice(0, 10)}, and an agent may not make a strategy bigger for ${days} days after one. These would be bigger: ${increases.join(", ")}.`,
+        { reason: "trader_size_freeze", increases, stopAt: stopAt.toISOString(), days },
+      );
+    }
+  }
+
+  /** Serialises the Trader's changes for one company, so two strategies cannot both slip under a company-wide cap. Transaction-scoped. */
+  async function lockTraderChanges(tx: Db, companyId: string) {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`trader_changes:${companyId}`}))`);
+  }
+
+  async function countAgentVersionsLastDay(tx: Db, companyId: string, strategyId?: string): Promise<number> {
+    const [row] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(tradingStrategyVersions)
+      .where(
+        and(
+          eq(tradingStrategyVersions.companyId, companyId),
+          ...(strategyId ? [eq(tradingStrategyVersions.strategyId, strategyId)] : []),
+          eq(tradingStrategyVersions.proposedByType, "agent"),
+          sql`${tradingStrategyVersions.createdAt} > now() - interval '24 hours'`,
+        ),
+      );
+    return row?.n ?? 0;
+  }
+
+  async function countAppliedLastDay(tx: Db, companyId: string, strategyId?: string): Promise<number> {
+    const [row] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(tradingStrategyVersions)
+      .where(
+        and(
+          eq(tradingStrategyVersions.companyId, companyId),
+          ...(strategyId ? [eq(tradingStrategyVersions.strategyId, strategyId)] : []),
+          sql`${tradingStrategyVersions.appliedByAgentId} IS NOT NULL`,
+          sql`${tradingStrategyVersions.createdAt} > now() - interval '24 hours'`,
+        ),
+      );
+    return row?.n ?? 0;
   }
 
   // ─── Reads ─────────────────────────────────────────────────────────────
@@ -387,6 +476,9 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
     assertFitsStrategy(strategy, book.spec, activeSpec, proposer);
     const digest = tradingRuleBookDigest(book);
     if (digest === active.specDigest) return { outcome: "unchanged", version: active };
+    if (proposer.type === "agent" && options.sizeFreezeDays !== undefined) {
+      await assertNoSizeIncreaseAfterStop(db, companyId, strategyId, activeSpec, book.spec, options.sizeFreezeDays);
+    }
 
     return inTransaction(companyId, async (tx) => {
       const locked = await requireStrategy(tx, companyId, strategyId, true);
@@ -405,12 +497,17 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
       }
       const at = nowOf();
       // Counted under the strategy row's lock, so two proposals at once cannot both slip under the cap.
+      if (proposer.type === "agent" && options.agentProposalsPerCompanyPerDay !== undefined) {
+        await lockTraderChanges(tx, companyId);
+        if ((await countAgentVersionsLastDay(tx, companyId)) >= options.agentProposalsPerCompanyPerDay) {
+          throw tooManyRequests(`At most ${options.agentProposalsPerCompanyPerDay} rule changes can be proposed or applied across all strategies per day, and that many were already made in the last 24 hours. Try again tomorrow.`, {
+            reason: "trader_proposal_company_daily_cap",
+          });
+        }
+      }
       if (proposer.type === "agent" && options.agentProposalsPerDay !== undefined) {
-        const [recent] = await tx
-          .select({ n: sql<number>`count(*)::int` })
-          .from(tradingStrategyVersions)
-          .where(and(eq(tradingStrategyVersions.strategyId, strategyId), eq(tradingStrategyVersions.proposedByType, "agent"), sql`${tradingStrategyVersions.createdAt} > now() - interval '24 hours'`));
-        if ((recent?.n ?? 0) >= options.agentProposalsPerDay) {
+        const recentCount = await countAgentVersionsLastDay(tx, companyId, strategyId);
+        if (recentCount >= options.agentProposalsPerDay) {
           throw tooManyRequests(`At most ${options.agentProposalsPerDay} rule changes can be proposed for one strategy per day, and that many were already filed in the last 24 hours. Try again tomorrow.`, {
             reason: "trader_proposal_daily_cap",
           });
@@ -472,6 +569,128 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
         detail: { reason: "strategy_version_proposed", versionId: stored.id, versionNumber: stored.version, specDigest: digest, proposedBy: proposer, approvalId: card!.id, ...(options.note ? { note: options.note } : {}), ...(options.experiment ? { experimentId: options.experiment.experimentId } : {}) },
       });
       return { outcome: "drafted" as const, version: (await loadVersion(tx, companyId, stored.id))!, approvalId: card!.id };
+    });
+  }
+
+  // ─── Applying (DUR-5019 / DUR-5145) ────────────────────────────────────
+
+  /**
+   * The ONE way a version becomes live without a person's card: the Trader
+   * applies a finished experiment's recommendation to a PAPER strategy.
+   *
+   * The caller (trading-trader.ts) has already judged the experiment (it
+   * succeeded, recommended exactly `spec`, passed every required check at
+   * double fees, is fresh). This function re-checks what can only be checked
+   * under the strategy's lock, and refuses:
+   *   - any strategy that is not a paper strategy (the database also only
+   *     allows 'paper' today);
+   *   - the live version having changed since the experiment ran;
+   *   - any loosened risk limit, any bigger size within the size-freeze days of
+   *     a safety stop (the agent rules of proposeVersion, unchanged);
+   *   - a person's open proposal for the strategy (never cancelled by an agent);
+   *   - the per-strategy and company-wide daily caps (counted under a
+   *     company-wide lock).
+   * It never touches an order, a wallet, a key or the strategy's status. The
+   * version row records who applied it and on which experiment (the database
+   * accepts an approved version without a person only with both), and the
+   * ledger gets a note the daily summary reads.
+   */
+  async function applyAgentVersion(companyId: string, strategyId: string, input: ApplyAgentVersionInput): Promise<ApplyAgentVersionResult> {
+    const strategyRow = await requireStrategy(db, companyId, strategyId);
+    const { version: active } = await ensureActiveVersion(strategyRow);
+    const parsed = tradingRuleBookSchema.safeParse({ spec: input.spec, guidelines: input.guidelines });
+    if (!parsed.success) {
+      throw unprocessable("These rules are not valid.", { issues: parsed.error.issues.slice(0, 20).map((i) => ({ path: i.path.join("."), message: i.message })) });
+    }
+    const book = parsed.data;
+    const digest = tradingRuleBookDigest(book);
+    if (digest === active.specDigest) return { outcome: "unchanged", version: active };
+    return inTransaction(companyId, async (tx) => {
+      const locked = await requireStrategy(tx, companyId, strategyId, true);
+      if (locked.mode !== "paper") {
+        throw unprocessable("The Trader may only apply changes to paper strategies. This one is not a paper strategy; file a proposal card instead.", { reason: "trader_apply_paper_only" });
+      }
+      if (!locked.activeVersionId || locked.activeVersionId !== input.expectedActiveVersionId) {
+        throw unprocessable("That experiment was run on rules that are no longer the live rules. Run a new experiment on the live rules.", { code: "trading_experiment_stale", reason: "trading_experiment_stale" });
+      }
+      const liveRow = await loadVersion(tx, companyId, locked.activeVersionId);
+      if (!liveRow || liveRow.status !== "approved") throw unprocessable("The strategy has no live rules to change.", { reason: "trader_apply_no_live_version" });
+      const liveSpec = parseSpec(liveRow);
+      if (liveRow.specDigest === digest) return { outcome: "unchanged" as const, version: liveRow };
+      assertFitsStrategy(locked, book.spec, liveSpec, { type: "agent" });
+      await assertNoSizeIncreaseAfterStop(tx, companyId, strategyId, liveSpec, book.spec, input.limits.sizeFreezeDays);
+      const openDrafts = await tx
+        .select()
+        .from(tradingStrategyVersions)
+        .where(and(eq(tradingStrategyVersions.strategyId, strategyId), eq(tradingStrategyVersions.status, "draft")));
+      if (openDrafts.some((d) => d.proposedByType !== "agent")) {
+        throw conflict("A person's proposal for this strategy is waiting for a decision. Wait for it to be approved or rejected before applying a change.", { reason: "person_proposal_pending" });
+      }
+      await lockTraderChanges(tx, companyId);
+      if ((await countAgentVersionsLastDay(tx, companyId)) >= input.limits.proposalsPerCompanyPerDay) {
+        throw tooManyRequests(`At most ${input.limits.proposalsPerCompanyPerDay} rule changes can be proposed or applied across all strategies per day, and that many were already made in the last 24 hours. Try again tomorrow.`, {
+          reason: "trader_proposal_company_daily_cap",
+        });
+      }
+      if ((await countAppliedLastDay(tx, companyId, strategyId)) >= input.limits.appliesPerStrategyPerDay) {
+        throw tooManyRequests(`At most ${input.limits.appliesPerStrategyPerDay} change can be applied to one strategy per day, and one already was in the last 24 hours. Try again tomorrow.`, { reason: "trader_apply_strategy_daily_cap" });
+      }
+      if ((await countAppliedLastDay(tx, companyId)) >= input.limits.appliesPerCompanyPerDay) {
+        throw tooManyRequests(`At most ${input.limits.appliesPerCompanyPerDay} changes can be applied across all strategies per day, and that many already were in the last 24 hours. Try again tomorrow.`, { reason: "trader_apply_company_daily_cap" });
+      }
+      const at = nowOf();
+      // An agent's own open draft (and its card) is replaced, exactly as a newer proposal would replace it.
+      for (const draft of openDrafts) {
+        await tx.update(tradingStrategyVersions).set({ status: "superseded", supersededAt: at, updatedAt: at }).where(eq(tradingStrategyVersions.id, draft.id));
+        if (draft.approvalId) {
+          await tx
+            .update(approvals)
+            .set({ status: "cancelled", decisionNote: "Replaced by a change the Trader applied after testing it on past data.", decidedAt: at, updatedAt: at })
+            .where(and(eq(approvals.id, draft.approvalId), inArray(approvals.status, ["pending", "revision_requested"])));
+        }
+      }
+      const [maxRow] = await tx
+        .select({ max: sql<number>`coalesce(max(${tradingStrategyVersions.version}), 0)::int` })
+        .from(tradingStrategyVersions)
+        .where(eq(tradingStrategyVersions.strategyId, strategyId));
+      const [draft] = await tx
+        .insert(tradingStrategyVersions)
+        .values({
+          companyId,
+          strategyId,
+          version: (maxRow?.max ?? 0) + 1,
+          spec: book.spec,
+          guidelines: book.guidelines,
+          status: "draft",
+          proposedByType: "agent",
+          proposedById: input.agentId,
+          appliedByAgentId: input.agentId,
+          appliedExperimentId: input.experimentId,
+          specDigest: digest,
+          grandfathered: false,
+        })
+        .returning();
+      const stored = draft!;
+      await writeActivation(tx, locked, stored, null, at, "applied by the Trader after a passed past-data experiment", false);
+      await tx.insert(tradingLedgerEntries).values({
+        companyId,
+        strategyId,
+        strategyVersionId: stored.id,
+        eventType: "reconciliation",
+        detail: {
+          reason: TRADER_LEDGER_REASONS.applied,
+          versionId: stored.id,
+          versionNumber: stored.version,
+          previousVersionId: locked.activeVersionId,
+          previousVersionNumber: liveRow.version,
+          specDigest: digest,
+          appliedByAgentId: input.agentId,
+          experimentId: input.experimentId,
+          changes: tradingChangesInWords(liveSpec, book.spec),
+          note: input.note,
+        },
+      });
+      return { outcome: "applied" as const, version: (await loadVersion(tx, companyId, stored.id))!, previousVersionId: locked.activeVersionId };
     });
   }
 
@@ -581,6 +800,7 @@ export function tradingVersionsService(db: Db, deps: TradingVersionsDeps = {}) {
     convertLegacyStrategies,
     createInitialVersion,
     proposeVersion,
+    applyAgentVersion,
     approveFromCard,
     supersedeDraftForCard,
     getCardSource,
