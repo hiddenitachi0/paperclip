@@ -63,6 +63,12 @@ const mockPersonaService = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  // DUR-5249: a merge card with a PR number now needs an owner/name repo and a GitHub head lookup;
+  // this suite is about something else, so keep the lookup off the network.
+  vi.doMock("../services/merge-card-head-commit.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/merge-card-head-commit.js")>()),
+    withResolvedMergePrHeadCommit: async (_db: unknown, _companyId: string, payload: Record<string, unknown>) => payload,
+  }));
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     agentInstructionsService: () => ({ readFile: vi.fn(), writeFile: vi.fn() }),
@@ -563,7 +569,7 @@ describe("approval routes idempotent retries", () => {
         payload: {
           kind: "merge_pr",
           title: "Merge PR #12 — sub-tasks inherit the model and effort you set on a task",
-          repo: "fork",
+          repo: "acme/fork",
           prNumber: 12,
         },
       });
@@ -574,7 +580,7 @@ describe("approval routes idempotent retries", () => {
       expect.objectContaining({
         payload: expect.objectContaining({
           title: "Paperclip Fork Co — sub-tasks inherit the model and effort you set on a task",
-          technicalReference: "Technical reference: fork repo, pull request #12",
+          technicalReference: "Technical reference: acme/fork repo, pull request #12",
         }),
       }),
     );
