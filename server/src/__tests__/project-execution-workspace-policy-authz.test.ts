@@ -20,6 +20,15 @@ describe("collectProjectExecutionWorkspaceCommandPaths", () => {
     ]);
   });
 
+  // DUR-5242
+  it("refuses authorizationPolicy whatever its value", () => {
+    for (const value of [{ protectedAgent: { requiresApproval: true } }, {}, null]) {
+      expect(collectProjectExecutionWorkspaceCommandPaths({ authorizationPolicy: value })).toEqual([
+        "executionWorkspacePolicy.authorizationPolicy",
+      ]);
+    }
+  });
+
   it("still refuses strategy commands and allows ordinary fields", () => {
     expect(
       collectProjectExecutionWorkspaceCommandPaths({
@@ -121,5 +130,31 @@ describe("carryForwardProtectedProjectPolicyFields", () => {
       policy: { enabled: false },
       changedPaths: [],
     });
+  });
+});
+
+// DUR-5242: a stored authorizationPolicy is carried forward for agents; only a different value is refused.
+describe("authorizationPolicy carry-forward", () => {
+  const policy = { protectedAgent: { requiresApproval: true } };
+  const stored = { enabled: true, authorizationPolicy: policy };
+  const path = ["executionWorkspacePolicy.authorizationPolicy"];
+
+  it("keeps it when omitted, null, or {enabled:false}", () => {
+    for (const sent of [{ enabled: true }, null, { enabled: false }]) {
+      const { policy: written, changedPaths } = carryForwardProtectedProjectPolicyFields(sent, stored);
+      expect(changedPaths).toEqual([]);
+      expect((written as any).authorizationPolicy).toEqual(policy);
+    }
+  });
+
+  it("accepts the stored value sent back unchanged", () => {
+    expect(carryForwardProtectedProjectPolicyFields({ ...stored }, stored).changedPaths).toEqual([]);
+  });
+
+  it("flags a rewritten, emptied or nulled policy, and one set where none is stored", () => {
+    for (const sent of [{ protectedAgent: { requiresApproval: false } }, {}, null]) {
+      expect(carryForwardProtectedProjectPolicyFields({ enabled: true, authorizationPolicy: sent }, stored).changedPaths).toEqual(path);
+    }
+    expect(carryForwardProtectedProjectPolicyFields({ enabled: true, authorizationPolicy: policy }, { enabled: true }).changedPaths).toEqual(path);
   });
 });

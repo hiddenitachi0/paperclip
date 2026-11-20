@@ -86,6 +86,12 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
   if (hasOwn(policy, "requireIsolation")) {
     paths.push("executionWorkspacePolicy.requireIsolation");
   }
+  // DUR-5242: authorizationPolicy decides whether assignments into the project need
+  // approval and which trust preset/boundary applies, so only the board (or a plugin)
+  // may set it. On create there is nothing stored, so naming the key at all is refused.
+  if (hasOwn(policy, "authorizationPolicy")) {
+    paths.push("executionWorkspacePolicy.authorizationPolicy");
+  }
   return paths;
 }
 
@@ -94,8 +100,8 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
  * leaves a board-set protected field out (or sends `null`, or `{ enabled: false }`) would wipe
  * it without ever naming it. For agent writes the stored protected fields are carried forward
  * into the new policy instead, and the write is refused only when the agent sends a *different*
- * value. Protected fields: requireIsolation, workspaceRuntime and the strategy
- * provision/teardown commands. Everything else in the policy stays editable.
+ * value. Protected fields: requireIsolation, workspaceRuntime, authorizationPolicy and the
+ * strategy provision/teardown commands. Everything else in the policy stays editable.
  *
  * `changedPaths` lists protected fields the agent set to a value other than the stored one.
  * `policy` is what should be written: the agent's policy plus the carried-forward fields.
@@ -121,13 +127,15 @@ export function carryForwardProtectedProjectPolicyFields(
     carried.requireIsolation = true;
   }
 
-  const storedRuntime = stored.workspaceRuntime ?? null;
-  if (named("workspaceRuntime")) {
-    if (!sameValue(next!.workspaceRuntime, storedRuntime)) {
-      changedPaths.push("executionWorkspacePolicy.workspaceRuntime");
+  // Whole-value fields. authorizationPolicy (DUR-5242) decides whether assignments into the
+  // project need approval, so it is board-only like the host-run workspaceRuntime.
+  for (const key of ["workspaceRuntime", "authorizationPolicy"] as const) {
+    const storedValue = stored[key] ?? null;
+    if (named(key)) {
+      if (!sameValue(next![key], storedValue)) changedPaths.push(`executionWorkspacePolicy.${key}`);
+    } else if (storedValue !== null) {
+      carried[key] = storedValue;
     }
-  } else if (storedRuntime !== null) {
-    carried.workspaceRuntime = storedRuntime;
   }
 
   const storedStrategy = isRecord(stored.workspaceStrategy) ? stored.workspaceStrategy : null;

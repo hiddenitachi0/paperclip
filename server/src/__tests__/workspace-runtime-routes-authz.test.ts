@@ -431,6 +431,72 @@ describe.sequential("workspace runtime service route authorization", () => {
     }
   }, 15000);
 
+  describe("project authorizationPolicy is board-only (DUR-5242)", () => {
+    const agent = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    };
+    const policy = { protectedAgent: { requiresApproval: true } };
+    const storedProject = () => ({
+      ...buildProject(),
+      executionWorkspacePolicy: { enabled: true, authorizationPolicy: policy },
+    });
+
+    it("keeps a stored policy when an agent omits it, sends null, or sends it back unchanged", async () => {
+      for (const sent of [{ enabled: true }, null, { enabled: false }, { enabled: true, authorizationPolicy: policy }]) {
+        mockProjectService.update.mockClear();
+        mockProjectService.getById.mockResolvedValue(storedProject());
+        mockProjectService.update.mockResolvedValue(buildProject());
+        const app = await createProjectApp(agent);
+        const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+        expect(res.status).toBe(200);
+        expect(mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy.authorizationPolicy).toEqual(policy);
+      }
+    }, 20000);
+
+    it("refuses an agent project PATCH that rewrites or nulls a stored policy, and writes nothing", async () => {
+      for (const sentPolicy of [{ protectedAgent: { requiresApproval: false } }, null]) {
+        mockProjectService.update.mockClear();
+        mockProjectService.getById.mockResolvedValue(storedProject());
+        const app = await createProjectApp(agent);
+        const res = await request(app)
+          .patch(`/api/projects/${projectId}`)
+          .send({ executionWorkspacePolicy: { enabled: true, authorizationPolicy: sentPolicy } });
+        expect(res.status).toBe(403);
+        expect(res.body.error).toContain("authorizationPolicy");
+        expect(res.body.error).toContain("settings only the board can change");
+        expect(mockProjectService.update).not.toHaveBeenCalled();
+      }
+    }, 20000);
+
+    it("refuses an agent project create that names authorizationPolicy", async () => {
+      const app = await createProjectApp(agent);
+      const res = await request(app)
+        .post("/api/companies/11111111-1111-4111-8111-111111111111/projects")
+        .send({ name: "X", executionWorkspacePolicy: { enabled: true, authorizationPolicy: policy } });
+      expect(res.status).toBe(403);
+      expect(mockProjectService.create).not.toHaveBeenCalled();
+    });
+
+    it("lets a board user rewrite or clear it", async () => {
+      mockProjectService.getById.mockResolvedValue(storedProject());
+      mockProjectService.update.mockResolvedValue(buildProject());
+      const app = await createProjectApp({
+        type: "board",
+        userId: "board-1",
+        companyIds: ["11111111-1111-4111-8111-111111111111"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: { enabled: true } });
+      expect(res.status).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalled();
+    });
+  });
+
   it("rejects agent callers that update project workspace cleanup commands", async () => {
     mockProjectService.getById.mockResolvedValue(buildProject());
     const app = await createProjectApp({
