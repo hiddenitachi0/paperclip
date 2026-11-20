@@ -155,8 +155,6 @@ describe("withResolvedMergePrHeadCommit (card creation)", () => {
     ["only a url", { url: "https://github.com/o/r/pull/753" }],
     ["a '#'-prefixed prNumber", { repo: "o/r", prNumber: "#753" }],
     ["prNumber 0", { repo: "o/r", prNumber: 0 }],
-    ["a repo without an owner/name split", { repo: "o-r", prNumber: 753 }],
-    ["a repo with extra path segments", { repo: "o/r/x", prNumber: 753 }],
   ])("drops a filer-named commit when the card has %s", async (_label, extra) => {
     const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
     const fetchImpl = vi.fn();
@@ -168,6 +166,25 @@ describe("withResolvedMergePrHeadCommit (card creation)", () => {
       { fetchImpl },
     );
     expect(payload.commit).toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // DUR-5249: a pull request number with a repo that is not owner/name (e.g. "fork") cannot be
+  // looked up, so the card is refused rather than stored without a commit.
+  it.each([
+    ["a vague repo name", { repo: "fork", prNumber: 757 }],
+    ["no repo", { prNumber: 757 }],
+    ["extra path segments", { repo: "o/r/x", prNumber: 757 }],
+  ])("refuses a card with a pull request number and %s", async (_label, extra) => {
+    const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    const fetchImpl = vi.fn();
+    await expect(
+      withResolvedMergePrHeadCommit({} as any, "company-a", { kind: "merge_pr", ...extra, commit: "abcdef1234" }, { fetchImpl }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        "This card does not say which GitHub repository the pull request is in. Use owner/name, for example hiddenitachi0/paperclip.",
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

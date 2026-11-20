@@ -83,6 +83,9 @@ function isIdentifiablePullRequest(payload: Record<string, unknown>): boolean {
 export const MERGE_CARD_HEAD_UNREADABLE_MESSAGE =
   "Could not read this pull request's latest commit from GitHub. Try again in a minute, or include the commit.";
 
+export const MERGE_CARD_REPO_UNKNOWN_MESSAGE =
+  "This card does not say which GitHub repository the pull request is in. Use owner/name, for example hiddenitachi0/paperclip.";
+
 export function describeStaleMergeCardCommit(named: string, head: string) {
   return `This card names commit ${named}, but the pull request is now at ${head}. File the card for ${head}.`;
 }
@@ -107,6 +110,11 @@ export async function withResolvedMergePrHeadCommit(
   if (payload.kind !== "merge_pr") return payload;
   const prNumber =
     typeof payload.prNumber === "number" || typeof payload.prNumber === "string" ? Number(payload.prNumber) : NaN;
+  if (Number.isFinite(prNumber) && prNumber > 0 && !parseRepo(payload.repo)) {
+    // DUR-5249: the caller fills `repo` from the project's workspace first; if it still is not
+    // owner/name, the head cannot be looked up, and a card is never stored without a commit.
+    throw unprocessable(MERGE_CARD_REPO_UNKNOWN_MESSAGE, { reason: "merge_card_repo_unknown" });
+  }
   if (!parseRepo(payload.repo) || !Number.isFinite(prNumber) || prNumber <= 0) {
     const { commit: _unverifiedCommit, ...withoutCommit } = payload;
     return withoutCommit;

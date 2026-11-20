@@ -1552,6 +1552,41 @@ async function resolveProjectPrimaryRepo(
 }
 
 /**
+ * DUR-5249: a merge card filed with a PR number but a vague `repo` ("fork") cannot have its head
+ * commit looked up. Fill `repo` from the project's primary GitHub workspace (the card's project),
+ * else from the company's only GitHub workspace repo. Anything else is left alone, and
+ * `withResolvedMergePrHeadCommit` then refuses the card -- a card is never stored without a commit.
+ */
+async function fillMergePrRepoFromWorkspace(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  payload: Record<string, unknown>,
+) {
+  if (payload.kind !== "merge_pr") return;
+  const prNumber =
+    typeof payload.prNumber === "number" || typeof payload.prNumber === "string" ? Number(payload.prNumber) : NaN;
+  if (!Number.isFinite(prNumber) || prNumber <= 0) return;
+  const repo = typeof payload.repo === "string" ? payload.repo.trim().split("/") : [];
+  if (repo.length === 2 && repo[0] && repo[1]) return;
+  const projectId = await resolveProjectIdForIssues(db, companyId, issueIds);
+  let resolved = projectId ? await resolveProjectPrimaryRepo(db, companyId, projectId) : null;
+  if (!resolved) {
+    const rows = await db
+      .select({ repoUrl: projectWorkspaces.repoUrl })
+      .from(projectWorkspaces)
+      .where(eq(projectWorkspaces.companyId, companyId));
+    const distinct = new Map<string, { owner: string; name: string }>();
+    for (const row of rows) {
+      const parsed = parseGitHubRepoFromUrl(row.repoUrl);
+      if (parsed) distinct.set(`${parsed.owner}/${parsed.name}`.toLowerCase(), parsed);
+    }
+    if (distinct.size === 1) resolved = [...distinct.values()][0];
+  }
+  if (resolved) payload.repo = `${resolved.owner}/${resolved.name}`;
+}
+
+/**
  * DUR-252 security review finding #1: `payload.repo`/`payload.prNumber` on a `kind:"merge_pr"`
  * approval are caller-supplied and, before this, never cross-checked against the project's own
  * registered GitHub repo anywhere in the pipeline -- `merge-deploy-visibility.ts` hits whatever
@@ -1669,6 +1704,7 @@ async function normalizeRequestBoardApprovalPayload(
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
   stripUntrustedMergeCommitSha(payload);
+  await fillMergePrRepoFromWorkspace(db, companyId, issueIds, payload);
   await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
   if (payload.kind === "merge_pr") {
     await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
@@ -3279,6 +3315,7 @@ export function approvalRoutes(
         const anchorIssueIds = Array.isArray(existingOriginalIssueIds)
           ? existingOriginalIssueIds.filter((value): value is string => typeof value === "string")
           : [];
+        await fillMergePrRepoFromWorkspace(db, existing.companyId, anchorIssueIds, normalizedPayload);
         await assertMergePrRepoMatchesProject(db, existing.companyId, anchorIssueIds, normalizedPayload);
         // DUR-923: re-validate relevance on resubmit too -- the issue's assignee (or the
         // filer's place in the reporting chain) can change between create and resubmit, and
