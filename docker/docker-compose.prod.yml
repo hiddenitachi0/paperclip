@@ -53,6 +53,14 @@ services:
       DATABASE_BYPASS_URL:
       DATABASE_MIGRATION_URL:
       PAPERCLIP_SERVER_ANTHROPIC_API_KEY:
+      # DUR-5236: finished-task worktree cleanup. It previews by default and removes
+      # nothing until PAPERCLIP_WORKTREE_CLEANUP_LIVE=true is set in the env file.
+      # Bare keys, like the ones above: left out of the container when unset.
+      PAPERCLIP_WORKTREE_CLEANUP_LIVE:
+      PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN:
+      PAPERCLIP_WORKTREE_CLEANUP_ENABLED:
+      PAPERCLIP_WORKTREE_CLEANUP_MAX_REMOVALS:
+      PAPERCLIP_WORKTREE_CLEANUP_MAX_PER_DAY:
     ports: !override
       - "127.0.0.1:3100:3100"
   db:

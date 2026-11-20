@@ -1,6 +1,6 @@
 # Parallel-safe workspaces and shared dependencies
 
-Last updated: 2026-11-20 (DUR-5184).
+Last updated: 2026-11-20 (DUR-5184, DUR-5268).
 
 ## One folder and one branch per run
 
@@ -85,14 +85,72 @@ if [ "$PAPERCLIP_WORKSPACE_CREATED" = "true" ]; then
 fi
 ```
 
-### Shared node_modules cache
+### Shared package store (automatic, pnpm)
 
-Prefer the package manager's content-addressed store: with pnpm, point
-`store-dir` at one folder outside the worktrees (`pnpm config set store-dir
-/paperclip/cache/pnpm-store`) and run `pnpm install --frozen-lockfile --offline`
-in the provision script; a fresh worktree then links instead of downloading.
-Do not symlink one `node_modules` into several worktrees if branches may change
-the lockfile; they would overwrite each other's dependencies.
+Every task folder used to hold its own installed packages and build output
+(127 folders, about 24 GB, one of 1.9 GB). Paperclip now points every setup
+command at one shared pnpm store, so `node_modules` are hard links into that
+store and a new folder costs almost nothing.
+
+What Paperclip sets in the environment of the setup command (and so of
+`pnpm install` inside it):
+
+| Variable | Value |
+| --- | --- |
+| `npm_config_store_dir` (pnpm 9), `pnpm_config_store_dir` (pnpm 11) | `<repo>/.paperclip/shared/pnpm-store` |
+| `npm_config_prefer_offline`, `pnpm_config_prefer_offline` | `true`: use the store before the network |
+| `PAPERCLIP_SHARED_DIR` | `<repo>/.paperclip/shared` (override with the same variable on the server) |
+| `PAPERCLIP_SHARED_PNPM_STORE_DIR`, `PAPERCLIP_SHARED_VENV_DIR` | store and virtualenv folders for scripts |
+
+Notes:
+
+- The store lives under the repository's `.paperclip/` folder, next to the
+  worktrees, so it is on the same filesystem. Hard links only work inside one
+  filesystem. If the store ends up on another one (a custom `worktreeParentDir`
+  or `PAPERCLIP_SHARED_DIR`), Paperclip does not use it, says so in the run log,
+  and pnpm falls back to its own behaviour.
+- An empty store is fine: the first install fills it, later ones link.
+- A store the operator already configured (`npm_config_store_dir` or
+  `pnpm_config_store_dir` on the server) is kept.
+- `PNPM_STORE_DIR` is not read by pnpm 9 or 11; do not rely on it. In pnpm 11 a
+  `store-dir` line in `.npmrc` is ignored too, so the environment variables
+  above are the portable way.
+- `scripts/provision-worktree.sh` adds `--prefer-offline` to its installs.
+- Hard links share the file, not a copy: a task that edits a file inside
+  `node_modules` in place changes it for every folder that links it. pnpm
+  re-checks store files on install, but do not patch installed packages by
+  hand; use `pnpm patch`.
+- Do not symlink one `node_modules` into several worktrees if branches may
+  change the lockfile; they would overwrite each other's dependencies.
+
+### No build output in new folders
+
+A new worktree is a clean checkout of the base branch: `dist`, `.turbo`,
+`.next`, caches and similar generated folders are not git-tracked, so they are
+not copied. Paperclip copies nothing from another folder. Build in the task
+folder when you need it (`pnpm build`); do not copy or link `dist` between
+folders.
+
+### Size report
+
+Once per new folder the run log gets a `workspace size report` entry, for
+example:
+
+```
+New worktree size: 1.9 GiB in 98000 files, 120 MiB of it private to this folder (the rest is linked from elsewhere). node_modules 1.7 GiB, build output 0 B; shared package store /…/.paperclip/shared/pnpm-store.
+```
+
+"Private" counts only files that no other path hard-links to, which is what the
+folder really adds to the disk. A large private figure right after setup means
+packages were copied, not linked: check the store warning in the same entry.
+
+### Python (one shared virtualenv)
+
+The shared virtualenv example above is the Python equivalent, for example for
+the Nordstrand Dashboard. Use `$PAPERCLIP_SHARED_VENV_DIR` instead of building
+the path by hand; it points at `<repo>/.paperclip/shared/venv`, on the same disk
+as the worktrees. Create it once, symlink `.venv` to it from each new folder,
+and cache downloads with `PIP_CACHE_DIR="$PAPERCLIP_SHARED_DIR/pip-cache"`.
 
 A virtualenv shared this way is read-only in practice: install new packages
 from a branch that changes `requirements.txt` into a separate environment.
