@@ -1298,6 +1298,40 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(diffContent).toContain("+// mcp_servers secret handling");
     });
 
+    it("never runs a diff.external / textconv program planted in the agent-writable .git/config, and never hands it the server's secrets", async () => {
+      const { companyId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/adapter-home.ts",
+        content: "// mcp_servers secret handling\n",
+      });
+      const marker = path.join(repoRoot, "pwned");
+      const hook = path.join(repoRoot, "hook.sh");
+      await fs.writeFile(hook, `#!/bin/sh\ntouch ${marker}\nenv > ${marker}.env\ncat "$2" 2>/dev/null\n`, { mode: 0o755 });
+      await execFileAsync("git", ["-C", repoRoot, "config", "diff.external", hook]);
+      await execFileAsync("git", ["-C", repoRoot, "config", "diff.planted.textconv", hook]);
+      await fs.writeFile(path.join(repoRoot, ".git", "info", "attributes"), "*.ts diff=planted\n");
+
+      // Control: a plain `git diff` in this folder really does run the planted program, so the
+      // assertions below prove the hardening, not an ineffective plant.
+      await execFileAsync("git", ["-C", repoRoot, "diff", "base...HEAD"], { env: { ...process.env, GIT_PAGER: "cat" } });
+      expect(await fs.stat(marker).then(() => true, () => false)).toBe(true);
+      await fs.rm(marker, { force: true });
+      await fs.rm(`${marker}.env`, { force: true });
+
+      const previousSecret = process.env.BETTER_AUTH_SECRET;
+      process.env.BETTER_AUTH_SECRET = "server-secret-that-must-not-leak";
+      try {
+        const files = await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId });
+        const diffContent = await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId });
+        expect(files).toEqual(["server/src/adapter-home.ts"]);
+        expect(diffContent).toContain("+// mcp_servers secret handling");
+      } finally {
+        if (previousSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+        else process.env.BETTER_AUTH_SECRET = previousSecret;
+      }
+      expect(await fs.stat(marker).then(() => true, () => false)).toBe(false);
+      expect(await fs.stat(`${marker}.env`).then(() => true, () => false)).toBe(false);
+    });
+
     it("DUR-83: still detects the risky surface after the assignee clears issue.executionWorkspaceId, because detection resolves the workspace by execution_workspaces.sourceIssueId, not the mutable issue column", async () => {
       const { companyId, projectId, agentId, issueId, runId } = await seedIssueWithWorkspace({
         changedFilePath: "server/src/services/authorization.ts",

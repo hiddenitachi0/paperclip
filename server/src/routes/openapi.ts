@@ -6472,7 +6472,7 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/quality-loops/settings",
   tags: ["quality-loops"],
-  summary: "Read the company's quality checks (Company settings > Quality checks): selfReviewPasses (0-3 self-check passes per task before review/done; 0 = off), doneCheckEnabled and doneCheckMaxRounds (the independent finish check by a cheap saved model, and how many 'not done' rounds before the person is asked), doneCheckDirectoryEntryId (the saved model it uses; null = the helper's default model), effectiveDoneCheckModel (what it will actually use, or null = no model, checks are skipped with a note), defaultReviewerAgentId (agent that reviews new code tasks), doneEvidenceMode (off | report | enforce: whether an agent's done on a code task needs a commit that is on GitHub, changes the files the task names and passed its checks). configured = false means the company never chose, and everything is off. Any active member; not agents.",
+  summary: "Read the company's quality checks (Company settings > Quality checks): selfReviewPasses (0-3 self-check passes per task before review/done; 0 = off), doneCheckEnabled and doneCheckMaxRounds (the independent finish check by a cheap saved model, and how many 'not done' rounds before the person is asked), doneCheckDirectoryEntryId (the saved model it uses; null = the helper's default model), effectiveDoneCheckModel (what it will actually use, or null = no model, checks are skipped with a note), defaultReviewerAgentId (agent that reviews new code tasks), preReviewQualityLoop (run the project's test command and check the diff against the task before an agent's move to review), doneEvidenceMode (off | report | enforce: whether an agent's done on a code task needs a commit that is on GitHub, changes the files the task names and passed its checks). configured = false means the company never chose, and everything is off. Any active member; not agents.",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6480,7 +6480,7 @@ registerCurrentRoute({
   method: "patch",
   path: "/api/companies/{companyId}/quality-loops/settings",
   tags: ["quality-loops"],
-  summary: "Change the company's quality checks. Send any of selfReviewPasses (0-3), doneCheckEnabled, doneCheckMaxRounds (1-3), doneCheckDirectoryEntryId (a saved model of this company, not archived; null = the helper's default), defaultReviewerAgentId (an agent of this company; null = none), doneEvidenceMode (off | report | enforce). A field left out keeps its value. Owner/admin only; agents are refused.",
+  summary: "Change the company's quality checks. Send any of selfReviewPasses (0-3), doneCheckEnabled, doneCheckMaxRounds (1-3), doneCheckDirectoryEntryId (a saved model of this company, not archived; null = the helper's default), defaultReviewerAgentId (an agent of this company; null = none), preReviewQualityLoop (boolean), doneEvidenceMode (off | report | enforce). A field left out keeps its value. Owner/admin only; agents are refused.",
   body: updateCompanyQualityLoopSettingsSchema,
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });

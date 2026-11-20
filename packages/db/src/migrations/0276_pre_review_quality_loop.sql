@@ -1,0 +1,11 @@
+-- Pre-review quality loop (server/src/services/pre-review-quality-loop.ts): a per-company
+-- switch. When on, an agent that moves a task to in_review first has the project's test
+-- command run (and its diff checked against the task's acceptance criteria).
+--
+-- Strictly additive: one nullable-free boolean column with a default of false, so every
+-- existing row, and every company without a row, keeps today's behaviour.
+-- Guarded, so a re-run is a no-op.
+--
+-- Rollback: ALTER TABLE "company_quality_loop_settings" DROP COLUMN "pre_review_quality_loop";
+-- Safe -- nothing references the column; a rollback only loses the companies' choice.
+ALTER TABLE "company_quality_loop_settings" ADD COLUMN IF NOT EXISTS "pre_review_quality_loop" boolean DEFAULT false NOT NULL;

@@ -176,6 +176,7 @@ import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
+import { evaluatePreReviewQualityLoop } from "../services/pre-review-quality-loop.js";
 import {
   applyDefaultReviewerPolicy,
   evaluateQualityDoneCheck,
@@ -7106,6 +7107,31 @@ export function issueRoutes(
     });
     if (qualitySelfReviewResult) {
       res.status(409).json({ error: qualitySelfReviewResult.message });
+      return;
+    }
+    // Pre-review quality loop (per company, opt-in; only projects with a test command):
+    // before an agent's move to in_review, run the module's tests in the task's workspace.
+    // Unlike the loops above it also applies to a task WITH a review stage -- running ahead
+    // of the reviewer is the point. Refuses at once and runs in the background.
+    const preReviewResult = await evaluatePreReviewQualityLoop({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId,
+        executionPolicy: existing.executionPolicy,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (preReviewResult) {
+      res.status(409).json({ error: preReviewResult.message });
       return;
     }
     // DUR-32: composes with self-review above — self-review runs first, then (if the issue

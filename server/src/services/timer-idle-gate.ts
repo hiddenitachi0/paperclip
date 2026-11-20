@@ -252,6 +252,10 @@ export const TIMER_IDLE_GATE_WAKE_REASON_COVERAGE: Readonly<Record<string, reado
   // Agent quality loops: the company's finish check sent the task back and the run
   // ended without fixing it; queued via enqueueWakeup like the reasons above.
   quality_check_needs_work: ["run_active_or_pending", "wakeup_request"],
+  // Pre-review quality loop: the project's tests failed (or passed) in the background after
+  // the agent's move to review was refused; queued via enqueueWakeup like the reasons above.
+  pre_review_tests_failed: ["run_active_or_pending", "wakeup_request"],
+  pre_review_tests_passed: ["run_active_or_pending", "wakeup_request"],
 };
 
 /** Wake reasons deliberately NOT covered, and why. */
