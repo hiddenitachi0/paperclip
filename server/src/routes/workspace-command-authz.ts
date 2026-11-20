@@ -82,8 +82,8 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
  * DUR-5231: a project PATCH replaces the whole `executionWorkspacePolicy`, so an
  * agent that leaves a board-set protected field out (or sends `null`, or
  * `{ enabled: false }`) wipes it without ever naming it. Compare the new policy
- * to the stored one and list every protected field the write would change or
- * drop. `null` counts as touching all of them. Only call this when the body
+ * to the stored one and list every protected field (workspaceRuntime and the
+ * strategy commands) the write would change or drop. `null` counts as touching all of them. Only call this when the body
  * actually contains `executionWorkspacePolicy`.
  */
 export function collectProjectExecutionWorkspacePolicyDropPaths(
@@ -100,7 +100,9 @@ export function collectProjectExecutionWorkspacePolicyDropPaths(
     if (!sameValue(stored, incoming)) paths.push(path);
   };
   check("executionWorkspacePolicy.workspaceRuntime", storedPolicy.workspaceRuntime, next?.workspaceRuntime);
-  check("executionWorkspacePolicy.requireIsolation", storedPolicy.requireIsolation, next?.requireIsolation);
+  // requireIsolation is deliberately not checked here: the project PATCH route carries the
+  // stored `true` forward for agent writes (DUR-5184), so omitting it cannot drop it, and an
+  // explicit change is already refused by collectProjectExecutionWorkspaceCommandPaths.
   check(
     "executionWorkspacePolicy.workspaceStrategy.provisionCommand",
     storedStrategy?.provisionCommand,
