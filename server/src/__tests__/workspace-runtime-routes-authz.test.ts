@@ -447,7 +447,11 @@ describe.sequential("workspace runtime service route authorization", () => {
     ]) {
       const patch = await request(app).patch(`/api/projects/${projectId}/workspaces/${workspaceId}`).send(body);
       expect(patch.status).toBe(403);
-      expect(patch.body.error).toContain("host-executed workspace commands");
+      // A resent metadata.testCommand falls through to the board-only code-location check (#750),
+      // which refuses any change or removal with its own message; everything else is refused as a host command.
+      expect(patch.body.error).toMatch(
+        /host-executed workspace commands|Only a person on the board can change where this project's code lives/,
+      );
     }
     const create = await request(app)
       .post(`/api/projects/${projectId}/workspaces`)
