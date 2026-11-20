@@ -308,6 +308,11 @@ export function dashboardService(db: Db, deps: DashboardServiceDeps = {}) {
             ? (agentNameById.get(row.requestedByAgentId) ?? null)
             : null,
           createdAt: row.createdAt.toISOString(),
+          // Deploy cards: the revision this list holds, sent back on approve so a card that
+          // changed since is refused instead of approved unseen.
+          ...(kind === "deploy" && typeof (row.payload as Record<string, unknown> | null)?.cardRevision === "number"
+            ? { cardRevision: (row.payload as Record<string, unknown>).cardRevision as number }
+            : {}),
         };
       });
 

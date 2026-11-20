@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   QUALITY_DONE_CHECK_MAX_ROUNDS,
+  QUALITY_DONE_EVIDENCE_MODES,
   QUALITY_SELF_REVIEW_MAX_PASSES,
   formatAgentDisplayName,
+  type QualityDoneEvidenceMode,
   type UpdateCompanyQualityLoopSettings,
 } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
@@ -10,6 +12,12 @@ import { modelDirectoryApi } from "../api/modelDirectory";
 import { qualityLoopsApi } from "../api/qualityLoops";
 import { queryKeys } from "../lib/queryKeys";
 import { ToggleField } from "./agent-config-primitives";
+
+const DONE_EVIDENCE_LABELS: Record<QualityDoneEvidenceMode, string> = {
+  off: "Off",
+  report: "Only write a note on the task",
+  enforce: "Refuse until the proof is there",
+};
 
 const selectClass =
   "w-full max-w-sm rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring";
@@ -167,6 +175,28 @@ export function QualityLoopSettingsSection({ companyId }: { companyId: string })
             {(agents ?? []).map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {formatAgentDisplayName(agent, agent.persona)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-sm font-medium">4. Code tasks need proof</div>
+          <p className="text-xs text-muted-foreground">
+            Code tasks need proof: before an agent can mark a code task done, Paperclip checks that its commit is on
+            GitHub, changes the files the task names, and passed its checks. If something is missing, the task stays open
+            and a note on it says what. You can always mark a task done yourself.
+          </p>
+          <select
+            className={selectClass}
+            value={settings?.doneEvidenceMode ?? "off"}
+            onChange={(e) => save({ doneEvidenceMode: e.target.value as QualityDoneEvidenceMode })}
+            disabled={disabled}
+            data-testid="quality-done-evidence-mode"
+          >
+            {QUALITY_DONE_EVIDENCE_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {DONE_EVIDENCE_LABELS[mode]}
               </option>
             ))}
           </select>

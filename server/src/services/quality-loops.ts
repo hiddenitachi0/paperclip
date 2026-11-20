@@ -14,10 +14,12 @@ import {
   QUALITY_DONE_CHECK_DEFAULT_ROUNDS,
   QUALITY_DONE_CHECK_MAX_ROUNDS,
   PROJECT_WORKSPACE_TEST_COMMAND_KEY,
+  QUALITY_DONE_EVIDENCE_MODES,
   QUALITY_LOOPS_NEW_COMPANY_DEFAULTS,
   QUALITY_PRE_REVIEW_MAX_ROUNDS,
   QUALITY_SELF_REVIEW_MAX_PASSES,
   type CompanyQualityLoopSettings,
+  type QualityDoneEvidenceMode,
   type UpdateCompanyQualityLoopSettings,
 } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
@@ -91,6 +93,13 @@ const QUALITY_CHECK_MAX_OUTPUT_TOKENS = 600;
 const QUALITY_CHECK_TIMEOUT_MS = 60_000;
 
 type SettingsRow = typeof companyQualityLoopSettings.$inferSelect;
+
+/** An unknown stored value counts as off: a gate must never refuse because a value is odd. */
+export function normalizeDoneEvidenceMode(value: unknown): QualityDoneEvidenceMode {
+  return (QUALITY_DONE_EVIDENCE_MODES as readonly string[]).includes(value as string)
+    ? (value as QualityDoneEvidenceMode)
+    : "off";
+}
 
 export interface EffectiveQualityLoops {
   selfReviewPasses: number;
@@ -328,6 +337,7 @@ export function qualityLoopSettingsService(db: Db) {
       effectiveDoneCheckModel: await resolveDoneCheckModel(db, companyId, row),
       defaultReviewerAgentId: row?.defaultReviewerAgentId ?? null,
       preReviewQualityLoop: effective.preReviewQualityLoop,
+      doneEvidenceMode: normalizeDoneEvidenceMode(row?.doneEvidenceMode),
     };
   }
 
@@ -366,6 +376,7 @@ export function qualityLoopSettingsService(db: Db) {
     if (patch.doneCheckDirectoryEntryId !== undefined) set.doneCheckDirectoryEntryId = patch.doneCheckDirectoryEntryId;
     if (patch.defaultReviewerAgentId !== undefined) set.defaultReviewerAgentId = patch.defaultReviewerAgentId;
     if (patch.preReviewQualityLoop !== undefined) set.preReviewQualityLoop = patch.preReviewQualityLoop;
+    if (patch.doneEvidenceMode !== undefined) set.doneEvidenceMode = patch.doneEvidenceMode;
     await db
       .insert(companyQualityLoopSettings)
       .values({ companyId, ...set })

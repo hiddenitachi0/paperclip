@@ -30,6 +30,7 @@ function pulse(overrides: Partial<DashboardPulse> = {}): DashboardPulse {
         title: "Launch the new homepage",
         requestedByAgentName: "Frontend Engineer",
         createdAt: new Date("2026-10-01T00:00:00.000Z").toISOString(),
+        cardRevision: 3,
       },
     ],
     activeExecutions: [],
@@ -135,7 +136,7 @@ describe("PulsePanel", () => {
     });
     await flushReact();
 
-    expect(mockApprovalsApi.approve).toHaveBeenCalledWith("approval-1");
+    expect(mockApprovalsApi.approve).toHaveBeenCalledWith("approval-1", undefined, undefined, 3);
   });
 
   it("shows a count pill with the right color state once enabled", async () => {

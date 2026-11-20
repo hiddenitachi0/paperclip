@@ -13,6 +13,8 @@ export interface DashboardPulseApproval {
   title: string | null;
   requestedByAgentName: string | null;
   createdAt: string;
+  /** Deploy cards only: the card's revision number as of this list, sent back on approve. */
+  cardRevision?: number;
 }
 
 export interface DashboardPulseExecution {

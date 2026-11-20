@@ -1923,8 +1923,10 @@ test("a deploy whose checks never finish gives up at the deadline with exactly o
 
     const comments = scenario.commentsFor("aid-1");
     assert.equal(comments.length, 2, `expected the waiting note plus exactly one deadline note, got: ${JSON.stringify(comments)}`);
-    assert.match(comments[1], /Deploy not started/);
-    assert.match(comments[1], /stopped waiting/);
+    assert.equal(
+      comments[1],
+      "Checks did not finish within 0 minutes. Nothing was deployed. File the card again when they are green.",
+    );
     assert.doesNotMatch(comments[1], /\bCI\b/, "operator-facing wording must say 'the automated checks', never 'CI'");
     assert.deepEqual(scenario.processedIds(), ["aid-1"], "at the deadline the card becomes terminal");
     assert.deepEqual(deployAttempts(scenario), [], "an unproven build must never be deployed, deadline or not");
@@ -2048,11 +2050,41 @@ test("process_approval still deploys when GitHub CI is unknown (no checks config
   }
 });
 
+test("the default wait is 4 hours: still waiting at 3 hours, plain give-up note after 4", () => {
+  const scenario = makeScenario();
+  try {
+    // No CI_WAIT_SECONDS override anywhere: this is the shipped default.
+    makeCiPollScenario(scenario, { decidedAt: isoAgo(3 * 60 * 60 * 1000) });
+    setCiStatus(scenario, "pending");
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), NO_DEPLOY_OVERRIDES), "main() at 3 hours");
+    assert.deepEqual(scenario.processedIds(), [], "3 hours in, the card must still be waiting");
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "only the waiting note so far");
+  } finally {
+    scenario.cleanup();
+  }
+
+  const late = makeScenario();
+  try {
+    makeCiPollScenario(late, { decidedAt: isoAgo(4 * 60 * 60 * 1000 + 5 * 60 * 1000) });
+    setCiStatus(late, "pending");
+    assertSuccess(runMain(late, ciPollEnv(late), NO_DEPLOY_OVERRIDES), "main() past 4 hours");
+    const comments = late.commentsFor("aid-1");
+    assert.equal(
+      comments[comments.length - 1],
+      "Checks did not finish within 4 hours. Nothing was deployed. File the card again when they are green.",
+    );
+    assert.deepEqual(late.processedIds(), ["aid-1"], "past the deadline the card becomes terminal");
+    assert.deepEqual(deployAttempts(late), [], "an unproven build must never be deployed");
+  } finally {
+    late.cleanup();
+  }
+});
+
 // DUR-3967 safety: the retry loop multiplied the fail-open sample.
 //
 // Before this ticket a card was looked at ONCE, so exactly one GitHub API
 // sample decided it and "unknown" was one coin toss. A held card now
-// re-samples every 60s for up to 45 minutes, and check_ci_status collapses an
+// re-samples every 60s for up to 4 hours, and check_ci_status collapses an
 // unreachable API, a 403 rate-limit body, a timeout and unparseable JSON all
 // into the same "unknown" — so without this guard, ~45 chances existed for a
 // build we had positive evidence was still being checked to ship anyway. The
@@ -2117,7 +2149,7 @@ test("a card already waiting on its checks does not fail open into a deploy when
     assert.deepEqual(scenario.processedIds(), ["aid-1"]);
     const comments = scenario.commentsFor("aid-1");
     assert.equal(comments.length, 2, `expected the waiting note plus one deadline note, got: ${JSON.stringify(comments)}`);
-    assert.match(comments[1], /Deploy not started/);
+    assert.match(comments[1], /^Checks did not finish within \d+ (minutes|hours?)\. Nothing was deployed\./);
     assert.deepEqual(ciWaitRows(scenario), [], "and the wait state does not outlive the card");
   } finally {
     await stopGitHub();
@@ -2265,16 +2297,14 @@ test("an approval timestamped in the future still gets a bounded wait, not a car
       2,
       `the wait must end at the deadline whatever the approval's timestamp says, got: ${JSON.stringify(comments)}`,
     );
-    assert.match(comments[1], /Deploy not started/);
+    assert.match(comments[1], /^Checks did not finish within \d+ (minutes|hours?)\. Nothing was deployed\./);
     assert.deepEqual(scenario.processedIds(), ["aid-1"]);
     assert.deepEqual(deployAttempts(scenario), []);
     assert.deepEqual(ciWaitRows(scenario), []);
 
-    // …and the note quotes how long it ACTUALLY waited (an hour), not the
-    // configured budget (30 minutes). A card the runner only got back to after
-    // 90 minutes must not claim it gave up after 45.
-    assert.match(comments[1], /about 60 minutes/);
-    assert.doesNotMatch(comments[1], /about 30 minutes/);
+    // The note now quotes the time the runner was prepared to wait (the
+    // configured budget, 30 minutes here), in plain words.
+    assert.match(comments[1], /within 30 minutes\./);
   } finally {
     scenario.cleanup();
   }
@@ -2304,16 +2334,10 @@ test("the two waiting-for-checks notes say something a non-technical operator ca
       "main() tick 2",
     );
     const deadline = scenario.commentsFor("aid-1")[1];
-    assert.match(deadline, /Once the checks have passed/, "'finished' includes finished red — which is not a green light");
-    assert.match(
+    assert.equal(
       deadline,
-      /ask the agent that filed this deploy to file a new deploy approval/,
-      "the operator must be told who to ask, the way the sibling messages in this file name a button or an agent",
-    );
-    assert.match(
-      deadline,
-      /If the checks keep hanging or finish red/,
-      "asking again hits the same wall unless someone fixes what is failing — say so",
+      "Checks did not finish within 0 minutes. Nothing was deployed. File the card again when they are green.",
+      "plain words: what happened, that nothing was deployed, and what to do next",
     );
     assert.doesNotMatch(deadline, /deploy runner/, "the other two messages manage without naming the machinery");
     assert.doesNotMatch(deadline, /\bCI\b/);

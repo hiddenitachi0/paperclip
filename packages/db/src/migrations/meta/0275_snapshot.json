@@ -1,5 +1,5 @@
 {
-  "id": "a94d8d01-c508-4ab4-b030-8bab8851ef43",
+  "id": "dd4aeba2-f517-488a-826f-1e8ca7f54ceb",
   "prevId": "2534ef00-21ea-4bf9-a3a7-85b94c9468ac",
   "version": "7",
   "dialect": "postgresql",
@@ -7654,13 +7654,6 @@
           "notNull": true,
           "default": false
         },
-        "pre_review_quality_loop": {
-          "name": "pre_review_quality_loop",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "done_check_max_rounds": {
           "name": "done_check_max_rounds",
           "type": "integer",
@@ -7678,6 +7671,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "done_evidence_mode": {
+          "name": "done_evidence_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'off'"
         },
         "updated_by_user_id": {
           "name": "updated_by_user_id",

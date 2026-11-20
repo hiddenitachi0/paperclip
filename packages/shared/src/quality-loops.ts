@@ -31,6 +31,14 @@ export const QUALITY_PRE_REVIEW_MAX_ROUNDS = 2;
 /** Default time limit for the project's test command before review. */
 export const QUALITY_PRE_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
 
+/**
+ * Done-gate with evidence: before an AGENT may mark a code task done, the server checks that
+ * the commit it names is on GitHub, changes the files the task names and passed its checks.
+ * off = no check; report = a note on the task, the task still closes; enforce = refused.
+ */
+export const QUALITY_DONE_EVIDENCE_MODES = ["off", "report", "enforce"] as const;
+export type QualityDoneEvidenceMode = (typeof QUALITY_DONE_EVIDENCE_MODES)[number];
+
 export interface CompanyQualityLoopSettings {
   /** True once the company has a settings row (it chose, or was created with defaults). */
   configured: boolean;
@@ -56,6 +64,8 @@ export interface CompanyQualityLoopSettings {
    * QUALITY_PRE_REVIEW_MAX_ROUNDS times). Only applies to projects that have a test command.
    */
   preReviewQualityLoop: boolean;
+  /** How hard the server checks an agent's "done" on a code task (commit, files, checks). */
+  doneEvidenceMode: QualityDoneEvidenceMode;
 }
 
 // The finish check spends money on a model, so it stays off until an owner turns it on.
@@ -73,6 +83,7 @@ export const updateCompanyQualityLoopSettingsSchema = z
     doneCheckDirectoryEntryId: z.string().uuid().nullable().optional(),
     defaultReviewerAgentId: z.string().uuid().nullable().optional(),
     preReviewQualityLoop: z.boolean().optional(),
+    doneEvidenceMode: z.enum(QUALITY_DONE_EVIDENCE_MODES).optional(),
   })
   .strict();
 export type UpdateCompanyQualityLoopSettings = z.infer<typeof updateCompanyQualityLoopSettingsSchema>;
