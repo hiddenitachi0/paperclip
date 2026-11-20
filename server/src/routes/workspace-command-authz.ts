@@ -79,6 +79,42 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
 }
 
 /**
+ * DUR-5231: a project PATCH replaces the whole `executionWorkspacePolicy`, so an
+ * agent that leaves a board-set protected field out (or sends `null`, or
+ * `{ enabled: false }`) wipes it without ever naming it. Compare the new policy
+ * to the stored one and list every protected field the write would change or
+ * drop. `null` counts as touching all of them. Only call this when the body
+ * actually contains `executionWorkspacePolicy`.
+ */
+export function collectProjectExecutionWorkspacePolicyDropPaths(
+  nextPolicy: unknown,
+  storedPolicy: unknown,
+): string[] {
+  if (!isRecord(storedPolicy)) return [];
+  const next = isRecord(nextPolicy) ? nextPolicy : null;
+  const storedStrategy = isRecord(storedPolicy.workspaceStrategy) ? storedPolicy.workspaceStrategy : null;
+  const nextStrategy = next && isRecord(next.workspaceStrategy) ? next.workspaceStrategy : null;
+  const paths: string[] = [];
+  const check = (path: string, stored: unknown, incoming: unknown) => {
+    if (stored === undefined || stored === null) return;
+    if (!sameValue(stored, incoming)) paths.push(path);
+  };
+  check("executionWorkspacePolicy.workspaceRuntime", storedPolicy.workspaceRuntime, next?.workspaceRuntime);
+  check("executionWorkspacePolicy.requireIsolation", storedPolicy.requireIsolation, next?.requireIsolation);
+  check(
+    "executionWorkspacePolicy.workspaceStrategy.provisionCommand",
+    storedStrategy?.provisionCommand,
+    nextStrategy?.provisionCommand,
+  );
+  check(
+    "executionWorkspacePolicy.workspaceStrategy.teardownCommand",
+    storedStrategy?.teardownCommand,
+    nextStrategy?.teardownCommand,
+  );
+  return paths;
+}
+
+/**
  * The deploy policy carries two commands the box runs as itself: the one that
  * starts a preview copy and the one that deploys. They are host commands like
  * any other, so an agent key must not be able to set or change them from a
