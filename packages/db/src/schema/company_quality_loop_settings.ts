@@ -23,6 +23,8 @@ export const companyQualityLoopSettings = pgTable(
     doneCheckMaxRounds: integer("done_check_max_rounds"),
     /** Saved model the finish check uses. Null = the helper's default saved model. */
     doneCheckDirectoryEntryId: uuid("done_check_directory_entry_id"),
+    /** Pre-review loop: run the project's test command (and check the diff against the task) before an agent's move to in_review. */
+    preReviewQualityLoop: boolean("pre_review_quality_loop").notNull().default(false),
     /** Agent that reviews new code tasks before done (review stage). Null = none. */
     defaultReviewerAgentId: uuid("default_reviewer_agent_id"),
     /**

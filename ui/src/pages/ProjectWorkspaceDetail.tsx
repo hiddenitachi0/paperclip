@@ -31,6 +31,7 @@ type WorkspaceFormState = {
   visibility: ProjectWorkspaceVisibility;
   setupCommand: string;
   cleanupCommand: string;
+  testCommand: string;
   remoteProvider: string;
   remoteWorkspaceRef: string;
   sharedWorkspaceKey: string;
@@ -116,6 +117,7 @@ function formStateFromWorkspace(workspace: ProjectWorkspace): WorkspaceFormState
     visibility: workspace.visibility,
     setupCommand: readText(workspace.setupCommand),
     cleanupCommand: readText(workspace.cleanupCommand),
+    testCommand: readText(workspace.testCommand),
     remoteProvider: readText(workspace.remoteProvider),
     remoteWorkspaceRef: readText(workspace.remoteWorkspaceRef),
     sharedWorkspaceKey: readText(workspace.sharedWorkspaceKey),
@@ -167,6 +169,7 @@ function buildWorkspacePatch(initialState: WorkspaceFormState, nextState: Worksp
   maybeAssign("visibility");
   maybeAssign("setupCommand", normalizeText);
   maybeAssign("cleanupCommand", normalizeText);
+  maybeAssign("testCommand", normalizeText);
   maybeAssign("remoteProvider", normalizeText);
   maybeAssign("remoteWorkspaceRef", normalizeText);
   maybeAssign("sharedWorkspaceKey", normalizeText);
@@ -620,6 +623,19 @@ export function ProjectWorkspaceDetail() {
                   />
                 </Field>
               </div>
+
+              <Field
+                label="Test command (run before review)"
+                hint="When the company's quality check before review is on, this runs in the task's workspace before an agent can move a task to review. Only board users can change it."
+              >
+                <textarea
+                  className="min-h-20 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-sm outline-none"
+                  value={form.testCommand}
+                  onChange={(event) => setForm((current) => current ? { ...current, testCommand: event.target.value } : current)}
+                  placeholder="pnpm test"
+                  data-testid="workspace-test-command"
+                />
+              </Field>
 
               <details className="rounded-xl border border-dashed border-border/70 bg-background px-3 py-3">
                 <summary className="cursor-pointer text-sm font-medium">Advanced runtime JSON</summary>

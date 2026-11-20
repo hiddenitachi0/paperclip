@@ -119,5 +119,76 @@ class ButtonsTest(unittest.TestCase):
                          [("issue", "interaction:accept", ISSUE_ID, INTERACTION_ID)])
 
 
+class CardOnlyTest(ButtonsTest):
+    """DUR-5199: cards that can only be decided on the card get no Approve/Reject buttons."""
+
+    def pending(self, kind, atype="request_board_approval"):
+        return [{"id": "ab000000-0000-4000-8000-000000000001", "status": "pending", "type": atype,
+                 "requestedByAgentId": CEO, "payload": {"kind": kind, "title": "T", "summary": "S" * 500}}]
+
+    def sent_for(self, approvals):
+        sent = []
+
+        def fake_cli(*parts):
+            if parts[:2] == ("approval", "list"):
+                return approvals
+            return self.fake_cli(*parts)
+
+        mock.patch.object(bridge, "cli", side_effect=fake_cli).start()
+        mock.patch.object(bridge, "tg", side_effect=lambda t, m, **p: sent.append(p) or {"message_id": 1} if m == "sendMessage" else {}).start()
+        bridge.notify_approvals(self.state, self.bots())
+        return sent
+
+    def test_card_only_kinds_get_only_the_link(self):
+        for kind in ("trading_strategy_version", "crypto_wallet_tx", "crypto_sweep_address",
+                     "crypto_topup_request", "deploy", "operator_action", "deploy_pr"):
+            self.state["notified"] = []
+            sent = self.sent_for(self.pending(kind))
+            self.assertEqual(len(sent), 1, kind)
+            self.assertNotIn("reply_markup", sent[0], kind)
+            self.assertIn("Open in Paperclip", sent[0]["text"], kind)
+
+    def test_ordinary_card_keeps_buttons(self):
+        sent = self.sent_for(self.pending("something_else"))
+        self.assertEqual(len(sent[0]["reply_markup"]["inline_keyboard"][0]), 2)
+
+    def test_old_message_tap_on_card_only_kind_is_refused(self):
+        calls = []
+
+        def fake_cli(*parts):
+            calls.append(parts)
+            if parts[:2] == ("approval", "get"):
+                return self.pending("trading_strategy_version")[0]
+            return {}
+
+        mock.patch.object(bridge, "cli", side_effect=fake_cli).start()
+        mock.patch.object(bridge, "tg", return_value={}).start()
+        for action in ("approve", "reject"):
+            bridge.handle_callback({"id": "cb", "data": f"{action}:ab000000-0000-4000-8000-000000000001", "_token": TOKEN,
+                                    "_allowed": {OPERATOR}, "from": {"id": OPERATOR}, "message": {}})
+        self.assertFalse([c for c in calls if c[:2] in (("approval", "approve"), ("approval", "reject"))])
+
+    def test_old_message_tap_fails_closed_when_the_card_cannot_be_read(self):
+        calls = []
+        mock.patch.object(bridge, "cli", side_effect=lambda *p: calls.append(p)).start()
+        mock.patch.object(bridge, "tg", return_value={}).start()
+        bridge.handle_callback({"id": "cb", "data": "approve:ab000000-0000-4000-8000-000000000001", "_token": TOKEN,
+                                "_allowed": {OPERATOR}, "from": {"id": OPERATOR}, "message": {}})
+        self.assertEqual(calls, [("approval", "get", "ab000000-0000-4000-8000-000000000001")])
+
+    def test_old_message_tap_on_ordinary_card_still_works(self):
+        calls = []
+
+        def fake_cli(*parts):
+            calls.append(parts)
+            return self.pending("something_else")[0] if parts[:2] == ("approval", "get") else {}
+
+        mock.patch.object(bridge, "cli", side_effect=fake_cli).start()
+        mock.patch.object(bridge, "tg", return_value={}).start()
+        bridge.handle_callback({"id": "cb", "data": "approve:ab000000-0000-4000-8000-000000000001", "_token": TOKEN,
+                                "_allowed": {OPERATOR}, "from": {"id": OPERATOR}, "message": {}})
+        self.assertIn(("approval", "approve", "ab000000-0000-4000-8000-000000000001"), calls)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { PROJECT_WORKSPACE_TEST_COMMAND_KEY } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -142,11 +143,103 @@ export function collectProjectDeployTransportCommandPaths(body: unknown): string
 export function collectProjectWorkspaceCommandPaths(
   workspacePatch: unknown,
   prefix = "",
+  options: { includeMetadataTestCommand?: boolean } = {},
 ): string[] {
   if (!isRecord(workspacePatch)) return [];
-  return hasOwn(workspacePatch, "cleanupCommand")
-    ? [prefixPath(prefix, "cleanupCommand")]
-    : [];
+  const paths: string[] = [];
+  if (hasOwn(workspacePatch, "cleanupCommand")) paths.push(prefixPath(prefix, "cleanupCommand"));
+  // "Test command (run before review)": the server runs it on the host, so an agent key
+  // may not set it, change it, or write it through the free-form metadata object.
+  if (hasOwn(workspacePatch, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
+    paths.push(prefixPath(prefix, PROJECT_WORKSPACE_TEST_COMMAND_KEY));
+  }
+  // A PATCH of an existing workspace passes includeMetadataTestCommand: false: the board-only
+  // code-location check compares against the stored value, so resending it unchanged is allowed.
+  if (
+    options.includeMetadataTestCommand !== false
+    && isRecord(workspacePatch.metadata)
+    && hasOwn(workspacePatch.metadata, PROJECT_WORKSPACE_TEST_COMMAND_KEY)
+  ) {
+    paths.push(prefixPath(prefix, `metadata.${PROJECT_WORKSPACE_TEST_COMMAND_KEY}`));
+  }
+  return paths;
+}
+
+/**
+ * DUR-5208: where a project's code lives and how it is built decides whether a
+ * task counts as a code task (done-gate with evidence, pre-review test loop),
+ * which branch the "commit is on the project's branch" check compares against,
+ * and which ref the deploy runner reads. An agent that could rewrite these
+ * could switch those controls off for its own work, so only a board user may
+ * create or delete a project workspace or change any of the fields below.
+ */
+export const PROJECT_CODE_LOCATION_BOARD_ONLY_MESSAGE =
+  "Only a person on the board can change where this project's code lives or how it is built.";
+
+const PROJECT_WORKSPACE_CODE_LOCATION_FIELDS = [
+  "repoUrl",
+  "repoRef",
+  "defaultRef",
+  "isPrimary",
+  "setupCommand",
+  "cleanupCommand",
+] as const;
+
+function sameValue(a: unknown, b: unknown) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+function readTestCommand(metadata: unknown): unknown {
+  return isRecord(metadata) ? metadata.testCommand : undefined;
+}
+
+/**
+ * Lists the code-location fields a workspace PATCH would actually change.
+ * Fields resent with their current value are not a change, so an agent that
+ * round-trips a whole workspace object for another field is not refused.
+ */
+export function collectProjectWorkspaceCodeLocationChanges(
+  patch: unknown,
+  existing: Record<string, unknown> | null | undefined,
+): string[] {
+  if (!isRecord(patch)) return [];
+  const changed: string[] = [];
+  for (const field of PROJECT_WORKSPACE_CODE_LOCATION_FIELDS) {
+    if (hasOwn(patch, field) && !sameValue(patch[field], existing?.[field])) {
+      changed.push(field);
+    }
+  }
+  // `metadata` is replaced as a whole, so dropping the key is also a change.
+  if (
+    hasOwn(patch, "metadata")
+    && !sameValue(readTestCommand(patch.metadata), readTestCommand(existing?.metadata))
+  ) {
+    changed.push("metadata.testCommand");
+  }
+  return changed;
+}
+
+export function assertBoardOnlyProjectWorkspaceChange(req: Request, changed: string[] | true) {
+  if (req.actor.type !== "agent") return;
+  if (changed !== true && changed.length === 0) return;
+  throw forbidden(PROJECT_CODE_LOCATION_BOARD_ONLY_MESSAGE);
+}
+
+/** Same field list for a portable (company import) workspace entry. */
+export function collectImportedWorkspaceCodeLocationFields(workspace: {
+  repoUrl?: unknown;
+  repoRef?: unknown;
+  defaultRef?: unknown;
+  isPrimary?: unknown;
+  metadata?: unknown;
+}): string[] {
+  const fields: string[] = [];
+  if (workspace.repoUrl) fields.push("repoUrl");
+  if (workspace.repoRef) fields.push("repoRef");
+  if (workspace.defaultRef) fields.push("defaultRef");
+  if (workspace.isPrimary) fields.push("isPrimary");
+  if (readTestCommand(workspace.metadata) !== undefined) fields.push("metadata.testCommand");
+  return fields;
 }
 
 export function collectIssueWorkspaceCommandPaths(input: {

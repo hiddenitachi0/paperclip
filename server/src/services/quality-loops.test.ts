@@ -25,6 +25,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX,
   DONE_GATE_ESCALATED_PREFIX,
   DONE_GATE_NEEDS_WORK_PREFIX,
   DONE_GATE_PASS_PREFIX,
@@ -40,6 +41,7 @@ import {
   evaluateQualitySelfReviewGate,
   maybeScheduleQualityCheckFollowUp,
   pinQualityLoopPolicyFields,
+  isHandOffToReview,
   issueHasReviewOrApprovalStage,
   qualityLoopSettingsService,
   resolveEffectiveQualityLoops,
@@ -49,7 +51,7 @@ import { normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 
 describe("resolveEffectiveQualityLoops", () => {
   it("is all off without a company row", () => {
-    expect(resolveEffectiveQualityLoops(null, null)).toEqual({ selfReviewPasses: 0, doneCheckEnabled: false, doneCheckMaxRounds: 2 });
+    expect(resolveEffectiveQualityLoops(null, null)).toEqual({ selfReviewPasses: 0, doneCheckEnabled: false, doneCheckMaxRounds: 2, preReviewQualityLoop: false });
   });
 
   it("lets the task override the company, and the old selfReview:false opt-out still wins", () => {
@@ -58,6 +60,7 @@ describe("resolveEffectiveQualityLoops", () => {
       selfReviewPasses: 3,
       doneCheckEnabled: false,
       doneCheckMaxRounds: 3,
+      preReviewQualityLoop: false,
     });
     expect(resolveEffectiveQualityLoops(row, { selfReview: false, selfReviewPasses: 2 }).selfReviewPasses).toBe(0);
     expect(resolveEffectiveQualityLoops(null, { doneCheck: true, selfReviewPasses: 9 })).toMatchObject({
@@ -538,6 +541,108 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     return vi.fn<DoneGateCritic>(async () => ({ verdict, findings, usage: null }));
   }
 
+  // -------------------------------------------------------------------------
+  // Pre-review loop: the diff-vs-criteria check on the move to in_review
+  // -------------------------------------------------------------------------
+
+  async function addTestCommand(f: { companyId: string; projectId: string }, command = "pnpm test") {
+    await db
+      .update(projectWorkspaces)
+      .set({ metadata: { testCommand: command } })
+      .where(eq(projectWorkspaces.projectId, f.projectId));
+  }
+
+  it("before review: checks the diff against the task on in_review, sends it back, and lets it through after round 2 (never parks or escalates)", async () => {
+    const f = await seed({ settings: { preReviewQualityLoop: true }, gitProject: true });
+    await addTestCommand(f);
+    // A reviewer stage does not stand aside here: the check runs ahead of the reviewer.
+    const issue = {
+      ...f.issue,
+      executionPolicy: normalizeIssueExecutionPolicy({
+        stages: [{ type: "review", participants: [{ type: "agent", agentId: f.reviewerId }] }],
+      }),
+    };
+    const c = critic("needs_work", ["Only 12 of 312 texts were converted."]);
+    const attempt = () =>
+      evaluateQualityDoneCheck({
+        db,
+        issue,
+        actor: agentActor(f),
+        requestedStatus: "in_review",
+        currentStatus: "in_progress",
+        critic: c,
+      });
+
+    const round1 = await attempt();
+    expect(round1.applies).toBe(true);
+    expect(round1.applies && round1.result?.message).toMatch(/can't move to review yet.*round 1 of 2/s);
+    const round2 = await attempt();
+    expect(round2.applies && round2.result?.message).toMatch(/round 2 of 2.*goes to review with these findings/s);
+    // Third attempt: no third critic call, no escalation -- it goes to review with the findings on the task.
+    const third = await attempt();
+    expect(third).toEqual({ applies: true, result: null });
+    expect(c).toHaveBeenCalledTimes(2);
+
+    const comments = await qualityComments(f.issueId);
+    expect(comments.map((x) => x.body.split("\n")[0])).toEqual([
+      `${DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX} (round 1 of 2).`,
+      `${DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX} (round 2 of 2).`,
+    ]);
+    expect(comments.some((x) => x.body.startsWith(DONE_GATE_ESCALATED_PREFIX))).toBe(false);
+    const [row] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, f.issueId));
+    expect(row!.status).toBe("in_progress");
+    expect(await db.select().from(approvals)).toHaveLength(0);
+    // Rounds spent before review do not use up the finish check's own rounds.
+    await db.update(companyQualityLoopSettings).set({ doneCheckEnabled: true }).where(eq(companyQualityLoopSettings.companyId, f.companyId));
+    const done = await evaluateQualityDoneCheck({
+      db,
+      issue: f.issue,
+      actor: agentActor(f),
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+      critic: c,
+    });
+    expect(done.applies && done.result?.escalated).toBe(false);
+    expect(c).toHaveBeenCalledTimes(3);
+  });
+
+  it("before review: does not apply without the company switch, without a test command, or for a person", async () => {
+    const c = critic("needs_work", ["x"]);
+    const run = (f: Awaited<ReturnType<typeof seed>>, actor = agentActor(f)) =>
+      evaluateQualityDoneCheck({ db, issue: f.issue, actor, requestedStatus: "in_review", currentStatus: "in_progress", critic: c });
+    const noSwitch = await seed({ settings: { doneCheckEnabled: true } });
+    await addTestCommand(noSwitch);
+    expect(await run(noSwitch)).toEqual({ applies: false });
+    const noCommand = await seed({ settings: { preReviewQualityLoop: true }, gitProject: true });
+    expect(await run(noCommand)).toEqual({ applies: false });
+    const on = await seed({ settings: { preReviewQualityLoop: true }, gitProject: true });
+    await addTestCommand(on);
+    expect(await run(on, { actorType: "user", agentId: null, runId: null } as never)).toEqual({ applies: false });
+    expect(c).not.toHaveBeenCalled();
+  });
+
+  it("before review: the agent is woken to fix the findings when its run ends with the task sent back", async () => {
+    const f = await seed({ settings: { preReviewQualityLoop: true }, gitProject: true });
+    await addTestCommand(f);
+    const w = recordingWakeup();
+    await evaluateQualityDoneCheck({
+      db,
+      issue: f.issue,
+      actor: agentActor(f),
+      requestedStatus: "in_review",
+      currentStatus: "in_progress",
+      critic: critic("needs_work", ["Missing the tests."]),
+    });
+    const scheduled = await maybeScheduleQualityCheckFollowUp({
+      db,
+      run: { id: f.runId, agentId: f.agentId, companyId: f.companyId },
+      issue: { ...f.issue, status: "in_progress", assigneeAgentId: f.agentId, assigneeUserId: null },
+      wakeup: w.wakeup,
+    });
+    expect(scheduled).toBe(true);
+    expect(w.calls[0]).toMatchObject({ agentId: f.agentId, reason: QUALITY_CHECK_FOLLOW_UP_REASON });
+  });
+
   it("finish check: met -> lets done through with a 'passed' note", async () => {
     const f = await seed({ settings: { doneCheckEnabled: true } });
     const c = critic("pass", ["All texts were converted."]);
@@ -825,5 +930,18 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     expect(
       await applyDefaultReviewerPolicy(db, { ...base, companyId: nonCode.companyId, projectId: nonCode.projectId }),
     ).toBeNull();
+  });
+});
+
+describe("isHandOffToReview (a worker's done on a task with a review stage goes to review)", () => {
+  const stages = { stages: [{ type: "review", participants: [{ type: "agent", agentId: "reviewer" }] }] };
+  it("covers in_review, and done only when a reviewer stage will take it", () => {
+    expect(isHandOffToReview({ requestedStatus: "in_review", currentStatus: "in_progress", executionPolicy: null })).toBe(true);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: stages, assigneeAgentId: "worker" })).toBe(true);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: null })).toBe(false);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_review", executionPolicy: stages })).toBe(false);
+    expect(isHandOffToReview({ requestedStatus: "in_review", currentStatus: "in_review", executionPolicy: null })).toBe(false);
+    // a stage staffed only by the worker reviews nothing
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: stages, assigneeAgentId: "reviewer" })).toBe(false);
   });
 });

@@ -100,6 +100,7 @@ const memberActor = { ...ownerActor, userId: "user-member", memberships: [{ comp
 const operatorActor = { ...ownerActor, userId: "user-operator", memberships: [{ companyId: COMPANY_A, membershipRole: "operator", status: "active" }] };
 const instanceAdminActor = { ...memberActor, userId: "user-instance", isInstanceAdmin: true, memberships: [] };
 const agentActor = { type: "agent", agentId: AGENT_ID, companyId: COMPANY_A, source: "agent_jwt" };
+const boardKeyOwnerActor = { ...ownerActor, source: "board_key", keyId: "key-1" };
 const boardChatActor = { ...ownerActor, source: "board_chat" };
 const otherCompanyOwner = { ...ownerActor, userId: "user-other", companyIds: [COMPANY_B], memberships: [{ companyId: COMPANY_B, membershipRole: "owner", status: "active" }] };
 
@@ -179,6 +180,14 @@ describe("trading_strategy_version approvals", () => {
     it("refuses Board chat (how Telegram messages reach the system), even for an owner", async () => {
       const res = await request(await createApp(boardChatActor)).post(`/api/approvals/${APPROVAL_ID}/approve`).send({});
       expect(res.status).toBe(403);
+      expect(mockVersions.approveFromCard).not.toHaveBeenCalled();
+      expect(mockApprovalService.approve).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("refuses an owner's board API key (the CLI, the Telegram bridge): nothing is activated or approved (DUR-5199)", async () => {
+      const res = await request(await createApp(boardKeyOwnerActor)).post(`/api/approvals/${APPROVAL_ID}/approve`).send({});
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("approval card in Paperclip");
       expect(mockVersions.approveFromCard).not.toHaveBeenCalled();
       expect(mockApprovalService.approve).not.toHaveBeenCalled();
     }, TEST_TIMEOUT);
