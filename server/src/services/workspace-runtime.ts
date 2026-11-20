@@ -752,6 +752,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   sourceIssue: ExecutionWorkspaceIssueRef | null;
   executionWorkspaceId?: string | null;
   baseRef?: string | null;
+  allowSwitchFromOtherBranch?: boolean;
 }): Promise<GitWorktreeBranchIncoherenceEvidence> {
   const status = await runGit(
     ["status", "--porcelain", "--untracked-files=all"],
@@ -777,8 +778,20 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   const sameHead = Boolean(expectedHeadSha && actualHeadSha && expectedHeadSha === actualHeadSha);
   const expectedBranchExists = Boolean(expectedHeadSha);
 
+  // DUR-5184: at the start of a run (allowSwitchFromOtherBranch), a clean folder
+  // sitting on another *named* branch is put back on the expected branch even
+  // when the two branches differ. The end-of-run check keeps the strict rule: a
+  // run that switched branches and committed there is flagged, not hidden. Nothing is lost: the
+  // folder has no local changes, and the branch it is leaving still holds every
+  // commit (registeredBranchMatchesHead is only true for a named, registered
+  // branch). Dirty or detached folders still block, so uncommitted work is never
+  // touched. `git checkout` itself refuses if the expected branch is checked out
+  // in another folder, which surfaces as a failed repair.
   const checkoutExistingEligible =
-    cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
+    cleanliness === "clean" &&
+    expectedBranchExists &&
+    registeredBranchMatchesHead &&
+    (sameHead || input.allowSwitchFromOtherBranch === true);
   // The expected branch is gone entirely -- most commonly because it already
   // merged and was deleted -- but the worktree directory is still registered and
   // has no local changes to lose. Recreating the branch from the base ref gets a
@@ -797,7 +810,9 @@ async function inspectGitWorktreeBranchIncoherence(input: {
       ? "create_from_base"
       : null;
   const safeRepairReason = checkoutExistingEligible
-    ? "clean worktree and expected branch points at the current HEAD"
+    ? sameHead
+      ? "clean worktree and expected branch points at the current HEAD"
+      : `clean worktree on branch "${formatBranchForMessage(input.actualBranchName)}"; switching back to the expected branch (the other branch keeps its commits)`
     : createFromBaseEligible
       ? `expected branch does not exist; recreating it from base ref "${input.baseRef}"`
       : cleanliness !== "clean"
@@ -889,6 +904,9 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   // all (e.g. deleted after merging). Omit to keep the old strict behavior of
   // always failing when the expected branch is missing.
   baseRef?: string | null;
+  // Start-of-run only: put a clean folder back on the expected branch even if
+  // it is on a different named branch (DUR-5184). Dirty folders still block.
+  allowSwitchFromOtherBranch?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const expectedBranchName = input.expectedBranchName?.trim();
@@ -907,6 +925,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     sourceIssue: input.sourceIssue,
     executionWorkspaceId: input.executionWorkspaceId ?? null,
     baseRef: input.baseRef ?? null,
+    allowSwitchFromOtherBranch: input.allowSwitchFromOtherBranch === true,
   });
 
   if (!evidence.safeRepair.eligible) {
@@ -936,7 +955,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
       },
       successMessage: evidence.safeRepair.mode === "create_from_base"
         ? `Repaired git worktree at ${input.worktreePath}: recreated missing branch ${expectedBranchName} from ${input.baseRef}\n`
-        : `Repaired clean git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
+        : `Workspace ${input.worktreePath} was on branch "${formatBranchForMessage(currentBranch)}" instead of "${expectedBranchName}", and had no uncommitted changes, so it was switched back to "${expectedBranchName}". The other branch was not changed.\n`,
       failureLabel: `git ${repairArgs.join(" ")}`,
     });
   } catch (error) {
@@ -1830,6 +1849,7 @@ export async function realizeExecutionWorkspace(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: null,
         baseRef,
+        allowSwitchFromOtherBranch: true,
         recorder: input.recorder ?? null,
       });
       return await validateLinkedGitWorktree({
@@ -1996,6 +2016,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: input.workspace.id ?? null,
         baseRef: reuseBaseRef,
+        allowSwitchFromOtherBranch: true,
         recorder: input.recorder ?? null,
       });
     }

@@ -2302,7 +2302,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("gives a code-writing child of a git-worktree parent its own isolated workspace instead of the parent folder (DUR-5184)", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -2366,6 +2366,84 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       parentId: parentIssueId,
       projectId,
       title: "Child issue",
+    });
+
+    expect(child.parentId).toBe(parentIssueId);
+    expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
+    // Not bound to the parent's folder: the child's first run provisions its own worktree and branch.
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).not.toBe("reuse_existing");
+    expect(child.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
+      workspaceRuntime: { profile: "agent" },
+    });
+  });
+
+  it("lets a read-only (ask/planning) child share the parent git worktree when child workspace fields are omitted (DUR-5184)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "workspace-key",
+    });
+
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Issue worktree",
+      status: "active",
+      providerType: "git_worktree",
+      providerRef: `/tmp/${executionWorkspaceId}`,
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      executionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceRuntime: { profile: "agent" },
+      },
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId,
+      title: "Child issue",
+      workMode: "planning",
     });
 
     expect(child.parentId).toBe(parentIssueId);
@@ -2958,6 +3036,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     const { issue: child, parentBlockerAdded } = await svc.createChild(parentIssueId, {
       title: "Child helper",
       status: "todo",
+      workMode: "planning",
       description: "Implement the helper.",
       acceptanceCriteria: ["Uses the parent issue as parentId", "Reuses the parent execution workspace"],
       blockParentUntilDone: true,
@@ -4366,6 +4445,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       parentId: parentIssueId,
       projectId,
       title: "Child issue",
+      workMode: "planning",
     });
 
     expect(child.parentId).toBe(parentIssueId);
@@ -4438,6 +4518,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     const child = await svc.create(companyId, {
       parentId: parentIssueId,
       title: "Generic child issue",
+      workMode: "planning",
     });
 
     expect(child.parentId).toBe(parentIssueId);

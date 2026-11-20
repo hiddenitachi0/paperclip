@@ -8,6 +8,7 @@ import {
   parseProjectExecutionWorkspacePolicy,
   resolveExecutionWorkspaceEnvironmentId,
   resolveExecutionWorkspaceMode,
+  childMayShareParentWorkspace,
 } from "../services/execution-workspace-policy.ts";
 
 describe("execution workspace policy helpers", () => {
@@ -379,5 +380,23 @@ describe("execution workspace policy helpers", () => {
         }).workspaceStrategy,
       ).toMatchObject({ type: "git_worktree" });
     });
+  });
+});
+
+describe("childMayShareParentWorkspace (DUR-5184)", () => {
+  it("gives a code-writing child of a git-worktree parent its own folder", () => {
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "standard" })).toBe(false);
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: undefined })).toBe(false);
+  });
+
+  it("lets a read-only child share the parent's folder", () => {
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "ask" })).toBe(true);
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "planning" })).toBe(true);
+  });
+
+  it("keeps existing inheritance for parents that are not git worktrees", () => {
+    for (const mode of ["shared_workspace", "operator_branch", "adapter_managed", "cloud_sandbox", null]) {
+      expect(childMayShareParentWorkspace({ parentWorkspaceMode: mode, childWorkMode: "standard" })).toBe(true);
+    }
   });
 });

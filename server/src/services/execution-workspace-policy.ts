@@ -195,6 +195,20 @@ export function issueExecutionWorkspaceModeForPersistedWorkspace(
   return "shared_workspace";
 }
 
+// DUR-5184: whether a new child issue may reuse its parent's execution
+// workspace. Only a child that cannot write code (ask / planning work modes)
+// may share a parent's git worktree; a standard child gets its own folder and
+// branch so it cannot leave the parent's folder on the wrong branch. Parents
+// that are not git worktrees (shared project checkout, adapter-managed,
+// cloud sandbox) keep the existing inheritance.
+export function childMayShareParentWorkspace(input: {
+  parentWorkspaceMode: string | null | undefined;
+  childWorkMode: string | null | undefined;
+}): boolean {
+  if (input.parentWorkspaceMode !== "isolated_workspace") return true;
+  return input.childWorkMode === "ask" || input.childWorkMode === "planning";
+}
+
 export function resolveExecutionWorkspaceMode(input: {
   projectPolicy: ProjectExecutionWorkspacePolicy | null;
   issueSettings: IssueExecutionWorkspaceSettings | null;

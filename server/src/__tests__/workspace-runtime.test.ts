@@ -2555,7 +2555,7 @@ describe("realizeExecutionWorkspace", () => {
     });
   }, 15_000);
 
-  it("rejects an existing persisted git worktree when the checked-out branch changed to a different commit", async () => {
+  it("puts a clean persisted git worktree back on its expected branch when a run left it on another branch (DUR-5184)", async () => {
     const repoRoot = await createTempRepo();
 
     const initial = await realizeExecutionWorkspace({
@@ -2590,6 +2590,87 @@ describe("realizeExecutionWorkspace", () => {
     await fs.writeFile(path.join(initial.cwd, "publish.txt"), "publish\n", "utf8");
     await runGit(initial.cwd, ["add", "publish.txt"]);
     await runGit(initial.cwd, ["commit", "-m", "Add publish branch work"]);
+
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-3",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: initial.cwd,
+        providerRef: initial.worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: initial.branchName,
+      },
+      issue: {
+        id: "issue-3",
+        identifier: "PAP-456",
+        title: "Keep persisted branch coherent",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+    });
+
+    expect(restored).not.toBeNull();
+    expect(await readGit(initial.cwd, ["symbolic-ref", "--short", "HEAD"])).toBe(initial.branchName);
+    // The other branch keeps its commit, so nothing was lost.
+    expect(await readGit(initial.cwd, ["log", "-1", "--format=%s", actualBranch])).toBe("Add publish branch work");
+    expect(JSON.stringify(operations)).toContain("was on branch");
+  }, 15_000);
+
+  it("still blocks a persisted git worktree on another branch when the folder has uncommitted changes (DUR-5184)", async () => {
+    const repoRoot = await createTempRepo();
+
+    const initial = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-456",
+        title: "Keep persisted branch coherent",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    const actualBranch = "PAP-456-push-pr-head";
+    await runGit(initial.cwd, ["checkout", "-b", actualBranch]);
+    await fs.writeFile(path.join(initial.cwd, "publish.txt"), "publish\n", "utf8");
+    await runGit(initial.cwd, ["add", "publish.txt"]);
+    await runGit(initial.cwd, ["commit", "-m", "Add publish branch work"]);
+
+    // Uncommitted work in the folder: it must not be touched.
+    await fs.writeFile(path.join(initial.cwd, "scratch.txt"), "unsaved\n", "utf8");
 
     await expect(ensurePersistedExecutionWorkspaceAvailable({
       base: {
@@ -2633,7 +2714,7 @@ describe("realizeExecutionWorkspace", () => {
           executionWorkspaceId: "execution-workspace-3",
           expectedBranch: initial.branchName,
           actualBranch,
-          cleanliness: "clean",
+          cleanliness: "dirty",
           provenance: expect.objectContaining({
             expectedBranchExists: true,
             actualBranchExists: true,
@@ -2643,11 +2724,14 @@ describe("realizeExecutionWorkspace", () => {
             eligible: false,
             attempted: false,
             succeeded: false,
-            reason: "expected branch and current HEAD differ",
+            reason: "worktree is not clean",
           }),
         }),
       },
     });
+
+    expect(await readGit(initial.cwd, ["symbolic-ref", "--short", "HEAD"])).toBe(actualBranch);
+    expect(await fs.readFile(path.join(initial.cwd, "scratch.txt"), "utf8")).toBe("unsaved\n");
   }, 15_000);
 
   it("recreates a persisted git worktree's expected branch from base when it was deleted after merge", async () => {
