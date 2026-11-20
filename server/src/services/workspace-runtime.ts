@@ -30,6 +30,12 @@ import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { sanitizeRuntimeServiceBaseEnv, stripServerSecrets } from "./runtime-env.js";
+import {
+  formatWorktreeFootprint,
+  measureWorktreeFootprint,
+  prepareSharedPackageStore,
+  type SharedPackageStore,
+} from "./workspace-shared-store.js";
 
 export { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
 
@@ -1409,6 +1415,8 @@ export function buildWorkspaceCommandEnv(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
+  /** DUR-5268: shared package store variables (see workspace-shared-store.ts). */
+  sharedStoreEnv?: Record<string, string> | null;
 }) {
   // Unlike sanitizeRuntimeServiceBaseEnv (used for independent long-running
   // runtime services, which get an intentionally minimal env), workspace
@@ -1447,6 +1455,7 @@ export function buildWorkspaceCommandEnv(input: {
   env.PAPERCLIP_ISSUE_IDENTIFIER = input.issue?.identifier ?? "";
   env.PAPERCLIP_ISSUE_TITLE = input.issue?.title ?? "";
   env.PAPERCLIP_ISSUE_WORK_MODE = input.issue?.workMode ?? "";
+  if (input.sharedStoreEnv) Object.assign(env, input.sharedStoreEnv);
   return env;
 }
 
@@ -1640,32 +1649,73 @@ async function provisionExecutionWorktree(input: {
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const provisionCommand = asString(input.strategy.provisionCommand, "").trim();
-  if (!provisionCommand) return;
-  const resolvedProvisionCommand = resolveRepoManagedWorkspaceCommand(provisionCommand, input.repoRoot);
+  // DUR-5268: point package installs at one shared store on the worktree's own
+  // filesystem so node_modules are hard links, not a fresh copy per task.
+  const sharedStore = await prepareSharedPackageStore({
+    repoRoot: input.repoRoot,
+    worktreePath: input.worktreePath,
+  }).catch(() => null);
+  const sharedStoreEnv = sharedStore?.env ?? null;
+  if (provisionCommand) {
+    const resolvedProvisionCommand = resolveRepoManagedWorkspaceCommand(provisionCommand, input.repoRoot);
+    await recordWorkspaceCommandOperation(input.recorder, {
+      phase: "workspace_provision",
+      command: provisionCommand,
+      resolvedCommand: resolvedProvisionCommand,
+      cwd: input.worktreePath,
+      env: buildWorkspaceCommandEnv({
+        base: input.base,
+        repoRoot: input.repoRoot,
+        worktreePath: input.worktreePath,
+        branchName: input.branchName,
+        issue: input.issue,
+        agent: input.agent,
+        created: input.created,
+        sharedStoreEnv,
+      }),
+      label: `Execution workspace provision command "${provisionCommand}"`,
+      metadata: {
+        repoRoot: input.repoRoot,
+        worktreePath: input.worktreePath,
+        branchName: input.branchName,
+        created: input.created,
+        resolvedCommand: resolvedProvisionCommand === provisionCommand ? null : resolvedProvisionCommand,
+        sharedPackageStore: sharedStore?.sameFilesystem ? sharedStore.storeDir : null,
+      },
+      successMessage: `Provisioned workspace at ${input.worktreePath}\n`,
+    });
+  }
 
-  await recordWorkspaceCommandOperation(input.recorder, {
+  // Once per new worktree: make its real disk cost visible in the run log.
+  if (input.created && input.recorder) {
+    await reportNewWorktreeFootprint({
+      recorder: input.recorder,
+      worktreePath: input.worktreePath,
+      store: sharedStore,
+    }).catch(() => undefined);
+  }
+}
+
+async function reportNewWorktreeFootprint(input: {
+  recorder: WorkspaceOperationRecorder;
+  worktreePath: string;
+  store: SharedPackageStore | null;
+}) {
+  await input.recorder.recordOperation({
     phase: "workspace_provision",
-    command: provisionCommand,
-    resolvedCommand: resolvedProvisionCommand,
+    command: "workspace size report",
     cwd: input.worktreePath,
-    env: buildWorkspaceCommandEnv({
-      base: input.base,
-      repoRoot: input.repoRoot,
-      worktreePath: input.worktreePath,
-      branchName: input.branchName,
-      issue: input.issue,
-      agent: input.agent,
-      created: input.created,
-    }),
-    label: `Execution workspace provision command "${provisionCommand}"`,
-    metadata: {
-      repoRoot: input.repoRoot,
-      worktreePath: input.worktreePath,
-      branchName: input.branchName,
-      created: input.created,
-      resolvedCommand: resolvedProvisionCommand === provisionCommand ? null : resolvedProvisionCommand,
+    metadata: { kind: "worktree_footprint" },
+    run: async () => {
+      const footprint = await measureWorktreeFootprint(input.worktreePath);
+      const warnings = (input.store?.warnings ?? []).map((warning) => `${warning}\n`).join("");
+      return {
+        status: "succeeded",
+        exitCode: 0,
+        system: warnings + formatWorktreeFootprint(footprint, input.store ?? { storeDir: "", sameFilesystem: false }),
+        metadata: { ...footprint, sharedPackageStore: input.store?.sameFilesystem ? input.store.storeDir : null },
+      };
     },
-    successMessage: `Provisioned workspace at ${input.worktreePath}\n`,
   });
 }
 
