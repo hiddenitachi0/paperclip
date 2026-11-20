@@ -220,6 +220,8 @@ export async function createApp(
       }): Promise<unknown>;
     };
     databaseBackupService?: InstanceDatabaseBackupService;
+    /** DUR-5176: a separate backup service owns the dumps; the backup routes say so instead of running one. */
+    databaseBackupManagedExternally?: boolean;
     databaseBackupDir?: string;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
@@ -465,7 +467,11 @@ export async function createApp(
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
   api.use(crossCompanyAccessLogRoutes(db));
   if (opts.databaseBackupService) {
-    api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
+    api.use(
+      instanceDatabaseBackupRoutes(opts.databaseBackupService, {
+        managedExternally: opts.databaseBackupManagedExternally === true,
+      }),
+    );
   }
   api.use(instanceDiskHealthRoutes(createDiskHealthService({ backupDir: opts.databaseBackupDir ?? resolveDefaultBackupDir() })));
   const pluginRegistry = pluginRegistryService(db);

@@ -67,6 +67,7 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     embeddedPostgresDataDir: "/tmp/paperclip-test-db",
     embeddedPostgresPort: 54329,
     databaseBackupEnabled: false,
+    databaseBackupManagedExternally: false,
     databaseBackupIntervalMinutes: 60,
     databaseBackupRetentionDays: 30,
     databaseBackupDir: "/tmp/paperclip-test-backups",

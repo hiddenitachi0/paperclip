@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "@/lib/router";
 import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Issue } from "@paperclipai/shared";
 import { approvalsApi } from "../api/approvals";
+import { approvalCardRevision } from "../lib/approval-card-revision";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -43,8 +44,8 @@ export function Approvals() {
   });
 
   const approveMutation = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
-      approvalsApi.approve(id, undefined, reason ? { reason } : undefined),
+    mutationFn: ({ id, reason, revision }: { id: string; reason?: string; revision?: number }) =>
+      approvalsApi.approve(id, undefined, reason ? { reason } : undefined, revision),
     onSuccess: (_approval, { id }) => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
@@ -150,8 +151,8 @@ export function Approvals() {
               key={approval.id}
               approval={approval}
               requesterAgent={approval.requestedByAgentId ? (agents ?? []).find((a) => a.id === approval.requestedByAgentId) ?? null : null}
-              onApprove={() => approveMutation.mutate({ id: approval.id })}
-              onApproveWithoutSecurityReview={(reason) => approveMutation.mutate({ id: approval.id, reason })}
+              onApprove={() => approveMutation.mutate({ id: approval.id, revision: approvalCardRevision(approval) })}
+              onApproveWithoutSecurityReview={(reason) => approveMutation.mutate({ id: approval.id, reason, revision: approvalCardRevision(approval) })}
               onReject={(note) => rejectMutation.mutate({ id: approval.id, note })}
               onRequestSecurityReview={() => requestSecurityReviewMutation.mutate(approval.id)}
               isRequestingSecurityReview={requestSecurityReviewMutation.isPending}
