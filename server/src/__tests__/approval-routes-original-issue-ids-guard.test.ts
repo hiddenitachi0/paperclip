@@ -332,6 +332,40 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
     expect(resubmittedPayload.originalIssueIds).toEqual([ISSUE_ID]);
   });
 
+  // DUR-5249: a vague repo name ("fork") is replaced by the project's GitHub workspace repo so the
+  // head commit can be looked up; with no way to tell, it is left for the head lookup to refuse.
+  it("fills a vague repo name from the project's GitHub workspace", async () => {
+    const db = createDbWithProjectAndRepo({ projectId: "project-1", repoUrl: "https://github.com/acme/real-repo.git" });
+    const app = await createAgentApp(db);
+
+    const res = await request(app)
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
+      .send({
+        type: "request_board_approval",
+        issueIds: [ISSUE_ID],
+        payload: { kind: "merge_pr", base: "custom", repo: "fork", prNumber: 757 },
+      });
+
+    expect(res.status).toBe(201);
+    const savedPayload: Record<string, unknown> = mockApprovalService.create.mock.calls[0]?.[1]?.payload ?? {};
+    expect(savedPayload.repo).toBe("acme/real-repo");
+  });
+
+  it("leaves a vague repo name alone when no GitHub workspace can be found", async () => {
+    const app = await createAgentApp(createDbWithProjectAndRepo({ projectId: null, repoUrl: null }));
+
+    await request(app)
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
+      .send({
+        type: "request_board_approval",
+        issueIds: [ISSUE_ID],
+        payload: { kind: "merge_pr", base: "custom", repo: "fork", prNumber: 757 },
+      });
+
+    const savedPayload: Record<string, unknown> = mockApprovalService.create.mock.calls[0]?.[1]?.payload ?? {};
+    expect(savedPayload.repo).toBe("fork");
+  });
+
   it("rejects filing a merge_pr approval whose repo does not match the project's registered GitHub repo", async () => {
     const db = createDbWithProjectAndRepo({
       projectId: "project-1",
