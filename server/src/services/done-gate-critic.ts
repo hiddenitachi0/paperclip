@@ -100,6 +100,12 @@ const MAX_FINDING_CHARS = 400;
 
 export const DONE_GATE_NEEDS_WORK_PREFIX = "Quality check: needs work";
 export const DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX = "Quality check (dry run): needs work";
+/**
+ * The pre-review loop's own needs-work comment. Deliberately NOT starting with
+ * DONE_GATE_NEEDS_WORK_PREFIX: rounds spent before review must not count against the
+ * finish check's rounds (and the other way round).
+ */
+export const DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX = "Quality check (before review): needs work";
 export const DONE_GATE_PASS_PREFIX = "Quality check: passed";
 export const DONE_GATE_DRY_RUN_PASS_PREFIX = "Quality check (dry run): passed";
 export const DONE_GATE_ESCALATED_PREFIX = "Quality check: asking the operator";
@@ -112,6 +118,7 @@ export const DONE_GATE_UNAVAILABLE_PREFIX = "Quality check: could not run";
  */
 export const DONE_GATE_COMMENT_PREFIXES = [
   DONE_GATE_NEEDS_WORK_PREFIX,
+  DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX,
   DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX,
   DONE_GATE_PASS_PREFIX,
   DONE_GATE_DRY_RUN_PASS_PREFIX,
@@ -451,14 +458,15 @@ export async function findDoneGateLoopResetAt(
  */
 export async function countDoneGateNeedsWorkRounds(
   db: Db,
-  input: { companyId: string; issueId: string; since?: Date | null; mode?: DoneGateMode },
+  input: { companyId: string; issueId: string; since?: Date | null; mode?: DoneGateMode; beforeReview?: boolean },
 ): Promise<number> {
   const rows = await db
     .select({ body: issueComments.body })
     .from(issueComments)
     .where(doneGateCommentWhere(input, DONE_GATE_COMMENT_LIKE));
-  const prefixes =
-    input.mode === "enforce"
+  const prefixes = input.beforeReview
+    ? [DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX]
+    : input.mode === "enforce"
       ? [DONE_GATE_NEEDS_WORK_PREFIX]
       : input.mode === "dry_run"
         ? [DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX]
@@ -542,8 +550,13 @@ export function buildDoneGateNeedsWorkComment(input: {
   maxRounds: number;
   findings: string[];
   dryRun: boolean;
+  beforeReview?: boolean;
 }): string {
-  const prefix = input.dryRun ? DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX : DONE_GATE_NEEDS_WORK_PREFIX;
+  const prefix = input.dryRun
+    ? DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX
+    : input.beforeReview
+      ? DONE_GATE_BEFORE_REVIEW_NEEDS_WORK_PREFIX
+      : DONE_GATE_NEEDS_WORK_PREFIX;
   const lines = [
     `${prefix} (round ${input.round} of ${input.maxRounds}).`,
     "",
@@ -554,6 +567,13 @@ export function buildDoneGateNeedsWorkComment(input: {
   if (input.dryRun) {
     lines.push(
       "This is a dry run: nothing has been changed and the task can still move to done. The reviewer's notes are here so you can judge whether this check is useful.",
+    );
+  } else if (input.beforeReview) {
+    lines.push(
+      "The task has gone back to in progress. Fix what is listed above and move it to review again with a comment saying what you did. If you believe a finding is wrong, say why in that comment -- the reviewer sees it." +
+        (input.round >= input.maxRounds
+          ? " This was the last automatic round: the next attempt goes to review with these findings still listed."
+          : ""),
     );
   } else if (input.round >= input.maxRounds) {
     lines.push(
@@ -644,6 +664,13 @@ export interface DoneGateEvaluationInput {
   configOverride?: { mode: DoneGateMode; maxRounds: number };
   unavailableReason?: (err: unknown) => string | null;
   settingsPath?: string;
+  /**
+   * The pre-review quality loop (pre-review-quality-loop.ts) runs the same check on the move
+   * to in_review. Differences: the move to in_review is gated instead of done; the wording
+   * says "review"; and at the round cap the move is let through (the findings are already on
+   * the task for the reviewer) instead of parking the task and asking the operator.
+   */
+  beforeReview?: boolean;
 }
 
 export interface DoneGateEvaluationResult {
@@ -661,8 +688,9 @@ export interface DoneGateEvaluationResult {
  * (or parked as blocked, on escalation) and the findings comment is on the issue.
  */
 export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Promise<DoneGateEvaluationResult | null> {
-  if (input.requestedStatus !== "done") return null;
-  if (input.currentStatus === "done") return null;
+  const targetStatus = input.beforeReview ? "in_review" : "done";
+  if (input.requestedStatus !== targetStatus) return null;
+  if (input.currentStatus === targetStatus) return null;
   // Never gates a board/human actor -- this guards agent self-certification, not operator authority.
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
 
@@ -687,7 +715,13 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
   } catch (err) {
     logger.warn({ err, issueId }, "done-gate critic: could not read the last operator intervention; counting all rounds");
   }
-  const priorRounds = await countDoneGateNeedsWorkRounds(db, { companyId, issueId, since: resetAt, mode: config.mode });
+  const priorRounds = await countDoneGateNeedsWorkRounds(db, {
+    companyId,
+    issueId,
+    since: resetAt,
+    mode: config.mode,
+    beforeReview: input.beforeReview === true,
+  });
 
   if (priorRounds >= config.maxRounds) {
     if (dryRun) {
@@ -695,6 +729,8 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
       logger.info({ issueId, priorRounds }, "done-gate critic (dry run): round cap reached, letting done through");
       return null;
     }
+    // Before review there is nobody to ask: the findings are on the task, so the move goes on to the reviewer.
+    if (input.beforeReview) return null;
     return escalateToBoard({ ...input, maxRounds: config.maxRounds, resetAt });
   }
 
@@ -814,6 +850,7 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
     maxRounds: config.maxRounds,
     findings: verdict.findings,
     dryRun,
+    beforeReview: input.beforeReview === true,
   });
   try {
     await postDoneGateComment(db, { companyId, issueId, sourceRunId, body: comment });
@@ -837,13 +874,15 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
   const label = input.issue.identifier ?? "This task";
   const lastRoundNote =
     round >= config.maxRounds
-      ? " That was the last automatic round: if the next attempt still needs work, the operator will be asked to decide."
+      ? input.beforeReview
+        ? " That was the last automatic round: the next attempt goes to review with these findings still listed."
+        : " That was the last automatic round: if the next attempt still needs work, the operator will be asked to decide."
       : "";
   return {
     message:
-      `${label} can't move to done yet -- an independent quality check found ${verdict.findings.length} thing(s) that still need work ` +
+      `${label} can't move to ${input.beforeReview ? "review" : "done"} yet -- an independent quality check found ${verdict.findings.length} thing(s) that still need work ` +
       `(round ${round} of ${config.maxRounds}). The task is back in progress; the findings are in a comment on it. ` +
-      `Fix them and mark it done again with a comment saying what you did.${lastRoundNote}\n\n` +
+      `Fix them and ${input.beforeReview ? "move it to review" : "mark it done"} again with a comment saying what you did.${lastRoundNote}\n\n` +
       formatDoneGateFindings(verdict.findings),
     findings: verdict.findings,
     escalated: false,

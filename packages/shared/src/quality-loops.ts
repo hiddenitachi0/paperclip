@@ -24,6 +24,12 @@ export const QUALITY_CHECK_BILLING_CODE = "quality_check";
 export const QUALITY_SELF_REVIEW_MAX_PASSES = 3;
 export const QUALITY_DONE_CHECK_MAX_ROUNDS = 3;
 export const QUALITY_DONE_CHECK_DEFAULT_ROUNDS = 2;
+/** Key in project_workspaces.metadata that holds the workspace's "Test command (run before review)". */
+export const PROJECT_WORKSPACE_TEST_COMMAND_KEY = "testCommand";
+/** Rounds of "tests failed, fix and try again" before a task goes to review anyway. */
+export const QUALITY_PRE_REVIEW_MAX_ROUNDS = 2;
+/** Default time limit for the project's test command before review. */
+export const QUALITY_PRE_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * Done-gate with evidence: before an AGENT may mark a code task done, the server checks that
@@ -52,6 +58,12 @@ export interface CompanyQualityLoopSettings {
   effectiveDoneCheckModel: { directoryEntryId: string; name: string } | null;
   /** Agent that reviews new code tasks before they are done. Null = none. */
   defaultReviewerAgentId: string | null;
+  /**
+   * Before an agent moves a task to review, run the project's test command and check the
+   * diff against what the task asked for. Failures go back to the same agent (at most
+   * QUALITY_PRE_REVIEW_MAX_ROUNDS times). Only applies to projects that have a test command.
+   */
+  preReviewQualityLoop: boolean;
   /** How hard the server checks an agent's "done" on a code task (commit, files, checks). */
   doneEvidenceMode: QualityDoneEvidenceMode;
 }
@@ -70,6 +82,7 @@ export const updateCompanyQualityLoopSettingsSchema = z
     doneCheckMaxRounds: z.number().int().min(1).max(QUALITY_DONE_CHECK_MAX_ROUNDS).optional(),
     doneCheckDirectoryEntryId: z.string().uuid().nullable().optional(),
     defaultReviewerAgentId: z.string().uuid().nullable().optional(),
+    preReviewQualityLoop: z.boolean().optional(),
     doneEvidenceMode: z.enum(QUALITY_DONE_EVIDENCE_MODES).optional(),
   })
   .strict();
