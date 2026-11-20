@@ -411,6 +411,28 @@ describe("childMayShareParentWorkspace (DUR-5184)", () => {
     expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "planning" })).toBe(true);
   });
 
+  it("under requireIsolation, never hands a child a folder that is not a git worktree", () => {
+    for (const childWorkMode of ["standard", "ask", "planning"]) {
+      expect(
+        childMayShareParentWorkspace({
+          parentWorkspaceMode: "shared_workspace",
+          parentStrategyType: "project_primary",
+          childWorkMode,
+          requireIsolation: true,
+        }),
+      ).toBe(false);
+    }
+    // A read-only child may still share a parent that is a real worktree.
+    expect(
+      childMayShareParentWorkspace({
+        parentWorkspaceMode: "isolated_workspace",
+        parentStrategyType: "git_worktree",
+        childWorkMode: "ask",
+        requireIsolation: true,
+      }),
+    ).toBe(true);
+  });
+
   it("keeps existing inheritance for parents that are not git worktrees", () => {
     for (const mode of ["shared_workspace", "operator_branch", "adapter_managed", "cloud_sandbox", null]) {
       expect(childMayShareParentWorkspace({ parentWorkspaceMode: mode, childWorkMode: "standard" })).toBe(true);

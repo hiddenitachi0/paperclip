@@ -377,6 +377,20 @@ export function projectRoutes(rawDb: Db) {
         ...collectProjectDeployTransportCommandPaths(body),
       ],
     );
+    // requireIsolation is board-only, and a PATCH replaces the whole policy, so an
+    // agent that leaves the key out (or sends `null`) must not be able to drop it.
+    // Carry the stored value forward for agent writes.
+    if (
+      req.actor.type === "agent" &&
+      body.executionWorkspacePolicy !== undefined &&
+      (existing.executionWorkspacePolicy as { requireIsolation?: unknown } | null)?.requireIsolation === true
+    ) {
+      body.executionWorkspacePolicy = {
+        enabled: false,
+        ...(body.executionWorkspacePolicy ?? {}),
+        requireIsolation: true,
+      };
+    }
     await assertProjectEnvironmentSelection(
       existing.companyId,
       readProjectPolicyEnvironmentId(body.executionWorkspacePolicy),

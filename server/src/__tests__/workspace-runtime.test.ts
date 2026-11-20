@@ -2633,6 +2633,56 @@ describe("realizeExecutionWorkspace", () => {
     expect(JSON.stringify(operations)).toContain("was on branch");
   }, 15_000);
 
+  it("does not switch a folder's branch while another run is using it (DUR-5184)", async () => {
+    const repoRoot = await createTempRepo();
+    const base = {
+      baseCwd: repoRoot,
+      source: "project_primary" as const,
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+      repoUrl: null,
+      repoRef: "HEAD",
+    };
+    const agent = { id: "agent-1", name: "Codex Coder", companyId: "company-1" };
+    const issue = { id: "issue-1", identifier: "PAP-457", title: "Shared folder in use" };
+    const initial = await realizeExecutionWorkspace({
+      base,
+      config: { workspaceStrategy: { type: "git_worktree", branchTemplate: "{{issue.identifier}}-{{slug}}" } },
+      issue,
+      agent,
+    });
+    await runGit(initial.cwd, ["checkout", "-b", "PAP-457-other"]);
+    await fs.writeFile(path.join(initial.cwd, "other.txt"), "o\n", "utf8");
+    await runGit(initial.cwd, ["add", "other.txt"]);
+    await runGit(initial.cwd, ["commit", "-m", "other work"]);
+
+    const ensure = (inUse: boolean) =>
+      ensurePersistedExecutionWorkspaceAvailable({
+        base,
+        workspace: {
+          id: "execution-workspace-9",
+          mode: "isolated_workspace",
+          strategyType: "git_worktree",
+          cwd: initial.cwd,
+          providerRef: initial.worktreePath,
+          projectId: "project-1",
+          projectWorkspaceId: "workspace-1",
+          repoUrl: null,
+          baseRef: "HEAD",
+          branchName: initial.branchName,
+        },
+        issue,
+        agent,
+        isInUseByAnotherRun: async () => inUse,
+      });
+
+    await expect(ensure(true)).rejects.toThrow(/another run is using this folder/);
+    expect(await readGit(initial.cwd, ["symbolic-ref", "--short", "HEAD"])).toBe("PAP-457-other");
+    // Once the other run is done, the same call puts the folder back on its branch.
+    expect(await ensure(false)).not.toBeNull();
+    expect(await readGit(initial.cwd, ["symbolic-ref", "--short", "HEAD"])).toBe(initial.branchName);
+  }, 20_000);
+
   it("still blocks a persisted git worktree on another branch when the folder has uncommitted changes (DUR-5184)", async () => {
     const repoRoot = await createTempRepo();
 
@@ -5058,7 +5108,7 @@ describe("parallel-safe workspaces (DUR-5184)", () => {
       agent,
     });
     expect(workspace.cwd).toBe(repoRoot);
-    expect(workspace.warnings.join("\n")).toContain("requireIsolation");
+    expect(workspace.warnings.join("\n")).toContain("one folder per task");
   });
 
   it("lets a provision command link shared dependencies into every fresh worktree", async () => {

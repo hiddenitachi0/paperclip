@@ -241,6 +241,40 @@ describe("worktree cleanup (DUR-4497)", () => {
         expect(sh(repo, "branch", "--list", "pr-open")).toContain("pr-open");
       });
 
+      it("keeps the worktree of a branch with no commits of its own (a no-code task is not 'merged')", async () => {
+        const wt = addWorktree("pr-no-commits");
+        const { deps, cleaned, flagged } = setup([mergedCand("4", wt, "pr-no-commits")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 0, kept: 1 });
+        expect(cleaned).toEqual([]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(wt)).toBe(true);
+      });
+
+      it("removes an unused run-<id> folder at the idle-run pass but keeps one with a commit of its own", async () => {
+        const unused = addWorktree("run-unused01");
+        const used = addWorktree("run-used0002");
+        fs.writeFileSync(path.join(used, "feature.txt"), "f\n");
+        sh(used, "add", ".");
+        sh(used, "commit", "-q", "-m", "work");
+        sh(used, "push", "-q", "origin", "run-used0002");
+        const idleCand = (id: string, cwd: string, branch: string): WorktreeCleanupCandidate => ({
+          ...cand(id, cwd, branch),
+          flagIssueId: null,
+          flagIssueIdentifier: null,
+          mode: "idle_run",
+        });
+        const { deps, cleaned, flagged } = setup([idleCand("5", unused, "run-unused01"), idleCand("6", used, "run-used0002")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 1, kept: 1 });
+        expect(cleaned).toEqual(["5"]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(unused)).toBe(false);
+        expect(sh(repo, "branch", "--list", "run-unused01")).toBe("");
+        expect(fs.existsSync(used)).toBe(true);
+        expect(sh(repo, "branch", "--list", "run-used0002")).toContain("run-used0002");
+      });
+
       it("keeps a merged branch that still has uncommitted work", async () => {
         const wt = addWorktree("pr-merged-dirty");
         fs.writeFileSync(path.join(wt, "feature.txt"), "f\n");

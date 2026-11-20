@@ -217,7 +217,13 @@ export function issueExecutionWorkspaceModeForPersistedWorkspace(
 export function childMayShareParentWorkspace(input: {
   parentWorkspaceMode: string | null | undefined;
   childWorkMode: string | null | undefined;
+  /** The child's project demands a private git worktree for every run. */
+  requireIsolation?: boolean;
+  parentStrategyType?: string | null | undefined;
 }): boolean {
+  // Under requireIsolation nothing may be handed a folder that is not a git worktree,
+  // so a child of a task still bound to the shared checkout gets its own worktree.
+  if (input.requireIsolation === true && input.parentStrategyType !== "git_worktree") return false;
   if (input.parentWorkspaceMode !== "isolated_workspace") return true;
   return input.childWorkMode === "ask" || input.childWorkMode === "planning";
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -171,6 +171,7 @@ import { isProcessGroupAlive, terminateLocalService } from "./local-service-supe
 import {
   buildExecutionWorkspaceAdapterConfig,
   gateProjectExecutionWorkspacePolicy,
+  projectRequiresIsolation,
   issueExecutionWorkspaceModeForPersistedWorkspace,
   parseIssueExecutionWorkspaceSettings,
   parseProjectExecutionWorkspacePolicy,
@@ -3145,10 +3146,23 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   issueExecutionWorkspaceId?: string | null;
   issueExecutionWorkspacePreference?: string | null;
   existingExecutionWorkspaceStatus?: string | null;
+  /** DUR-5184: the project demands a private git worktree for every run. */
+  requireIsolation?: boolean;
+  existingExecutionWorkspaceStrategyType?: string | null;
 }): ExecutionWorkspaceReuseRequestForIssue {
   const requestedExecutionWorkspaceId = readNonEmptyString(input.issueExecutionWorkspaceId);
+  // DUR-5184: under requireIsolation a task still bound to the shared project
+  // checkout (or any non-worktree folder) is NOT restored there: the run
+  // provisions a fresh worktree instead, so switching a project to
+  // requireIsolation also covers tasks created before the switch.
+  const reuseTargetBreaksIsolation =
+    input.requireIsolation === true &&
+    requestedExecutionWorkspaceId !== null &&
+    input.existingExecutionWorkspaceStrategyType !== "git_worktree";
   const requestedShouldReuseExisting =
-    input.issueExecutionWorkspacePreference === "reuse_existing" && requestedExecutionWorkspaceId !== null;
+    input.issueExecutionWorkspacePreference === "reuse_existing" &&
+    requestedExecutionWorkspaceId !== null &&
+    !reuseTargetBreaksIsolation;
 
   return {
     requestedExecutionWorkspaceId,
@@ -12138,6 +12152,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
       issueExecutionWorkspacePreference: issueRef?.executionWorkspacePreference ?? null,
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
+      requireIsolation: projectRequiresIsolation(projectExecutionWorkspacePolicy),
+      existingExecutionWorkspaceStrategyType: existingExecutionWorkspace?.strategyType ?? null,
     });
     const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
     const reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
@@ -12610,6 +12626,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null,
       issueId,
     });
+    // DUR-5184: locks are per task, not per folder. Before a start-of-run branch
+    // switch, check no other running run (any task) is working in this folder.
+    const isWorktreeInUseByAnotherRun = async (worktreePath: string) => {
+      const rows = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, agent.companyId),
+            eq(heartbeatRuns.status, "running"),
+            ne(heartbeatRuns.id, run.id),
+            or(
+              sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'cwd' = ${worktreePath}`,
+              sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'worktreePath' = ${worktreePath}`,
+            ),
+          ),
+        )
+        .limit(1);
+      return rows.length > 0;
+    };
     const { executionWorkspace, reusedExecutionWorkspace, policy: resolvedWorkspaceReusePolicy } =
       await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>({
         requestedShouldReuseExisting,
@@ -12646,6 +12682,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 name: agent.name,
                 companyId: agent.companyId,
               },
+              isInUseByAnotherRun: isWorktreeInUseByAnotherRun,
               recorder: workspaceOperationRecorder,
             })
           : null,
@@ -12659,6 +12696,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             name: agent.name,
             companyId: agent.companyId,
           },
+          isInUseByAnotherRun: isWorktreeInUseByAnotherRun,
           recorder: workspaceOperationRecorder,
         }),
       });

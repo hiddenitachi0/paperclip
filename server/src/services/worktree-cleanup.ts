@@ -26,8 +26,12 @@ const GIT_FETCH_TIMEOUT_MS = 120_000;
 export const WORKTREE_UNSAVED_WORK_MARKER = "<!-- worktree-cleanup:unsaved-work -->";
 
 const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
-/** Statuses where no run is expected to still need the worktree once its PR merged. */
-const MERGED_PASS_SAFE_STATUSES = new Set(["done", "cancelled", "in_review"]);
+/**
+ * Statuses where no run is expected to still need the worktree once its PR merged.
+ * in_review is deliberately NOT here: an in_review task can still be woken (monitor,
+ * reviewer comment) and its next run needs its folder.
+ */
+const MERGED_PASS_SAFE_STATUSES = new Set(["done", "cancelled"]);
 
 /**
  * DUR-4497. Automatic cleanup of finished-task agent worktrees.
@@ -144,8 +148,32 @@ const IN_PROGRESS_MARKERS = [
 export interface EvaluateWorktreeOptions {
   /** DUR-5184: also require the branch tip to be merged into an origin branch. */
   requireMerged?: boolean;
+  /** DUR-5184: keep unless the branch has no commit beyond the one it was created from (an unused `run-<id>` folder). */
+  requireUntouched?: boolean;
   /** DUR-5184: share one `git fetch` per repo across a sweep. Value is the error text, or null on success. */
   fetchCache?: Map<string, Promise<string | null>>;
+}
+
+/**
+ * True only when the branch has at least one commit of its own, i.e. its tip is not
+ * the commit it was created from. A branch with no commits of its own is trivially
+ * an "ancestor of origin" and must not count as merged. Uses the branch reflog's
+ * oldest entry as the creation point; an unreadable reflog fails closed (false).
+ */
+async function branchCreationState(
+  worktreePath: string,
+  branchRef: string,
+): Promise<"own_commits" | "untouched" | "unknown"> {
+  try {
+    const shas = (await git(["reflog", "show", "--format=%H", branchRef], worktreePath))
+      .split("\n").map((l) => l.trim()).filter(Boolean);
+    const creation = shas[shas.length - 1];
+    if (!creation) return "unknown";
+    const tip = (await git(["rev-parse", "--verify", branchRef], worktreePath)).trim();
+    return tip !== creation ? "own_commits" : "untouched";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Origin branches a finished branch is allowed to have been merged into. */
@@ -233,8 +261,19 @@ export async function evaluateWorktreeForRemoval(
       }
     }
 
+    if (options.requireUntouched) {
+      if (!branchName) return { action: "keep", reason: "the worktree has no recorded branch to check" };
+      const state = await branchCreationState(worktreePath, `refs/heads/${branchName}`);
+      if (state !== "untouched") {
+        return { action: "keep", reason: `branch ${branchName} has commits of its own (or its history cannot be read), so it is not an unused run folder` };
+      }
+    }
+
     if (options.requireMerged) {
       if (!branchName) return { action: "keep", reason: "the worktree has no recorded branch to check for a merge" };
+      if ((await branchCreationState(worktreePath, `refs/heads/${branchName}`)) !== "own_commits") {
+        return { action: "keep", reason: `branch ${branchName} has no commits of its own, so a merge cannot be told apart from an untouched branch` };
+      }
       const mergedInto = await mergedIntoOrigin(worktreePath, `refs/heads/${branchName}`);
       if (!mergedInto) return { action: "keep", reason: `branch ${branchName} is not merged into an origin branch yet` };
     }
@@ -288,7 +327,7 @@ export async function deleteMergedLocalBranch(repoRoot: string, branchName: stri
   }
 }
 
-export type WorktreeCleanupMode = "finished_task" | "merged_pr";
+export type WorktreeCleanupMode = "finished_task" | "merged_pr" | "idle_run";
 
 export interface WorktreeCleanupCandidate {
   executionWorkspaceId: string;
@@ -342,9 +381,10 @@ export async function runWorktreeCleanup(
 
   for (const candidate of candidates) {
     try {
-      const mergedPass = candidate.mode === "merged_pr";
+      const mergedPass = candidate.mode === "merged_pr" || candidate.mode === "idle_run";
       const verdict = await evaluate(candidate.cwd, candidate.branchName, {
-        requireMerged: mergedPass,
+        requireMerged: candidate.mode === "merged_pr",
+        requireUntouched: candidate.mode === "idle_run",
         fetchCache,
       });
       if (verdict.action === "keep") {
@@ -364,7 +404,7 @@ export async function runWorktreeCleanup(
       const branch = await deleteBranch(verdict.repoRoot, candidate.branchName);
       if (branch.deleted) result.branchesDeleted += 1;
       else logger.info({ branchName: candidate.branchName, reason: branch.reason }, "Worktree removed; local branch kept");
-      await deps.markCleaned(candidate, verdict.worktreePath, mergedPass ? "merged_pr" : "finished_task");
+      await deps.markCleaned(candidate, verdict.worktreePath, candidate.mode ?? "finished_task");
     } catch (err) {
       result.failed += 1;
       logger.warn({ err, executionWorkspaceId: candidate.executionWorkspaceId }, "Worktree cleanup failed for one workspace");
@@ -524,7 +564,7 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
   }
 
   /**
-   * DUR-5184: worktrees whose issues no longer need them (done/cancelled/in_review)
+   * DUR-5184: worktrees whose issues no longer need them (done/cancelled)
    * and that have been idle a while. Whether the branch is actually merged is
    * decided by git in `evaluateWorktreeForRemoval({ requireMerged })`, which keeps
    * everything else silently.
@@ -537,10 +577,25 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
       if (!ws.cwd || !ws.branchName) continue;
       if (ws.lastUsedAt.getTime() > idleCutoff) continue;
       const linked = await loadLinkedIssues(ws);
-      if (linked.length === 0) continue;
+      if (linked.length === 0) {
+        // A private `run-<id>` folder of a run with no issue. Once its run has finished
+        // and it has sat idle, it is removed if (and only if) it is clean and the
+        // branch has no commit of its own; one with work in it waits for the retention pass.
+        if (ws.branchName.startsWith("run-") && !(await hasLiveRun(ws, []))) {
+          out.push({
+            executionWorkspaceId: ws.id,
+            companyId: ws.companyId,
+            flagIssueId: null,
+            flagIssueIdentifier: null,
+            cwd: ws.cwd,
+            branchName: ws.branchName,
+            mode: "idle_run",
+          });
+        }
+        continue;
+      }
       if (linked.some((i) => !MERGED_PASS_SAFE_STATUSES.has(i.status))) continue;
-      // A long run can outlive the idle window and park its issue in in_review
-      // mid-run; never remove a folder a live run is still using.
+      // A long run can outlive the idle window; never remove a folder a live run is still using.
       if (await hasLiveRun(ws, linked)) continue;
       const flagIssue = linked.find((i) => i.id === ws.sourceIssueId) ?? linked[0]!;
       out.push({
@@ -609,7 +664,12 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
         .set({
           status: "archived",
           closedAt: now,
-          cleanupReason: mode === "merged_pr" ? "auto_cleanup_merged_pr" : "auto_cleanup_finished_task",
+          cleanupReason:
+            mode === "merged_pr"
+              ? "auto_cleanup_merged_pr"
+              : mode === "idle_run"
+                ? "auto_cleanup_idle_run"
+                : "auto_cleanup_finished_task",
           updatedAt: now,
         })
         .where(

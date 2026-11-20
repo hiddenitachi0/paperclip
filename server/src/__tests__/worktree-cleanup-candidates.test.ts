@@ -91,7 +91,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     expect(await names()).toEqual(["cancelled-old", "done-old", "done-recent"]);
   });
 
-  it("selects idle worktrees of done/cancelled/in_review tasks for the merged pass, never open ones (DUR-5184)", async () => {
+  it("selects idle worktrees of done/cancelled tasks for the merged pass, never open or in_review ones (DUR-5184)", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const now = new Date("2026-10-04T12:00:00Z");
@@ -121,7 +121,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     }
     const deps = createDbWorktreeCleanupDeps(db);
     const merged = await deps.listMergedCandidates!(now);
-    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["done-just-now", "review-idle"]);
+    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["done-just-now"]);
     expect(merged.every((c) => c.mode === "merged_pr")).toBe(true);
     // The retention-days pass is unchanged: the 'done' task was completed just now, so it is not eligible yet.
     expect(await deps.listCandidates(now, 7)).toEqual([]);
@@ -147,6 +147,41 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     expect(found[0]!.flagIssueId).toBeNull();
     // Keeping it must not throw for lack of an issue to comment on.
     await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBeUndefined();
+  });
+
+  it("puts an idle issue-less run-<id> folder in the prompt pass unless a run is live on it (DUR-5184)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "A", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const cases = [
+      { branch: "run-idle0001", idleMinutes: 120, live: false },
+      { branch: "run-fresh002", idleMinutes: 5, live: false },
+      { branch: "run-live0003", idleMinutes: 120, live: true },
+      { branch: "hand-made", idleMinutes: 120, live: false },
+    ];
+    for (const c of cases) {
+      const wsId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: c.branch, status: "active", providerType: "local_fs",
+        cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.branch}`, branchName: c.branch,
+        lastUsedAt: new Date(now.getTime() - c.idleMinutes * 60_000),
+      });
+      if (c.live) {
+        await db.insert(heartbeatRuns).values({
+          id: randomUUID(), companyId, agentId, status: "running", contextSnapshot: { executionWorkspaceId: wsId },
+        });
+      }
+    }
+    const found = await createDbWorktreeCleanupDeps(db).listMergedCandidates!(now);
+    expect(found.map((c) => [c.branchName, c.mode])).toEqual([["run-idle0001", "idle_run"]]);
   });
 
   it("keeps a worktree out of the merged pass while a run is live on it or on a linked issue (DUR-5228)", async () => {
@@ -183,7 +218,7 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
         });
       }
       await db.insert(issues).values({
-        id: issueId, companyId, title: c.key, status: "in_review", executionWorkspaceId: wsId,
+        id: issueId, companyId, title: c.key, status: "done", completedAt: now, executionWorkspaceId: wsId,
         executionRunId: c.runStatus && c.via === "issue" ? runId : null,
       });
     }

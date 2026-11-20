@@ -753,6 +753,8 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   executionWorkspaceId?: string | null;
   baseRef?: string | null;
   allowSwitchFromOtherBranch?: boolean;
+  /** DUR-5184: another live run is using this folder, so its branch must not be switched under it. */
+  anotherRunUsesFolder?: boolean;
 }): Promise<GitWorktreeBranchIncoherenceEvidence> {
   const status = await runGit(
     ["status", "--porcelain", "--untracked-files=all"],
@@ -791,7 +793,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
     cleanliness === "clean" &&
     expectedBranchExists &&
     registeredBranchMatchesHead &&
-    (sameHead || input.allowSwitchFromOtherBranch === true);
+    (sameHead || (input.allowSwitchFromOtherBranch === true && input.anotherRunUsesFolder !== true));
   // The expected branch is gone entirely -- most commonly because it already
   // merged and was deleted -- but the worktree directory is still registered and
   // has no local changes to lose. Recreating the branch from the base ref gets a
@@ -825,6 +827,8 @@ async function inspectGitWorktreeBranchIncoherence(input: {
             : "expected branch does not exist"
         : !registeredBranchMatchesHead
           ? "registered worktree branch does not match HEAD"
+        : !sameHead && input.anotherRunUsesFolder === true
+          ? "another run is using this folder right now, so its branch was not switched; retry once that run has finished"
         : !sameHead
           ? "expected branch and current HEAD differ"
           : "safe repair could not be proven";
@@ -907,6 +911,8 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   // Start-of-run only: put a clean folder back on the expected branch even if
   // it is on a different named branch (DUR-5184). Dirty folders still block.
   allowSwitchFromOtherBranch?: boolean;
+  /** DUR-5184: true when another live run is using this folder (locks are per task, not per folder). */
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const expectedBranchName = input.expectedBranchName?.trim();
@@ -917,6 +923,10 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     : await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], input.worktreePath).catch(() => null);
   if (currentBranch === expectedBranchName) return;
 
+  const anotherRunUsesFolder =
+    input.allowSwitchFromOtherBranch === true && input.isInUseByAnotherRun
+      ? await input.isInUseByAnotherRun(input.worktreePath).catch(() => true)
+      : false;
   const evidence = await inspectGitWorktreeBranchIncoherence({
     repoRoot: input.repoRoot,
     worktreePath: input.worktreePath,
@@ -926,6 +936,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     executionWorkspaceId: input.executionWorkspaceId ?? null,
     baseRef: input.baseRef ?? null,
     allowSwitchFromOtherBranch: input.allowSwitchFromOtherBranch === true,
+    anotherRunUsesFolder,
   });
 
   if (!evidence.safeRepair.eligible) {
@@ -1714,6 +1725,8 @@ export async function realizeExecutionWorkspace(input: {
   agent: ExecutionWorkspaceAgentRef;
   /** DUR-5184: names the private branch of a run that has no issue (`run-<shortRunId>`). */
   runId?: string | null;
+  /** DUR-5184: true when another live run uses this folder; a start-of-run branch switch is then refused. */
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RealizedExecutionWorkspace> {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
@@ -1722,7 +1735,7 @@ export async function realizeExecutionWorkspace(input: {
     const sharedWarnings = await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd);
     if (!input.issue) {
       sharedWarnings.push(
-        "This run has no issue and is working in the project's shared checkout, which other runs may also use. Do not commit or reset there; set requireIsolation on the project policy to give every run its own worktree.",
+        "This run has no issue and is working in the project's shared checkout, which other runs may also use. Do not commit or reset there. This project's runs share one folder: ask the board to turn on \"one folder per task\" for this project.",
       );
     }
     return {
@@ -1850,6 +1863,7 @@ export async function realizeExecutionWorkspace(input: {
         executionWorkspaceId: null,
         baseRef,
         allowSwitchFromOtherBranch: true,
+        isInUseByAnotherRun: input.isInUseByAnotherRun ?? null,
         recorder: input.recorder ?? null,
       });
       return await validateLinkedGitWorktree({
@@ -1974,6 +1988,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   };
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
@@ -2017,6 +2032,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         executionWorkspaceId: input.workspace.id ?? null,
         baseRef: reuseBaseRef,
         allowSwitchFromOtherBranch: true,
+        isInUseByAnotherRun: input.isInUseByAnotherRun ?? null,
         recorder: input.recorder ?? null,
       });
     }

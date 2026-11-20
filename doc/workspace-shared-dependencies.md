@@ -24,6 +24,12 @@ honoured even when the experimental "isolated workspaces" instance flag is off.
 Other settings of the strategy (`baseRef`, `branchTemplate`,
 `provisionCommand`) are kept.
 
+It also covers tasks that already existed: a task still bound to the shared
+project checkout is not restored there. Its next run gets a fresh worktree, and
+new child tasks of such a task get their own worktree too. Only the board can
+change `requireIsolation`; an agent that rewrites the project policy keeps the
+stored value.
+
 Without `requireIsolation`, a run with no issue on a `project_primary` policy
 still works in the shared checkout and its log carries a warning. Do not commit
 or reset there.
@@ -34,8 +40,12 @@ or reset there.
   company's retention period (default 7 days), if it is clean and fully pushed.
 - A worktree whose branch is already merged into `origin/custom`, `origin/main`,
   `origin/master` or origin's default branch is removed within about 15 minutes,
-  provided every linked issue is done, cancelled or in review and the worktree
-  has been idle for 30 minutes.
+  provided every linked issue is done or cancelled (never in review: such a task
+  can still be woken), the branch has at least one commit of its own, no run is
+  using the folder, and the worktree has been idle for 30 minutes.
+- The private `run-<id>` folder of a run with no issue is removed once it has
+  been idle for 30 minutes, is clean, and its branch has no commit of its own.
+  One with work in it waits for the retention period.
 - After removal the local branch is deleted with `git branch -d` only. Git
   refuses to delete a branch that is not fully merged (into its upstream, else
   into the main checkout's HEAD), and that branch is simply kept. Squash-merged
