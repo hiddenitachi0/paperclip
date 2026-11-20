@@ -1931,7 +1931,14 @@
       "idx": 276,
       "version": "7",
       "when": 1795100000000,
-      "tag": "0276_trading_applied_versions",
+      "tag": "0276_pre_review_quality_loop",
+      "breakpoints": true
+    },
+    {
+      "idx": 277,
+      "version": "7",
+      "when": 1795120000000,
+      "tag": "0277_trading_applied_versions",
       "breakpoints": true
     }
   ]

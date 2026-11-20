@@ -223,6 +223,67 @@ export interface TradingSelectorDecision extends TradingSelectorDecisionListItem
   output: SelectorDecisionOutputView;
 }
 
+/** One forecaster's row on the scoreboard (the rules themselves, or a simple-guess baseline). Fields marked "until the sample is reached" are null while collecting. */
+export interface TradingScoreboardForecaster {
+  forecasterKey: string;
+  calls: number;
+  resolved: number;
+  pending: number;
+  flats: number;
+  voids: number;
+  independentResolved: number;
+  effectiveSampleSize: number;
+  coverage: number | null;
+  /** Until the sample is reached: null. */
+  hitRate: number | null;
+  hitRateInterval: { lower: number | null; upper: number | null; blocks: number; blockLength: number } | null;
+  hitRateOnRuleBars: number | null;
+  expectedHitRateFromBaseRate: number | null;
+  realizedUpShare: number | null;
+  probability: {
+    n: number;
+    brier: number;
+    brierReference: number | null;
+    brierSkill: number | null;
+    logLoss: number;
+    calibration: Array<{ bucket: number; from: number; to: number; count: number; meanForecast: number; observedUpShare: number }>;
+  } | null;
+  byRegime: Array<{ regime: string; hitRate: number | null; scored: number; spells: number }> | null;
+}
+
+export interface TradingScoreboardStatus {
+  status: "collecting" | "ready";
+  samples: number;
+  targetSamples: number;
+  runningMs: number;
+  minRunningMs: number;
+  calendarMs: number;
+}
+
+export interface TradingScoreboardTrades {
+  trades: number;
+  winRate: number | null;
+  averageWinUsd: number | null;
+  averageLossUsd: number | null;
+  netPnlUsd: number;
+  feesUsd: number;
+  grossPnlUsd: number;
+  maxDrawdownPct: number | null;
+}
+
+/** The prediction scoreboard exactly as the server sends it. The page shows these numbers and thresholds; it never computes a verdict of its own. */
+export interface TradingScoreboard {
+  strategyId: string;
+  version: number | null;
+  plan?: { targetSamples: number; minRunningDays: number };
+  status: TradingScoreboardStatus;
+  criteria?: TradingForwardCriteriaResult;
+  time?: { runningMs: number; calendarMs: number; gapMs: number };
+  forecasters: TradingScoreboardForecaster[];
+  trades?: TradingScoreboardTrades | null;
+  verdict: { computedAt: string; samplesCounted: number; result: "edge_in_direction" | "no_edge"; hitRate: number | null; expectedHitRate: number | null; excessLower: number | null; excessUpper: number | null; bestBaselineKey: string | null; bestBaselineHitRate: number | null; beatsBaselines: boolean } | null;
+}
+
 export const tradingApi = {
   templates: (companyId: string) => api.get<TradingTemplateLibrary>(`/companies/${companyId}/trading/templates`),
   /** A paused paper strategy with the template's rules as version 1. The person then changes the rules in the editor. */
@@ -258,7 +319,7 @@ export const tradingApi = {
     api.post<TradingStrategySummary>(`/companies/${companyId}/trading/strategies/${strategyId}/status`, overrideReason ? { status, overrideReason } : { status }),
   /** The prediction scoreboard. `criteria` is the forward paper test judged against the written pass/fail criteria (absent when the strategy has no approved version). */
   scoreboard: (companyId: string, strategyId: string) =>
-    api.get<{ strategyId: string; version: number | null; criteria?: TradingForwardCriteriaResult }>(`/companies/${companyId}/trading/strategies/${strategyId}/scoreboard`),
+    api.get<TradingScoreboard>(`/companies/${companyId}/trading/strategies/${strategyId}/scoreboard`),
   startGate: (companyId: string, strategyId: string) =>
     api.get<TradingStartGate>(`/companies/${companyId}/trading/strategies/${strategyId}/start-gate`),
   backtests: (companyId: string, strategyId: string) =>

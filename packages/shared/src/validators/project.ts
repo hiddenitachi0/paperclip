@@ -218,6 +218,8 @@ const projectWorkspaceFields = {
   visibility: projectWorkspaceVisibilitySchema.optional(),
   setupCommand: z.string().optional().nullable(),
   cleanupCommand: z.string().optional().nullable(),
+  /** Stored in metadata.testCommand; host-executed, so board users only (see workspace-command-authz.ts). */
+  testCommand: z.string().max(4000).optional().nullable(),
   remoteProvider: z.string().optional().nullable(),
   remoteWorkspaceRef: z.string().optional().nullable(),
   sharedWorkspaceKey: z.string().optional().nullable(),

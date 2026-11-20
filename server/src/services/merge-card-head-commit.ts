@@ -1,5 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { approvals, type Db } from "@paperclipai/db";
+import { unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 
@@ -12,7 +13,9 @@ export type ResolveHeadCommitDeps = {
 
 function parseRepo(repo: unknown): { owner: string; name: string } | null {
   if (typeof repo !== "string") return null;
-  const [owner, name] = repo.split("/");
+  const parts = repo.trim().split("/");
+  if (parts.length !== 2) return null;
+  const [owner, name] = parts;
   if (!owner || !name) return null;
   return { owner, name: name.replace(/\.git$/i, "") };
 }
@@ -71,11 +74,29 @@ export async function resolvePullRequestHeadCommit(
   }
 }
 
+function isIdentifiablePullRequest(payload: Record<string, unknown>): boolean {
+  const prNumber =
+    typeof payload.prNumber === "number" || typeof payload.prNumber === "string" ? Number(payload.prNumber) : NaN;
+  return Boolean(parseRepo(payload.repo)) && Number.isFinite(prNumber) && prNumber > 0;
+}
+
+export const MERGE_CARD_HEAD_UNREADABLE_MESSAGE =
+  "Could not read this pull request's latest commit from GitHub. Try again in a minute, or include the commit.";
+
+export function describeStaleMergeCardCommit(named: string, head: string) {
+  return `This card names commit ${named}, but the pull request is now at ${head}. File the card for ${head}.`;
+}
+
 /**
- * Fills `payload.commit` from GitHub when absent, before a new `merge_pr` card is ever
- * persisted. Returns the payload to store -- the original object when there is nothing to
- * resolve (not a merge_pr card, already has a commit, or GitHub couldn't confirm one), a
- * shallow copy with `commit` set otherwise. Fails open: filing never blocks on this.
+ * DUR-5222: a `merge_pr` card is only ever stored with the pull request's real, current head
+ * commit. Used when a card is filed and when it is resubmitted (both bodies are caller-controlled).
+ *  - no commit named: GitHub's current head is looked up and stored;
+ *  - a commit named: it must be GitHub's current head (a full sha, or a 7+ character prefix of
+ *    it, which is stored in full); a different one is refused as stale;
+ *  - GitHub cannot be read: filing is refused. A head is never guessed.
+ * Not a merge_pr card: returned unchanged. A merge_pr card that names no usable repo / pull
+ * request number cannot be checked against GitHub, so any commit the filer named is dropped
+ * rather than stored unchecked (fail closed: a review can only be opened against a verified head).
  */
 export async function withResolvedMergePrHeadCommit(
   db: Db,
@@ -84,10 +105,28 @@ export async function withResolvedMergePrHeadCommit(
   deps: ResolveHeadCommitDeps = {},
 ): Promise<Record<string, unknown>> {
   if (payload.kind !== "merge_pr") return payload;
-  const existing = typeof payload.commit === "string" ? payload.commit.trim() : "";
-  if (existing) return payload;
-  const resolved = await resolvePullRequestHeadCommit(payload, await resolveDeps(db, companyId, deps));
-  return resolved ? { ...payload, commit: resolved } : payload;
+  const prNumber =
+    typeof payload.prNumber === "number" || typeof payload.prNumber === "string" ? Number(payload.prNumber) : NaN;
+  if (!parseRepo(payload.repo) || !Number.isFinite(prNumber) || prNumber <= 0) {
+    const { commit: _unverifiedCommit, ...withoutCommit } = payload;
+    return withoutCommit;
+  }
+  const named = typeof payload.commit === "string" ? payload.commit.trim() : "";
+  const head = await resolvePullRequestHeadCommit(payload, await resolveDeps(db, companyId, deps));
+  if (!head) throw unprocessable(MERGE_CARD_HEAD_UNREADABLE_MESSAGE, { reason: "github_head_unreadable" });
+  if (named) {
+    const lowerNamed = named.toLowerCase();
+    const lowerHead = head.toLowerCase();
+    const matches = lowerNamed === lowerHead || (lowerNamed.length >= 7 && lowerHead.startsWith(lowerNamed));
+    if (!matches) {
+      throw unprocessable(describeStaleMergeCardCommit(named, head), {
+        reason: "merge_card_commit_stale",
+        named,
+        head,
+      });
+    }
+  }
+  return { ...payload, commit: head };
 }
 
 /**
@@ -111,6 +150,10 @@ export async function refreshMergePrHeadCommit(
   }
   const existing = typeof payload.commit === "string" ? payload.commit.trim() : "";
   const resolved = await resolvePullRequestHeadCommit(payload, await resolveDeps(db, approval.companyId, deps));
+  if (!resolved && !isIdentifiablePullRequest(payload)) {
+    // Fail closed: a commit on a card whose PR cannot be identified was never checked against GitHub.
+    return { payload, headCommit: null };
+  }
   if (!resolved || resolved === existing) {
     return { payload, headCommit: existing || null };
   }

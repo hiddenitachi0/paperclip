@@ -1605,8 +1605,9 @@ async function normalizeRequestBoardApprovalPayload(
   await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
   if (payload.kind === "merge_pr") {
     await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
-    // DUR-4601: agents routinely file a merge card with only repo/prNumber -- fill the head
-    // commit from GitHub server-side so "Request security review" never 422s on it later.
+    // DUR-4601 / DUR-5222: agents routinely file a merge card with only repo/prNumber -- store the
+    // pull request's real head commit from GitHub, refuse a stale named one, and refuse filing when
+    // GitHub can't be read (never guess), so "Request security review" never 422s on it later.
     payload = await withResolvedMergePrHeadCommit(db, companyId, payload);
   }
   stampOriginalIssueIds(payload, issueIds);
@@ -3214,6 +3215,8 @@ export function approvalRoutes(
         // resubmit is exactly as caller-controlled as create per the DUR-252 comment above.
         await assertMergePrIssueIdsAreRelevant(db, existing.companyId, anchorIssueIds, getActorInfo(req));
         stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
+        // DUR-5222: a resubmitted card carries the pull request's current head too.
+        normalizedPayload = await withResolvedMergePrHeadCommit(db, existing.companyId, normalizedPayload);
       }
       if (isModelBoostRequestApproval(existing.type, normalizedPayload)) {
         // A resubmit body is exactly as caller-controlled as a create body, so
