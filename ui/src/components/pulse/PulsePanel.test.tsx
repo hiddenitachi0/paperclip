@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +16,11 @@ const mockApprovalsApi = vi.hoisted(() => ({ approve: vi.fn() }));
 
 vi.mock("@/api/dashboard", () => ({ dashboardApi: mockDashboardApi }));
 vi.mock("@/api/approvals", () => ({ approvalsApi: mockApprovalsApi }));
+vi.mock("@/lib/router", () => ({
+  Link: ({ to, children, className }: { to: string; children?: ReactNode; className?: string }) => (
+    <a href={to} className={className}>{children}</a>
+  ),
+}));
 
 const { PulsePanel } = await import("./PulsePanel");
 
@@ -30,6 +36,7 @@ function pulse(overrides: Partial<DashboardPulse> = {}): DashboardPulse {
         title: "Launch the new homepage",
         requestedByAgentName: "Frontend Engineer",
         createdAt: new Date("2026-10-01T00:00:00.000Z").toISOString(),
+        cardOnly: false,
       },
     ],
     activeExecutions: [],
@@ -136,6 +143,37 @@ describe("PulsePanel", () => {
     await flushReact();
 
     expect(mockApprovalsApi.approve).toHaveBeenCalledWith("approval-1");
+  });
+
+  it("shows Open, not Approve, for cards that must be read in full first", async () => {
+    window.localStorage.setItem("paperclip.pulse.enabled", "true");
+    mockDashboardApi.pulse.mockResolvedValue(
+      pulse({
+        needsYou: [
+          {
+            approvalId: "approval-rules",
+            type: "trading_strategy_version",
+            title: 'Trading strategy "Steady": new rules (version 7)',
+            requestedByAgentName: "Trader",
+            createdAt: new Date("2026-10-01T00:00:00.000Z").toISOString(),
+            cardOnly: true,
+          },
+        ],
+      }),
+    );
+
+    await render();
+    await flushReact();
+    await act(async () => {
+      trigger()?.click();
+    });
+    await flushReact();
+
+    const buttons = Array.from(document.body.querySelectorAll("button")).map((el) => el.textContent);
+    expect(buttons).not.toContain("Approve");
+    const open = Array.from(document.body.querySelectorAll("a")).find((el) => el.textContent === "Open");
+    expect(open?.getAttribute("href")).toContain("/approvals/approval-rules");
+    expect(mockApprovalsApi.approve).not.toHaveBeenCalled();
   });
 
   it("shows a count pill with the right color state once enabled", async () => {

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, Rocket } from "lucide-react";
+import { Link } from "@/lib/router";
 import { dashboardApi } from "@/api/dashboard";
 import { approvalsApi } from "@/api/approvals";
 import { queryKeys } from "@/lib/queryKeys";
@@ -130,14 +131,22 @@ function NeedsYouTab({ pulse, companyId }: { pulse: DashboardPulse | undefined; 
               {timeAgo(item.createdAt)}
             </p>
           </div>
-          <Button
-            size="sm"
-            className="shrink-0"
-            disabled={approveMutation.isPending && approvingId === item.approvalId}
-            onClick={() => approveMutation.mutate(item.approvalId)}
-          >
-            {approveMutation.isPending && approvingId === item.approvalId ? "Approving…" : "Approve"}
-          </Button>
+          {item.cardOnly ? (
+            // Some cards (rule changes, payments, deploys) must be read in full
+            // before they are approved, so there is no one-tap Approve here.
+            <Button asChild size="sm" variant="outline" className="shrink-0">
+              <Link to={`/approvals/${item.approvalId}`}>Open</Link>
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="shrink-0"
+              disabled={approveMutation.isPending && approvingId === item.approvalId}
+              onClick={() => approveMutation.mutate(item.approvalId)}
+            >
+              {approveMutation.isPending && approvingId === item.approvalId ? "Approving…" : "Approve"}
+            </Button>
+          )}
         </li>
       ))}
     </ul>

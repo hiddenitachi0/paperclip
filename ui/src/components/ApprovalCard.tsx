@@ -21,6 +21,7 @@ import {
 import { timeAgo } from "../lib/timeAgo";
 import { formatAgentDisplayName, type Approval, type Agent, type Issue, type SecurityReviewState } from "@paperclipai/shared";
 import { cn } from "@/lib/utils";
+import { isCardOnlyApproval } from "@/lib/approval-card-only";
 
 /** DUR-4566: the plain-words line a merge card shows for its security-review state. */
 function securityReviewSummary(review: SecurityReviewState): { text: string; tone: "neutral" | "warn" | "ok" } {
@@ -109,6 +110,9 @@ export function ApprovalCard({
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
   const showNoTicketFlag = linkedIssues !== undefined && issueRefs.length === 0;
+  // Deploys, payments and a strategy's new rules must be read in full on their
+  // own page before approving, so this summary card only offers "Open" for them.
+  const mustOpenToDecide = isCardOnlyApproval(approval.type, payload);
   const showResolutionButtons =
     Boolean(onApprove && onReject) &&
     approval.type !== "budget_override_required" &&
@@ -292,26 +296,35 @@ export function ApprovalCard({
           <div className="flex flex-wrap items-center gap-2">
             {showResolutionButtons && (
               <>
-                <Button
-                  size="sm"
-                  className={
-                    approveGatedBySecurityReview
-                      ? "border border-amber-600/50 bg-transparent text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
-                      : "bg-green-700 hover:bg-green-600 text-white"
-                  }
-                  variant={approveGatedBySecurityReview ? "outline" : "default"}
-                  onClick={() => {
-                    if (approveGatedBySecurityReview) setApproveWithoutReviewDialogOpen(true);
-                    else onApprove?.();
-                  }}
-                  disabled={isPending}
-                >
-                  {pendingAction === "approve"
-                    ? "Approving..."
-                    : approveGatedBySecurityReview
-                      ? "Approve without security review"
-                      : "Approve"}
-                </Button>
+                {mustOpenToDecide ? (
+                  <Link
+                    to={`/approvals/${approval.id}`}
+                    className={cn(buttonVariants({ size: "sm" }))}
+                  >
+                    Open
+                  </Link>
+                ) : (
+                  <Button
+                    size="sm"
+                    className={
+                      approveGatedBySecurityReview
+                        ? "border border-amber-600/50 bg-transparent text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
+                        : "bg-green-700 hover:bg-green-600 text-white"
+                    }
+                    variant={approveGatedBySecurityReview ? "outline" : "default"}
+                    onClick={() => {
+                      if (approveGatedBySecurityReview) setApproveWithoutReviewDialogOpen(true);
+                      else onApprove?.();
+                    }}
+                    disabled={isPending}
+                  >
+                    {pendingAction === "approve"
+                      ? "Approving..."
+                      : approveGatedBySecurityReview
+                        ? "Approve without security review"
+                        : "Approve"}
+                  </Button>
+                )}
                 <Button
                   variant="destructive"
                   size="sm"

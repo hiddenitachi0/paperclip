@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router";
+import { isCardOnlyApproval } from "@/lib/approval-card-only";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
 import { approvalsApi } from "../api/approvals";
@@ -428,6 +429,12 @@ function ApprovalInboxRow({
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null);
+  // Deploys, payments and a strategy's new rules must be read in full on their
+  // own page before approving, so the list row only offers "Open" for them.
+  const mustOpenToDecide = isCardOnlyApproval(
+    approval.type,
+    approval.payload as Record<string, unknown> | null,
+  );
   const showResolutionButtons =
     approval.type !== "budget_override_required" &&
     // A credential request is resolved by providing a value on its detail page,
@@ -501,14 +508,20 @@ function ApprovalInboxRow({
         </Link>
         {showResolutionButtons ? (
           <div className="hidden shrink-0 items-center gap-2 sm:flex">
-            <Button
-              size="sm"
-              className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-              onClick={onApprove}
-              disabled={isPending}
-            >
-              Approve
-            </Button>
+            {mustOpenToDecide ? (
+              <Button asChild size="sm" className="h-8 px-3">
+                <Link to={`/approvals/${approval.id}`}>Open</Link>
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                onClick={onApprove}
+                disabled={isPending}
+              >
+                Approve
+              </Button>
+            )}
             <Button
               variant="destructive"
               size="sm"
@@ -523,14 +536,20 @@ function ApprovalInboxRow({
       </div>
       {showResolutionButtons ? (
         <div className="mt-3 flex gap-2 sm:hidden">
-          <Button
-            size="sm"
-            className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-            onClick={onApprove}
-            disabled={isPending}
-          >
-            Approve
-          </Button>
+          {mustOpenToDecide ? (
+            <Button asChild size="sm" className="h-8 px-3">
+              <Link to={`/approvals/${approval.id}`}>Open</Link>
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+              onClick={onApprove}
+              disabled={isPending}
+            >
+              Approve
+            </Button>
+          )}
           <Button
             variant="destructive"
             size="sm"

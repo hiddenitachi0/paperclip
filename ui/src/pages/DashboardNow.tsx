@@ -11,6 +11,7 @@ import {
   RadioTower,
 } from "lucide-react";
 import { Link } from "@/lib/router";
+import { isCardOnlyApproval } from "@/lib/approval-card-only";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
 import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
@@ -928,6 +929,9 @@ function ApprovalRow({
   // A credential request is resolved by providing a value on its detail page,
   // not by a generic Approve/Reject.
   const isCredentialRequest = approval.type === "credential_request";
+  // Deploys, payments and a strategy's new rules must be read in full on their
+  // own page before approving, so a list row only offers "Open" for them.
+  const mustOpenToDecide = isCardOnlyApproval(approval.type, payload);
 
   return (
     <div
@@ -996,12 +1000,12 @@ function ApprovalRow({
           </p>
         </div>
       </Link>
-      {isCredentialRequest ? (
+      {isCredentialRequest || mustOpenToDecide ? (
         <Link
           to={`/approvals/${approval.id}`}
           className="inline-flex h-6 items-center justify-center rounded-md bg-amber-600 px-2 text-[11px] font-semibold text-white hover:bg-amber-500"
         >
-          Provide credential
+          {isCredentialRequest ? "Provide credential" : "Open"}
         </Link>
       ) : (
         <div className="flex items-center gap-1.5">
