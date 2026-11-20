@@ -15,7 +15,7 @@ const DOWN = "fill-[#e34948] dark:fill-[#e66767]";
 const NEUTRAL = "fill-[#8a8985] dark:fill-[#8f8e88]";
 
 /** The drawn width of an element, so a chart is laid out at its real size and its text stays readable on a phone. 640 until measured. */
-function useDrawnWidth(): [React.RefObject<HTMLDivElement | null>, number] {
+export function useDrawnWidth(): [React.RefObject<HTMLDivElement | null>, number] {
   const ref = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(640);
   useEffect(() => {
