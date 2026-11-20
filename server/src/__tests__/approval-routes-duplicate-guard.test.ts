@@ -39,6 +39,12 @@ vi.mock("../services/deploy-runner-status.js", () => ({
   readDeployRunnerStatus: (...args: unknown[]) => mockReadDeployRunnerStatus(...args),
 }));
 
+// DUR-5222: filing looks the PR's head up on GitHub; keep this suite off the network.
+vi.mock("../services/merge-card-head-commit.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/merge-card-head-commit.js")>()),
+  withResolvedMergePrHeadCommit: async (_db: unknown, _companyId: string, payload: Record<string, unknown>) => payload,
+}));
+
 const mockHeartbeatService = vi.hoisted(() => ({ wakeup: vi.fn() }));
 const mockIssueApprovalService = vi.hoisted(() => ({
   listIssuesForApproval: vi.fn(),
