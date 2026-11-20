@@ -93,6 +93,24 @@ describe("extractAcceptanceCriteriaPaths", () => {
     ]);
   });
 
+  it("never requires a file the task says must not change (DUR-5209 review)", () => {
+    const description = [
+      "## Acceptance Criteria",
+      "- `pnpm-lock.yaml` must not change",
+      "- `package.json` should not be modified",
+      "- `README.md` is not changed",
+      "- works for `server/x.ts` but not `server/y.ts`",
+      "- the lockfile `CHANGELOG.md` don't touch",
+      "- `server/z.ts` returns 409 when the token is not set",
+      "- `server/w.ts` does not crash on an empty body",
+    ].join("\n");
+    const found = paths(description);
+    expect(found).toEqual(expect.arrayContaining(["server/x.ts", "server/z.ts", "server/w.ts"]));
+    for (const dropped of ["pnpm-lock.yaml", "package.json", "README.md", "server/y.ts", "CHANGELOG.md"]) {
+      expect(found).not.toContain(dropped);
+    }
+  });
+
   it("only skips a path when the negation is about that path (DUR-5209)", () => {
     const description = [
       "## Acceptance Criteria",

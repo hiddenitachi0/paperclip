@@ -100,6 +100,16 @@ const NEGATION_PREFIX_CUE =
   /\b(?:do(?:es)?\s+not|don't|doesn't|must\s+not|mustn't|should\s+not|shouldn't|will\s+not|won't|can\s*not|can't|never|without|except(?:\s+for)?|excluding|no\s+changes?\s+(?:to|in|on|of)|not\s+(?:to\s+)?(?:chang|touch|modif|edit|alter|renam|delet|remov)\w*)\b/i;
 /** "X must stay unchanged", "X is untouched": what stands before the cue is what must not change. */
 const NEGATION_SUFFIX_CUE = /\b(?:unchanged|untouched|unmodified)\b/i;
+/**
+ * A negation next to a change word, with at most two small words between: "must not change",
+ * "should not be modified", "is not changed", "never be touched", "no longer be edited". The path
+ * may stand on either side of it. "does not crash" or "when the token is not set" are not matches.
+ */
+const NEGATED_CHANGE_CUE =
+  /\b(?:not|never|no|\w+n't)\s+(?:[a-z]+\s+){0,2}?(?:chang|modif|touch|edit|alter|renam|delet|remov)\w*/i;
+/** "not `y.ts`", "but not src/y.ts": a path right after "not" is the thing that is negated. */
+const NOT_PATH_CUE = /\bnot\s+(?=`|[\w.-]+\/|[\w.-]+\.[a-z]{1,4}\b)/i;
+const PATH_LIKE = /`|[\w.-]+\/|\w\.[a-z]{1,4}\b/;
 /** Where one clause ends and the next begins. A "." only counts before a space or the end ("a.ts" is a file). */
 const CLAUSE_BREAK = /;|\.(?=\s|$)|\s(?:but|however|and\s+then)\s/i;
 
@@ -112,6 +122,16 @@ function withoutNegatedParts(line: string): string {
   return line
     .split(new RegExp(CLAUSE_BREAK.source, "gi"))
     .map((clause) => {
+      const change = NEGATED_CHANGE_CUE.exec(clause);
+      if (change) {
+        // "Update `a.ts`, do not change `b.ts`": a path after the cue is the negated one, what
+        // stands before it stays. Nothing after it ("`a.ts` must not change") means the path
+        // before it is the one that must stay as it is, so the whole clause is dropped.
+        const after = clause.slice(change.index + change[0].length);
+        return PATH_LIKE.test(after) ? clause.slice(0, change.index) : "";
+      }
+      const notPath = NOT_PATH_CUE.exec(clause);
+      if (notPath) return clause.slice(0, notPath.index);
       const prefix = NEGATION_PREFIX_CUE.exec(clause);
       if (prefix) return clause.slice(0, prefix.index);
       const suffix = NEGATION_SUFFIX_CUE.exec(clause);
