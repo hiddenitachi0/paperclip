@@ -92,8 +92,34 @@ const PATH_EXTENSIONS = new Set([
 /** Product names that end in ".js" and are never the file a task means ("Node.js", "Next.js"). */
 const JS_PRODUCT_NAMES = /^(node|next|nuxt|vue|react|express|three|d3|chart|socket|alpine|ember|backbone|moment|nest|solid|svelte|angular|bun|deno)\.js$/i;
 
-/** A line that says what must NOT change names files the commit is not supposed to touch. */
-const NEGATION_LINE = /\b(not|never|unchanged|untouched|don't|doesn't|without|except|no change)\b/i;
+/**
+ * "Do not change X", "never touch X", "without X", "except X", "no change to X": whatever follows
+ * the cue, up to the end of its clause, is what must NOT change.
+ */
+const NEGATION_PREFIX_CUE =
+  /\b(?:do(?:es)?\s+not|don't|doesn't|must\s+not|mustn't|should\s+not|shouldn't|will\s+not|won't|can\s*not|can't|never|without|except(?:\s+for)?|excluding|no\s+changes?\s+(?:to|in|on|of)|not\s+(?:to\s+)?(?:chang|touch|modif|edit|alter|renam|delet|remov)\w*)\b/i;
+/** "X must stay unchanged", "X is untouched": what stands before the cue is what must not change. */
+const NEGATION_SUFFIX_CUE = /\b(?:unchanged|untouched|unmodified)\b/i;
+/** Where one clause ends and the next begins. A "." only counts before a space or the end ("a.ts" is a file). */
+const CLAUSE_BREAK = /;|\.(?=\s|$)|\s(?:but|however|and\s+then)\s/i;
+
+/**
+ * The text of a line with the parts that say what must NOT change cut out. A negation only
+ * silences the paths it is about: "`server/x.ts` returns 409 when the token is not set" still
+ * names the file, "Do not change `package.json`" and "`package.json` must stay unchanged" do not.
+ */
+function withoutNegatedParts(line: string): string {
+  return line
+    .split(new RegExp(CLAUSE_BREAK.source, "gi"))
+    .map((clause) => {
+      const prefix = NEGATION_PREFIX_CUE.exec(clause);
+      if (prefix) return clause.slice(0, prefix.index);
+      const suffix = NEGATION_SUFFIX_CUE.exec(clause);
+      if (suffix) return clause.slice(suffix.index + suffix[0].length);
+      return clause;
+    })
+    .join("\n");
+}
 
 export type NamedPath = { path: string; /** no file extension: a folder, or not a path at all */ dir: boolean };
 
@@ -134,7 +160,7 @@ export function extractAcceptanceCriteriaPaths(description: string | null | unde
     if (!hasSlash && !backticked && JS_PRODUCT_NAMES.test(token)) return;
     if (!found.has(token)) found.set(token, { path: token, dir: !ext });
   };
-  const lines = section.split("\n").filter((line) => !NEGATION_LINE.test(line));
+  const lines = section.split("\n").map(withoutNegatedParts);
   const withoutLinks = lines.join("\n").replace(/\[[^\]\n]*\]\(([^)\s]+)\)/g, (_match, target: string) => {
     add(target, true);
     return " ";
@@ -159,7 +185,7 @@ type GitHubRepo = { owner: string; name: string; /** the project's branch (repo_
 
 type CommitLookup =
   | { found: true; sha: string; files: Set<string>; parents: string[]; committedAt: Date | null; message: string }
-  | { found: false; reason: "not_found" | "no_access" | "unreachable" };
+  | { found: false; reason: "not_found" | "no_access" | "denied" | "unreachable" };
 
 function githubHeaders(token: string | null): Record<string, string> {
   const headers: Record<string, string> = {
@@ -171,8 +197,48 @@ function githubHeaders(token: string | null): Record<string, string> {
   return headers;
 }
 
+/** 401 (bad token), 403 (not allowed) and 429 (rate limit): GitHub answered, but not with what we asked for. */
+function isDeniedStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 429;
+}
+
 function repoBase(repo: GitHubRepo): string {
   return `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}`;
+}
+
+/** Can this token see the repository? "no" for a repository GitHub says does not exist for it (404) or refuses it (401/403/429). */
+async function repoIsVisible(repo: GitHubRepo, fetchImpl: CommitCiFetch, token: string | null): Promise<"yes" | "no" | "unreachable"> {
+  try {
+    const response = await fetchImpl(repoBase(repo), {
+      headers: githubHeaders(token),
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
+    });
+    if (response.status === 404 || isDeniedStatus(response.status)) return "no";
+    return response.ok ? "yes" : "unreachable";
+  } catch {
+    return "unreachable";
+  }
+}
+
+/** The repository's default branch (from GET /repos/{owner}/{repo}). */
+async function fetchDefaultBranch(
+  repo: GitHubRepo,
+  fetchImpl: CommitCiFetch,
+  token: string | null,
+): Promise<{ branch: string } | { branch: null; reason: "denied" | "unreachable" }> {
+  try {
+    const response = await fetchImpl(repoBase(repo), {
+      headers: githubHeaders(token),
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
+    });
+    if (response.status === 404 || isDeniedStatus(response.status)) return { branch: null, reason: "denied" };
+    if (!response.ok) return { branch: null, reason: "unreachable" };
+    const body = (await response.json()) as Record<string, unknown> | null;
+    const branch = typeof body?.default_branch === "string" ? body.default_branch.trim() : "";
+    return branch ? { branch } : { branch: null, reason: "unreachable" };
+  } catch {
+    return { branch: null, reason: "unreachable" };
+  }
 }
 
 async function lookupCommit(
@@ -196,9 +262,14 @@ async function lookupCommit(
       // 404/422 = no such commit as far as GitHub will say. With no token a private repository
       // answers 404 for everything, so that is "no access", not proof the commit was never pushed.
       if (response.status === 404 || response.status === 422) {
-        return { found: false, reason: token ? "not_found" : "no_access" };
+        if (!token) return { found: false, reason: "no_access" };
+        // A token that cannot see a private repository gets 404 for everything in it too, which
+        // is not proof the commit was never pushed: ask whether the token can see the repo at all.
+        const visible = await repoIsVisible(repo, fetchImpl, token);
+        return { found: false, reason: visible === "no" ? "denied" : visible === "unreachable" ? "unreachable" : "not_found" };
       }
-      // Bad or missing credentials, or rate limited: GitHub could not be asked.
+      // Bad credentials, not allowed, or rate limited: GitHub could not be asked.
+      if (isDeniedStatus(response.status)) return { found: false, reason: "denied" };
       if (!response.ok) return { found: false, reason: "unreachable" };
       const body = (await response.json()) as Record<string, unknown> | null;
       if (!body || typeof body.sha !== "string") return { found: false, reason: "unreachable" };
@@ -232,12 +303,12 @@ async function lookupCommit(
 /** Is the commit on (an ancestor of, or equal to) the project's branch? */
 async function commitIsOnBranch(
   repo: GitHubRepo,
+  branchName: string,
   sha: string,
   fetchImpl: CommitCiFetch,
   token: string | null,
-): Promise<"yes" | "no" | "unreachable" | "unknown_branch"> {
-  if (!repo.branch) return "unknown_branch";
-  const branch = repo.branch.split("/").map(encodeURIComponent).join("/");
+): Promise<"yes" | "no" | "unreachable" | "denied" | "unknown_branch"> {
+  const branch = branchName.split("/").map(encodeURIComponent).join("/");
   try {
     const response = await fetchImpl(`${repoBase(repo)}/compare/${branch}...${encodeURIComponent(sha)}`, {
       headers: githubHeaders(token),
@@ -245,6 +316,7 @@ async function commitIsOnBranch(
     });
     // The named branch does not exist (any more): nothing to compare against.
     if (response.status === 404) return "unknown_branch";
+    if (isDeniedStatus(response.status)) return "denied";
     if (!response.ok) return "unreachable";
     const body = (await response.json()) as Record<string, unknown> | null;
     // base=branch, head=sha: the sha is behind (an ancestor) or identical exactly when the branch has it.
@@ -260,7 +332,7 @@ async function pathExistsAtCommit(
   sha: string,
   fetchImpl: CommitCiFetch,
   token: string | null,
-): Promise<"yes" | "no" | "unreachable"> {
+): Promise<"yes" | "no" | "unreachable" | "denied"> {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   try {
     const response = await fetchImpl(`${repoBase(repo)}/contents/${encoded}?ref=${encodeURIComponent(sha)}`, {
@@ -268,6 +340,7 @@ async function pathExistsAtCommit(
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
     if (response.status === 404) return "no";
+    if (isDeniedStatus(response.status)) return "denied";
     return response.ok ? "yes" : "unreachable";
   } catch {
     return "unreachable";
@@ -461,7 +534,7 @@ export async function evaluateDoneEvidenceGate(input: GateInput): Promise<DoneEv
 }
 
 type CheckedCommit = Extract<CommitLookup, { found: true }> & { asNamed: string };
-type EffectiveCi = { state: CommitCiStatus["state"]; failedChecks: string[]; pendingChecks: string[]; blameSha: string };
+type EffectiveCi = { state: CommitCiStatus["state"]; failedChecks: string[]; pendingChecks: string[]; blameSha: string; denied?: boolean };
 
 /** A merge commit's own checks are often only the lockfile refresh: its PR head (2nd parent) must be green. */
 async function effectiveCiFor(
@@ -521,8 +594,14 @@ async function check(input: GateInput): Promise<DoneEvidenceGateResult | null> {
       commits,
     };
   };
-  const cannotReach = (list: string, commits: string[]) =>
-    refuse("github_unreachable", `could not check commit ${list} on GitHub because GitHub did not answer. Try again in a minute.`, commits);
+  const cannotReach = (list: string, commits: string[], denied = false) =>
+    refuse(
+      "github_unreachable",
+      denied
+        ? `could not check commit ${list} because GitHub could not be reached (no access or rate limit). Check that this company's GitHub token can see the repository, or try again later.`
+        : `could not check commit ${list} on GitHub because GitHub did not answer. Try again in a minute.`,
+      commits,
+    );
 
   const evidence = await collectEvidenceShas(input.db, {
     issue: input.issue,
@@ -551,6 +630,7 @@ async function check(input: GateInput): Promise<DoneEvidenceGateResult | null> {
       );
     }
     if (lookups.some((lookup) => !lookup.found && lookup.reason === "unreachable")) return cannotReach(list, evidence);
+    if (lookups.some((lookup) => !lookup.found && lookup.reason === "denied")) return cannotReach(list, evidence, true);
     return refuse(
       "not_on_origin",
       `${evidence.length === 1 ? "commit" : "commits"} ${list} ${evidence.length === 1 ? "is" : "are"} not on GitHub. Push the work and name the commit that is there.`,
@@ -558,16 +638,35 @@ async function check(input: GateInput): Promise<DoneEvidenceGateResult | null> {
     );
   }
 
-  // ... and on the project's branch (a fork shares its upstream's commits, a stray branch is not shipped work)
-  const branchStates = await Promise.all(found.map((commit) => commitIsOnBranch(repo, commit.sha, fetchImpl, token)));
-  const onBranch = found.filter((_, index) => branchStates[index] === "yes" || branchStates[index] === "unknown_branch");
+  // ... and on the project's branch (a fork shares its upstream's commits, a stray branch is not shipped work).
+  // A project that names no branch, or names one that does not exist, is held to the repository's
+  // default branch: skipping the check would let a commit on any stray branch through.
+  const foundShas = found.map((commit) => commit.sha);
+  const foundList = listWords(found.map((commit) => short(commit.sha)));
+  const compareAgainst = (branchName: string) =>
+    Promise.all(found.map((commit) => commitIsOnBranch(repo, branchName, commit.sha, fetchImpl, token)));
+  let branchName = repo.branch;
+  let branchStates: Array<Awaited<ReturnType<typeof commitIsOnBranch>>> | null = null;
+  if (branchName) {
+    const named = await compareAgainst(branchName);
+    // A 404 means the named branch does not exist (any more): fall back to the default branch.
+    if (!named.some((state) => state === "unknown_branch")) branchStates = named;
+  }
+  if (!branchStates) {
+    const fallback = await fetchDefaultBranch(repo, fetchImpl, token);
+    if (fallback.branch === null) return cannotReach(foundList, foundShas, fallback.reason === "denied");
+    if (fallback.branch === branchName) return cannotReach(foundList, foundShas); // named, "missing" and default at once: GitHub is inconsistent
+    branchName = fallback.branch;
+    branchStates = await compareAgainst(branchName);
+  }
+  if (branchStates.some((state) => state === "unknown_branch")) return cannotReach(foundList, foundShas);
+  const onBranch = found.filter((_, index) => branchStates![index] === "yes");
   if (onBranch.length === 0) {
-    const list = listWords(found.map((commit) => short(commit.sha)));
-    const foundShas = found.map((commit) => commit.sha);
-    if (branchStates.some((state) => state === "unreachable")) return cannotReach(list, foundShas);
+    if (branchStates.some((state) => state === "denied")) return cannotReach(foundList, foundShas, true);
+    if (branchStates.some((state) => state === "unreachable")) return cannotReach(foundList, foundShas);
     return refuse(
       "not_on_branch",
-      `commit ${list} is on GitHub but not on ${repo.branch} yet. Merge it, then name the commit that is on ${repo.branch}.`,
+      `commit ${foundList} is on GitHub but not on ${branchName} yet. Merge it, then name the commit that is on ${branchName}.`,
       foundShas,
     );
   }
@@ -603,7 +702,7 @@ async function check(input: GateInput): Promise<DoneEvidenceGateResult | null> {
   for (const named of notTouched) {
     if (!named.dir) continue;
     const exists = await pathExistsAtCommit(repo, named.path, candidates[0]!.sha, fetchImpl, token);
-    if (exists === "unreachable") return cannotReach(candidateList, candidateShas);
+    if (exists === "unreachable" || exists === "denied") return cannotReach(candidateList, candidateShas, exists === "denied");
     if (exists === "no") dropped.add(named);
   }
   const missing = notTouched.filter((named) => !dropped.has(named));
@@ -645,5 +744,6 @@ async function check(input: GateInput): Promise<DoneEvidenceGateResult | null> {
     const running = worst.ci.pendingChecks.length > 0 ? ` (${listWords(worst.ci.pendingChecks)})` : "";
     return refuse("checks_pending", `the checks for ${blame}${viaPullRequest} are still running${running}. Wait for them to finish.`, candidateShas);
   }
+  if (worst.ci.state === "unknown" && worst.ci.denied) return cannotReach(candidateList, candidateShas, true);
   return refuse("no_check_result", `there is no check result for commit ${blame}${viaPullRequest}.`, candidateShas);
 }

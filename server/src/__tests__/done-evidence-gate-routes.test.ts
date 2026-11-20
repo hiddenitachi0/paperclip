@@ -341,6 +341,29 @@ describe("PATCH /api/issues/:id -- done-evidence gate wiring (DUR-5179)", () => 
     expect(input.requestedStatus).toBe("in_review");
   });
 
+  it("runs the free evidence check before the paid finish check, so a refused move costs nothing (DUR-5209)", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress", projectId: "proj-1" }));
+    mockEvaluateDoneEvidenceGate.mockResolvedValue(REFUSAL);
+
+    const res = await request(await createApp(AGENT_ACTOR))
+      .patch(`/api/issues/${ISSUE_ID}`)
+      .send({ status: "done", comment: "Done in commit 1111111." });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("done_evidence_missing");
+    expect(mockEvaluateDoneGateCritic).not.toHaveBeenCalled();
+  });
+
+  it("still runs the paid finish check when the evidence passes, on the status as requested", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
+    mockEvaluateDoneEvidenceGate.mockResolvedValue(null);
+
+    await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done", comment: "Done." });
+
+    expect(mockEvaluateDoneGateCritic).toHaveBeenCalledTimes(1);
+    expect((mockEvaluateDoneGateCritic.mock.calls[0]![0] as Record<string, any>).requestedStatus).toBe("done");
+  });
+
   it("lets done through silently when the gate passes or does not apply", async () => {
     mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
 

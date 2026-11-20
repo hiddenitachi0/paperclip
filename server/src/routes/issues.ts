@@ -7205,56 +7205,9 @@ export function issueRoutes(
       res.status(409).json({ error: featureLaunchGateResult.message });
       return;
     }
-    // Done-gate quality check (offensive quality loop): the gates above ask whether the
-    // work was re-checked, judged against a finish line, deployed, or signed off. This one
-    // asks a cheap independent reviewer whether what the agent reports done actually
-    // matches what the task asked for. Ships off (instance setting general.doneGate);
-    // dry run only comments; enforce sends the task back with the findings and, after
-    // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
-    // Agent quality loops: a company (or task) that switched on its own finish check uses
-    // its own cheap saved model instead of the instance-wide reviewer below.
-    const qualityDoneCheck = await evaluateQualityDoneCheck({
-      db,
-      issue: {
-        id: existing.id,
-        identifier: existing.identifier,
-        companyId: existing.companyId,
-        title: existing.title,
-        description: existing.description ?? null,
-        executionPolicy: existing.executionPolicy,
-        projectId: existing.projectId,
-        assigneeAgentId: existing.assigneeAgentId,
-        assigneeUserId: existing.assigneeUserId,
-        executionState: existing.executionState,
-      },
-      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
-      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
-      currentStatus: existing.status,
-      patchComment: typeof commentBody === "string" ? commentBody : null,
-    });
-    const doneGateCriticResult = qualityDoneCheck.applies ? qualityDoneCheck.result : await evaluateDoneGateCritic({
-      db,
-      issue: {
-        id: existing.id,
-        identifier: existing.identifier,
-        companyId: existing.companyId,
-        title: existing.title,
-        description: existing.description ?? null,
-      },
-      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
-      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
-      currentStatus: existing.status,
-      patchComment: typeof commentBody === "string" ? commentBody : null,
-      readGeneralSettings: () => instanceSettings.getGeneral(),
-    });
-    if (doneGateCriticResult) {
-      res.status(409).json({
-        error: doneGateCriticResult.message,
-        findings: doneGateCriticResult.findings,
-        escalated: doneGateCriticResult.escalated,
-      });
-      return;
-    }
+    // The status the caller asked for, before the review policy below rewrites it. The paid finish
+    // check further down judges the request as made.
+    const requestedStatusBeforeTransition = typeof updateFields.status === "string" ? updateFields.status : undefined;
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -7511,6 +7464,58 @@ export function issueRoutes(
         error: doneEvidenceGateResult.message,
         code: "done_evidence_missing",
         reasons: doneEvidenceGateResult.reasons,
+      });
+      return;
+    }
+    // DUR-5209: the free evidence check above runs first, so a move it refuses never costs a paid
+    // model call. The paid check still judges the status as requested (before the review policy).
+    // Done-gate quality check (offensive quality loop): the gates above ask whether the
+    // work was re-checked, judged against a finish line, deployed, or signed off. This one
+    // asks a cheap independent reviewer whether what the agent reports done actually
+    // matches what the task asked for. Ships off (instance setting general.doneGate);
+    // dry run only comments; enforce sends the task back with the findings and, after
+    // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
+    // Agent quality loops: a company (or task) that switched on its own finish check uses
+    // its own cheap saved model instead of the instance-wide reviewer below.
+    const qualityDoneCheck = await evaluateQualityDoneCheck({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+        executionPolicy: existing.executionPolicy,
+        projectId: existing.projectId,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: requestedStatusBeforeTransition,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+    });
+    const doneGateCriticResult = qualityDoneCheck.applies ? qualityDoneCheck.result : await evaluateDoneGateCritic({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: requestedStatusBeforeTransition,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+      readGeneralSettings: () => instanceSettings.getGeneral(),
+    });
+    if (doneGateCriticResult) {
+      res.status(409).json({
+        error: doneGateCriticResult.message,
+        findings: doneGateCriticResult.findings,
+        escalated: doneGateCriticResult.escalated,
       });
       return;
     }

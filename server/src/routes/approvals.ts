@@ -3075,11 +3075,13 @@ export function approvalRoutes(
         if (key in existingPayload) filerFields[key] = existingPayload[key];
       }
       const previousRevision = readDeployCardRevision(existingPayload);
+      // A card filed before revisions existed has none. It counts as revision 1 here, so once
+      // items are added it is revision 2 and approve makes the operator look at it again.
       const prepared = await prepareDeployPayload(db, req, existing.companyId, {
         ...filerFields,
         commit: body.commit,
         items,
-      }, previousRevision);
+      }, previousRevision ?? 1);
       // Keep anything else the card carries (links to related cards, the issues it was filed
       // for); the freshly checked deploy fields win. Stamps that no longer apply drop out.
       const nextPayload: Record<string, unknown> = { ...existingPayload, ...prepared };
@@ -3158,7 +3160,8 @@ export function approvalRoutes(
         req,
         existing.companyId,
         req.body.payload,
-        readDeployCardRevision(existing.payload),
+        // A card with no revision (filed before revisions existed) counts as revision 1.
+        readDeployCardRevision(existing.payload) ?? 1,
       );
     }
     if (
