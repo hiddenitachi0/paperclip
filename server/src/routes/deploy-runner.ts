@@ -1,6 +1,13 @@
 import { Router } from "express";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { createRequestScopedDb } from "@paperclipai/db";
+import { createRequestScopedDb, projects, projectWorkspaces } from "@paperclipai/db";
+import { notFound, unprocessable } from "../errors.js";
+import { ghFetch } from "../services/github-fetch.js";
+import { secretService } from "../services/index.js";
+import { fetchCommitCiStatus } from "../services/commit-ci-status.js";
+import { resolveProjectDeployWorkspaceId } from "../services/deploy-workspace.js";
+import { parseGitHubRepoFromUrl } from "../services/github-repo-url.js";
 import { assertCompanyAccess } from "./authz.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { readDeployRunnerStatus } from "../services/deploy-runner-status.js";
@@ -160,6 +167,54 @@ export function deployRunnerRoutes(db: Db) {
         ...history,
         entries: list.items,
         pagination: { limit: list.limit, offset: list.offset, total: list.total, hasMore: list.hasMore },
+      });
+    },
+  );
+
+  // DUR-5183: what GitHub says about the checks of one exact version of a project's deploy
+  // repository, so a session that has no GitHub access of its own (the operator's box only
+  // holds a read-only deploy key) can tell whether it is time to file a deploy card. Same
+  // reading of the checks as the deploy runner and the done gate (commit-ci-status.ts).
+  router.get(
+    "/companies/:companyId/projects/:projectId/ci-status",
+    companyScopeFromParam(db, assertCompanyAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const projectId = req.params.projectId as string;
+
+      const sha = typeof req.query.sha === "string" ? req.query.sha.trim() : "";
+      if (!/^[0-9a-f]{7,40}$/i.test(sha)) {
+        res.status(400).json({ error: "sha must be 7 to 40 hex characters." });
+        return;
+      }
+
+      const project = await scopedDb
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (!project) throw notFound("Project not found");
+
+      const workspaceId = await resolveProjectDeployWorkspaceId(scopedDb, projectId);
+      if (!workspaceId) throw unprocessable("This project has no deploy workspace, so there is no repository to read checks from.");
+      const workspace = await scopedDb
+        .select({ repoUrl: projectWorkspaces.repoUrl })
+        .from(projectWorkspaces)
+        .where(and(eq(projectWorkspaces.id, workspaceId), eq(projectWorkspaces.projectId, projectId)))
+        .then((rows) => rows[0] ?? null);
+      const repo = parseGitHubRepoFromUrl(workspace?.repoUrl);
+      if (!repo) throw unprocessable("The project's deploy workspace is not a github.com repository, so its checks cannot be read.");
+
+      const token = await secretService(scopedDb)
+        .resolveGitHubToken(companyId, { consumerType: "system", consumerId: "ci-status" })
+        .catch(() => null);
+      const status = await fetchCommitCiStatus(repo, sha, { fetchImpl: ghFetch, token });
+      res.json({
+        state: status.state,
+        failedChecks: status.failedChecks,
+        pendingChecks: status.pendingChecks,
+        sha,
+        repo: `${repo.owner}/${repo.name}`,
       });
     },
   );

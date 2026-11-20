@@ -93,6 +93,44 @@ describe("extractAcceptanceCriteriaPaths", () => {
     ]);
   });
 
+  it("never requires a file the task says must not change (DUR-5209 review)", () => {
+    const description = [
+      "## Acceptance Criteria",
+      "- `pnpm-lock.yaml` must not change",
+      "- `package.json` should not be modified",
+      "- `README.md` is not changed",
+      "- works for `server/x.ts` but not `server/y.ts`",
+      "- the lockfile `CHANGELOG.md` don't touch",
+      "- `server/z.ts` returns 409 when the token is not set",
+      "- `server/w.ts` does not crash on an empty body",
+    ].join("\n");
+    const found = paths(description);
+    expect(found).toEqual(expect.arrayContaining(["server/x.ts", "server/z.ts", "server/w.ts"]));
+    for (const dropped of ["pnpm-lock.yaml", "package.json", "README.md", "server/y.ts", "CHANGELOG.md"]) {
+      expect(found).not.toContain(dropped);
+    }
+  });
+
+  it("only skips a path when the negation is about that path (DUR-5209)", () => {
+    const description = [
+      "## Acceptance Criteria",
+      "- `server/x.ts` returns 409 when the token is not set",
+      "- Do not change `package.json`",
+      "- `pnpm-lock.yaml` must stay unchanged",
+      "- Update `docs/a.md`, but never touch `docs/b.md`",
+      "- `ui/c.tsx` must not be imported by `server/d.ts`; change `server/e.ts`",
+      "- Everything except `README.md` is covered",
+      "- No changes to `LICENSE.md` and `server/f.ts` is edited",
+    ].join("\n");
+    const found = paths(description);
+    expect(found).toEqual(expect.arrayContaining(["server/x.ts", "docs/a.md", "server/e.ts", "ui/c.tsx"]));
+    expect(found).not.toContain("package.json");
+    expect(found).not.toContain("pnpm-lock.yaml");
+    expect(found).not.toContain("docs/b.md");
+    expect(found).not.toContain("README.md");
+    expect(found).not.toContain("LICENSE.md");
+  });
+
   it("returns nothing when there is no Acceptance Criteria section", () => {
     expect(paths("Fix `server/src/a.ts` please.")).toEqual([]);
     expect(paths("")).toEqual([]);
@@ -127,12 +165,26 @@ type CommitFixture = {
  * /compare/{branch}...{sha} and /contents/{path}. `extraCi` serves checks for shas that are not
  * commits of their own (a pull request head).
  */
-function githubStub(commits: Record<string, CommitFixture>, extraCi: Record<string, CiFixture> = {}) {
+type StubOptions = {
+  /** GET /repos/{o}/{r}: status and default branch (default 200 / "main") */
+  repo?: { status: number; defaultBranch?: string };
+  /** branches that exist; compare against any other branch is a 404 (default: every branch exists) */
+  branches?: string[];
+  /** status to answer for every /status and /check-runs request (a token that cannot read checks, a rate limit) */
+  checksStatus?: number;
+};
+
+function githubStub(commits: Record<string, CommitFixture>, extraCi: Record<string, CiFixture> = {}, options: StubOptions = {}) {
   return vi.fn(async (url: string, _init?: RequestInit) => {
     const parsed = new URL(url);
-    const compare = parsed.pathname.match(/\/compare\/.+\.\.\.([0-9a-f]+)$/);
+    if (/^\/repos\/[^/]+\/[^/]+$/.test(parsed.pathname)) {
+      const repo = options.repo ?? { status: 200 };
+      return new Response(repo.status === 200 ? JSON.stringify({ default_branch: repo.defaultBranch ?? "main" }) : "no", { status: repo.status });
+    }
+    const compare = parsed.pathname.match(/\/compare\/(.+)\.\.\.([0-9a-f]+)$/);
     if (compare) {
-      const fixture = commits[compare[1]!];
+      if (options.branches && !options.branches.includes(decodeURIComponent(compare[1]!))) return new Response("not found", { status: 404 });
+      const fixture = commits[compare[2]!];
       if (!fixture) return new Response("not found", { status: 404 });
       return new Response(JSON.stringify({ status: fixture.onBranch === false ? "ahead" : "behind" }), { status: 200 });
     }
@@ -149,6 +201,7 @@ function githubStub(commits: Record<string, CommitFixture>, extraCi: Record<stri
     const fixture = sha ? commits[sha] : undefined;
     const ci = sha ? (fixture?.ci ?? extraCi[sha]) : undefined;
     if (!sha || (!fixture && !extraCi[sha])) return new Response("not found", { status: 404 });
+    if (options.checksStatus && match![2]) return new Response("no", { status: options.checksStatus });
     if (match![2] === "/status") {
       return new Response(JSON.stringify(ci?.status ?? { state: "pending", total_count: 0, statuses: [] }), { status: 200 });
     }
@@ -201,6 +254,8 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
     repoUrl?: string | null;
     description?: string;
     createdAt?: Date;
+    /** the project's branch; null = the project names none */
+    repoRef?: string | null;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -227,7 +282,7 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
         name: "main",
         sourceType: "git_repo",
         repoUrl: input.repoUrl ?? "https://github.com/acme/widgets",
-        repoRef: "custom",
+        repoRef: input.repoRef === undefined ? "custom" : input.repoRef,
         isPrimary: true,
       });
     }
@@ -504,6 +559,98 @@ describeEmbeddedPostgres("done-evidence-gate", () => {
       const result = await agentDone(seeded, denied as unknown as ReturnType<typeof githubStub>);
       expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
     }
+  });
+
+  describe("the project's branch (DUR-5209)", () => {
+    const onMain = { [SHA]: { files: ["docs/x.md"], ci: GREEN } };
+
+    it("holds the commit to the repository's default branch when the project names none", async () => {
+      const seeded = await seed({ repoRef: null });
+      const fetchImpl = githubStub(onMain);
+      expect(await agentDone(seeded, fetchImpl)).toBeNull();
+      const compared = fetchImpl.mock.calls.map((call) => String(call[0])).find((url) => url.includes("/compare/"));
+      expect(compared).toContain(`/compare/main...${SHA}`);
+
+      const stray = await agentDone(seeded, githubStub({ [SHA]: { ...onMain[SHA], onBranch: false } }));
+      expect(stray).toMatchObject({ refuse: true, reason: "not_on_branch" });
+      expect(stray!.message).toContain("not on main yet");
+    });
+
+    it("falls back to the default branch when the named branch does not exist", async () => {
+      const seeded = await seed({ repoRef: "gone" });
+      expect(await agentDone(seeded, githubStub(onMain, {}, { branches: ["main"] }))).toBeNull();
+      const stray = await agentDone(seeded, githubStub({ [SHA]: { ...onMain[SHA], onBranch: false } }, {}, { branches: ["main"] }));
+      expect(stray).toMatchObject({ refuse: true, reason: "not_on_branch" });
+      expect(stray!.message).toContain("not on main yet");
+    });
+
+    it("does not look at the default branch when the named branch exists", async () => {
+      const seeded = await seed({});
+      const fetchImpl = githubStub(onMain);
+      expect(await agentDone(seeded, fetchImpl)).toBeNull();
+      expect(fetchImpl.mock.calls.map((call) => new URL(String(call[0])).pathname)).not.toContain("/repos/acme/widgets");
+    });
+
+    it("refuses, never skips the check, when the default branch cannot be read", async () => {
+      const seeded = await seed({ repoRef: null });
+      expect(await agentDone(seeded, githubStub(onMain, {}, { repo: { status: 500 } }))).toMatchObject({ refuse: true, reason: "github_unreachable" });
+      const denied = await agentDone(seeded, githubStub(onMain, {}, { repo: { status: 403 } }));
+      expect(denied).toMatchObject({ refuse: true, reason: "github_unreachable" });
+      expect(denied!.message).toContain("no access or rate limit");
+    });
+  });
+
+  describe("a token that cannot read GitHub (DUR-5209)", () => {
+    const NO_ACCESS = "GitHub could not be reached (no access or rate limit)";
+
+    it("says so when the token cannot see the repository, instead of 'not on GitHub'", async () => {
+      const seeded = await seed({});
+      const result = await agentDone(seeded, githubStub({}, {}, { repo: { status: 404 } }));
+      expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
+      expect(result!.message).toContain(NO_ACCESS);
+      expect(result!.message).not.toContain("not on GitHub");
+    });
+
+    it("still says 'not on GitHub' when the token can see the repository and the commit is not in it", async () => {
+      const seeded = await seed({});
+      expect(await agentDone(seeded, githubStub({}))).toMatchObject({ reason: "not_on_origin" });
+    });
+
+    it("says the same in plain words for 401, 403 and 429 on the commit itself", async () => {
+      const seeded = await seed({});
+      for (const status of [401, 403, 429]) {
+        const denied = vi.fn(async (_url: string, _init?: RequestInit) => new Response("no", { status }));
+        const result = await agentDone(seeded, denied as unknown as ReturnType<typeof githubStub>);
+        expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
+        expect(result!.message).toContain(NO_ACCESS);
+      }
+    });
+
+    it("says it for a rate limit while reading checks, not 'no check result'", async () => {
+      const seeded = await seed({});
+      for (const status of [401, 403, 429]) {
+        const result = await agentDone(seeded, githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN } }, {}, { checksStatus: status }));
+        expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
+        expect(result!.message).toContain(NO_ACCESS);
+        expect(result!.message).not.toContain("no check result");
+      }
+    });
+
+    it("keeps 'no check result' for a commit GitHub simply has no checks for", async () => {
+      const seeded = await seed({});
+      expect(await agentDone(seeded, githubStub({ [SHA]: { files: ["docs/x.md"] } }))).toMatchObject({ reason: "no_check_result" });
+    });
+
+    it("says it for a rate limit on the branch comparison", async () => {
+      const seeded = await seed({});
+      const limited = vi.fn(async (url: string, _init?: RequestInit) => {
+        if (url.includes("/compare/")) return new Response("slow down", { status: 429 });
+        return githubStub({ [SHA]: { files: ["docs/x.md"], ci: GREEN } })(url, _init);
+      });
+      const result = await agentDone(seeded, limited as unknown as ReturnType<typeof githubStub>);
+      expect(result).toMatchObject({ refuse: true, reason: "github_unreachable" });
+      expect(result!.message).toContain(NO_ACCESS);
+    });
   });
 
   it("with no files named, refuses a commit older than the task unless it mentions the task", async () => {

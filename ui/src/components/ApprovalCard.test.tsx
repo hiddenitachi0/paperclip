@@ -4,10 +4,17 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Approval, Issue } from "@paperclipai/shared";
 import { ToastProvider } from "../context/ToastContext";
 import { ApprovalCard } from "./ApprovalCard";
+
+vi.mock("@/lib/router", () => ({
+  Link: ({ to, children, className }: { to: string; children?: ReactNode; className?: string }) => (
+    <a href={to} className={className}>{children}</a>
+  ),
+}));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -190,5 +197,28 @@ describe("ApprovalCard deploy branch warning (DUR-226)", () => {
     });
     expect(container.textContent).not.toContain("Deploys from");
     expect(container.textContent).not.toContain("Not on");
+  });
+});
+
+describe("ApprovalCard cards that must be read in full first", () => {
+  const buttonTexts = () => Array.from(container.querySelectorAll("button")).map((el) => el.textContent);
+
+  it("offers Open instead of Approve for a strategy's new rules", () => {
+    renderCard({
+      approval: makeApproval({
+        payload: { kind: "trading_strategy_version", title: 'Trading strategy "Steady": new rules (version 7)' },
+      }),
+      onApprove: () => {},
+      onReject: () => {},
+    });
+    expect(buttonTexts()).not.toContain("Approve");
+    expect(buttonTexts()).toContain("Reject");
+    const open = Array.from(container.querySelectorAll("a")).find((el) => el.textContent === "Open");
+    expect(open?.getAttribute("href")).toBe("/approvals/approval-1");
+  });
+
+  it("still offers Approve for an ordinary request", () => {
+    renderCard({ onApprove: () => {}, onReject: () => {} });
+    expect(buttonTexts()).toContain("Approve");
   });
 });

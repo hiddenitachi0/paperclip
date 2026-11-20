@@ -885,6 +885,26 @@ describe("One deploy card per day: adding items to a card that is still waiting"
   );
 
   it(
+    "treats a card with no revision (filed before revisions existed) as revision 1, so added items make it revision 2 (DUR-5209)",
+    async () => {
+      githubAnswers({ status: "ahead", files: [{ filename: "server/src/app.ts" }] });
+      const { cardRevision: _legacy, ...legacyPayload } = PENDING_CARD.payload;
+      mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, payload: legacyPayload });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/approvals/approval-1/deploy-items").send(addBody());
+
+      expect(res.status).toBe(200);
+      const [, stored, fromRevision] = mockApprovalService.addDeployItems.mock.calls[0] as [string, any, number | null];
+      // Not 1: approve skips the "card changed" check for revision 1.
+      expect(stored.cardRevision).toBe(2);
+      // The write still only lands on a card that has no revision stamp.
+      expect(fromRevision).toBeNull();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     "refuses another agent: only the agent that filed the card may add to it",
     async () => {
       mockApprovalService.getById.mockResolvedValue({ ...PENDING_CARD, requestedByAgentId: "agent-2" });

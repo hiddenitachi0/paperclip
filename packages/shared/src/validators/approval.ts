@@ -181,6 +181,21 @@ export const deployRequestPayloadSchema = z
     // server/src/routes/approvals.ts); the UI shows such a card as a
     // rollback so approving it is a deliberate choice.
     allowBackwardDeploy: z.boolean().optional(),
+    // DUR-5183: a deploy card is refused while the checks of the version it ships are still
+    // running or have failed (422 deploy_ci_pending / deploy_ci_failed). The board may file
+    // anyway on purpose with this flag (enforced in server/src/routes/approvals.ts, like
+    // allowBackwardDeploy); an agent never may.
+    allowUnfinishedChecks: z.boolean().optional(),
+    // DUR-5183: set server-side only when allowUnfinishedChecks really let a card through that
+    // would otherwise have been refused: what the checks looked like at filing. Never trusted
+    // from the filer.
+    checksOverride: z
+      .object({
+        state: z.enum(["pending", "failed"]),
+        failedChecks: z.array(z.string()),
+        pendingChecks: z.array(z.string()),
+      })
+      .optional(),
     // Pointless deploy cards: what actually differs between the version running right now and
     // the commit this card asks to deploy -- stamped server-side at filing time
     // (server/src/routes/approvals.ts, alongside the branch stamp) so the card

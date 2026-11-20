@@ -22,6 +22,8 @@ export interface CommitCiStatus {
   state: CommitCiState;
   failedChecks: string[];
   pendingChecks: string[];
+  /** state is `unknown` because GitHub answered 401 / 403 / 429 (no access, or a rate limit). */
+  denied?: boolean;
 }
 
 export type CommitCiFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -50,13 +52,21 @@ function githubHeaders(token: string | null | undefined): Record<string, string>
   return headers;
 }
 
-async function getJson(url: string, fetchImpl: CommitCiFetch, token: string | null | undefined): Promise<unknown | null> {
+async function getJson(
+  url: string,
+  fetchImpl: CommitCiFetch,
+  token: string | null | undefined,
+  seen: { denied: boolean },
+): Promise<unknown | null> {
   try {
     const response = await fetchImpl(url, {
       headers: githubHeaders(token),
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403 || response.status === 429) seen.denied = true;
+      return null;
+    }
     return await response.json();
   } catch {
     return null;
@@ -76,27 +86,33 @@ export async function fetchCommitCiStatus(
   sha: string,
   deps: CommitCiDeps = {},
 ): Promise<CommitCiStatus> {
-  const unknown: CommitCiStatus = { state: "unknown", failedChecks: [], pendingChecks: [] };
-  if (!SHA_PATTERN.test(sha)) return unknown;
+  const seen = { denied: false };
+  const unknownStatus = (): CommitCiStatus => ({
+    state: "unknown",
+    failedChecks: [],
+    pendingChecks: [],
+    ...(seen.denied ? { denied: true } : {}),
+  });
+  if (!SHA_PATTERN.test(sha)) return unknownStatus();
   const fetchImpl: CommitCiFetch = deps.fetchImpl ?? fetch;
   const base = `${gitHubApiBase(deps.hostname ?? "github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${encodeURIComponent(sha)}`;
 
-  const statusBody = asRecord(await getJson(`${base}/status`, fetchImpl, deps.token));
-  if (!statusBody) return unknown;
+  const statusBody = asRecord(await getJson(`${base}/status`, fetchImpl, deps.token, seen));
+  if (!statusBody) return unknownStatus();
 
   const checkRuns: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= CHECK_RUNS_MAX_PAGES; page++) {
     const body = asRecord(
-      await getJson(`${base}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`, fetchImpl, deps.token),
+      await getJson(`${base}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`, fetchImpl, deps.token, seen),
     );
-    if (!body || !Array.isArray(body.check_runs)) return unknown;
+    if (!body || !Array.isArray(body.check_runs)) return unknownStatus();
     const runs = (body.check_runs as unknown[]).map(asRecord).filter((run): run is Record<string, unknown> => run !== null);
     checkRuns.push(...runs);
     const total = typeof body.total_count === "number" ? body.total_count : null;
     if (runs.length < CHECK_RUNS_PER_PAGE) break;
     if (total !== null && checkRuns.length >= total) break;
     // A full last page we are not allowed to read further is a commit we cannot judge.
-    if (page === CHECK_RUNS_MAX_PAGES) return unknown;
+    if (page === CHECK_RUNS_MAX_PAGES) return unknownStatus();
   }
 
   const totalStatuses = typeof statusBody.total_count === "number" ? statusBody.total_count : 0;

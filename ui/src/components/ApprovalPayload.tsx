@@ -331,6 +331,34 @@ export function approvalIsRollbackDeploy(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * DUR-5183: a deploy card is normally refused while its version's checks are running or
+ * failed. When the board filed it anyway on purpose (allowUnfinishedChecks), the server stamps
+ * `checksOverride` on the card. Returns one plain line so a second person approving sees it,
+ * or null for an ordinary card. Reads only the server-written stamp, never the filer's flag.
+ */
+export function approvalChecksOverrideNote(payload?: Record<string, unknown> | null): string | null {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const stamp = payload?.checksOverride;
+  if (!stamp || typeof stamp !== "object") return null;
+  const { state, failedChecks, pendingChecks } = stamp as {
+    state?: unknown;
+    failedChecks?: unknown;
+    pendingChecks?: unknown;
+  };
+  const names = (value: unknown): string =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0).join(", ") : "";
+  if (state === "failed") {
+    const failed = names(failedChecks);
+    return `Filed although this version failed its checks${failed ? `: ${failed}` : ""}`;
+  }
+  if (state === "pending") {
+    const pending = names(pendingChecks);
+    return `Filed before this version's checks finished${pending ? ` (still running: ${pending})` : ""}`;
+  }
+  return null;
+}
+
+/**
  * Key used to detect two pending approvals that target the same underlying
  * thing — same repo+PR for a merge, same commit for a deploy — so the Now
  * view can flag them as duplicates of each other (DUR-156). Mirrors the
@@ -600,6 +628,9 @@ export function BoardApprovalPayload({
   }
   if (firstNonEmptyString(payload.kind) === "operator_action") {
     return <OperatorActionPayloadContent payload={nextPayload} />;
+  }
+  if (firstNonEmptyString(payload.kind) === "trading_strategy_version") {
+    return <TradingStrategyVersionPayloadContent payload={nextPayload} />;
   }
   if (firstNonEmptyString(payload.kind) === "report_script_version") {
     return <ReportScriptVersionPayloadContent payload={nextPayload} approvalId={approvalId} companyId={companyId} />;
@@ -1050,6 +1081,63 @@ function OperatorActionPayloadContent({ payload }: { payload: Record<string, unk
         </div>
       )}
       {secretName && <PayloadField label="Value from" value={`secret "${secretName}"`} />}
+    </div>
+  );
+}
+
+/**
+ * A trading strategy's new rules. Approving switches the strategy to exactly
+ * these rules, so the card lists every rule in words and shows the written
+ * guidelines before the owner decides. Both come from the stored draft.
+ */
+function TradingStrategyVersionPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const intro = firstNonEmptyString(payload.plainSummary, payload.summary);
+  const rules = Array.isArray(payload.readBack)
+    ? payload.readBack.filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    : [];
+  const guidelines = firstNonEmptyString(payload.guidelines);
+  const untested = firstNonEmptyString(payload.pastDataTest);
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">New rules</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {intro && rules.length === 0 && <p className="whitespace-pre-line leading-6 text-foreground/90">{intro}</p>}
+      {untested && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+          <p className="leading-6 text-foreground">These rules are {untested}.</p>
+        </div>
+      )}
+      {rules.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            What the strategy will do
+          </p>
+          <ul className="space-y-1 text-sm text-foreground/90">
+            {rules.map((rule, index) => (
+              <li key={`${index}-${rule}`} className="flex items-start gap-2">
+                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                <span className="leading-6">{rule}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {guidelines && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Written guidelines</p>
+          <p className="whitespace-pre-line rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 leading-6 text-foreground/90">
+            {guidelines}
+          </p>
+        </div>
+      )}
+      <p className="text-xs leading-5 text-muted-foreground">
+        Approving switches the strategy to exactly these rules from its next check. It trades play money only.
+      </p>
     </div>
   );
 }
