@@ -63,6 +63,9 @@ import {
   resolveProjectDeployBranchesByProjectId,
   type ProjectDeployBranches,
 } from "../services/deploy-branches.js";
+import { parseGitHubRepoFromUrl } from "../services/github-repo-url.js";
+import { fetchCommitCiStatus } from "../services/commit-ci-status.js";
+import { describeDeployCiRefusal } from "../services/deploy-ci-gate.js";
 import {
   describeUnknownDeployLikeKind,
   describeUnsupportedDeployLikeApproval,
@@ -228,6 +231,19 @@ function assertBackwardDeployOptInIsBoardFiled(req: Request, payload: { allowBac
 }
 
 /**
+ * DUR-5183: `payload.allowUnfinishedChecks` files a deploy card although the version's checks
+ * are still running or have failed. Like a rollback, that is the board's call, never an agent's.
+ */
+function assertUnfinishedChecksOptInIsBoardFiled(req: Request, payload: { allowUnfinishedChecks?: boolean }) {
+  if (payload.allowUnfinishedChecks !== true) return;
+  if (req.actor.type === "board") return;
+  throw forbidden(
+    "Only the board can file a deploy card while its checks are still running or failed (allowUnfinishedChecks). " +
+      "File the card when the checks are green.",
+  );
+}
+
+/**
  * DUR-3964 (a): a deploy card filed by an AGENT must name the exact commit it
  * wants deployed, written out in full.
  *
@@ -261,21 +277,6 @@ function assertAgentDeployCardPinsAFullCommitId(
   }
   if (isFullCommitId(commit)) return;
   throw unprocessable(describeDeployCardPartialCommitId({ commit }), { commit, reason: "commit_not_full" });
-}
-
-function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
-  if (!repoUrl) return null;
-  try {
-    const parsed = new URL(repoUrl);
-    if (parsed.protocol !== "https:") return null;
-    const host = parsed.host.toLowerCase();
-    if (host !== "github.com" && host !== "www.github.com") return null;
-    const [owner, rawName] = parsed.pathname.replace(/^\/+/, "").split("/");
-    if (!owner || !rawName) return null;
-    return { owner, name: rawName.replace(/\.git$/i, "") };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -1133,6 +1134,63 @@ function findDuplicateApprovedDeploy(
 }
 
 /**
+ * DUR-5183: refuse a deploy card while the checks of the version it ships are still running
+ * (422 deploy_ci_pending) or have failed (422 deploy_ci_failed). `none` and `unknown` let the
+ * card through, exactly like the deploy runner: no checks set up is not a failure, and a
+ * GitHub outage must not stop anyone asking for a deploy. A board-filed rollback skips the
+ * check entirely (it must work when everything is on fire); a board-filed
+ * `allowUnfinishedChecks` still files, with what the checks looked like stamped on the card.
+ *
+ * Returns the stamp for `checksOverride`, or null when there was nothing to override.
+ */
+async function assertDeployCommitCiGreen(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; allowBackwardDeploy?: boolean; allowUnfinishedChecks?: boolean },
+  commit: string | undefined,
+  deps: GitHubDeps = {},
+): Promise<DeployRequestPayload["checksOverride"] | null> {
+  const sha = commit?.trim();
+  if (!sha || payload.allowBackwardDeploy === true) return null;
+  try {
+    const workspaceRow = await db
+      .select({ repoUrl: projectWorkspaces.repoUrl })
+      .from(projectWorkspaces)
+      .where(and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)))
+      .then((rows) => rows[0] ?? null);
+    const access = await resolveGitHubRepoAccess(
+      db,
+      companyId,
+      parseGitHubRepoFromUrl(workspaceRow?.repoUrl),
+      "deploy-approval-ci-gate",
+      deps,
+    );
+    if (!access) return null;
+    const token = access.headers.authorization?.replace(/^Bearer /, "") ?? null;
+    const status = await fetchCommitCiStatus(access.repo, sha, { fetchImpl: access.fetchImpl, token });
+    const refusal = describeDeployCiRefusal(status);
+    if (!refusal) return null;
+    if (payload.allowUnfinishedChecks === true) {
+      return {
+        state: status.state === "failed" ? "failed" : "pending",
+        failedChecks: status.failedChecks,
+        pendingChecks: status.pendingChecks,
+      };
+    }
+    throw unprocessable(refusal.message, {
+      code: refusal.code,
+      commit: sha,
+      failedChecks: status.failedChecks,
+      pendingChecks: status.pendingChecks,
+    });
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    logger.warn({ err, companyId, projectId: payload.projectId, commit: sha }, "could not read the checks of a deploy card's commit; filing it anyway (DUR-5183)");
+    return null;
+  }
+}
+
+/**
  * Every check a deploy card must pass, and every server-side stamp it carries, in one place.
  * Used when a card is filed, when it is resubmitted and when more items are added to a card
  * that is still waiting (POST /approvals/:id/deploy-items), so the three paths can never
@@ -1151,6 +1209,7 @@ async function prepareDeployPayload(
 ): Promise<DeployRequestPayload> {
   const parsedDeployPayload = deployRequestPayloadSchema.parse(rawPayload);
   assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
+  assertUnfinishedChecksOptInIsBoardFiled(req, parsedDeployPayload);
   // DUR-3964 (a): an agent's deploy card must name the exact commit, in
   // full, before anything else looks at it -- a card with no commit id
   // deploys the top of the branch, not the change that was reviewed.
@@ -1191,8 +1250,16 @@ async function prepareDeployPayload(
   // DUR-3964 (a): stamp what this card would really deploy -- the pinned
   // commit, or the top of the branch when the board pinned none.
   const targetCommit = await resolveDeployTargetCommit(db, companyId, deployPayload);
+  // DUR-5183: the checks of that exact commit must be green before the card reaches anyone.
+  const checksOverride = await assertDeployCommitCiGreen(
+    db,
+    companyId,
+    deployPayload,
+    targetCommit.resolvedCommit ?? deployPayload.commit,
+  );
   return deployRequestPayloadSchema.parse({
     ...deployPayload,
+    checksOverride: checksOverride ?? undefined,
     sourceBranch: branchStamp.sourceBranch,
     deployBranch: branchStamp.deployBranch,
     changesSinceLive: changesSinceLive ?? undefined,

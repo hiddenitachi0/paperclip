@@ -98,6 +98,18 @@ paperclipai approval deploy-add <approvalId> --commit <full-sha> \
 
 (`POST /api/approvals/:id/deploy-items` with `{commit, items[], issueIds[]}`.) `--commit` is the day's combined commit; every deploy check runs again against it. Each item is one plain-language line (1–300 characters, at most 50 per card) and is shown on the card. Only a deploy card that is still waiting accepts items, and it needs the right to ask for a deploy. Only the agent that filed the card, or a board user, may add items, and never to a card a person filed. Every deploy card carries a revision number (`payload.cardRevision`: 1 when filed, up by one each time items are added or the card is resubmitted) that the card shows. Approving sends the revision the person saw (`expectedCardRevision`; `paperclipai approval approve <id> --card-revision <n>`), and a card that changed after that is refused with a 409: "This card changed after you opened it. Look at it again before approving." A card that was never changed (revision 1) can still be approved without sending one. If the checks on the build are still running, the runner waits up to 4 hours before closing the card.
 
+## Deploy Cards Wait for Green Checks
+
+A deploy card is refused (HTTP 422) while the checks of the version it ships are still running (`deploy_ci_pending`: "This version's checks are still running. File the card when they are green.") or have failed (`deploy_ci_failed`, naming the failed checks). This applies when filing, resubmitting and adding items. A version with no checks at all, or one GitHub cannot be asked about, goes through, like at the deploy runner. A board user may file anyway with `payload.allowUnfinishedChecks: true`; the card then carries `payload.checksOverride` with what the checks looked like. A board rollback (`allowBackwardDeploy`) never waits for checks. Agents can never set `allowUnfinishedChecks`.
+
+To wait for green from a box without GitHub access, ask the server:
+
+```sh
+paperclipai ci status --project <projectId> --sha <sha> -C <companyId>
+```
+
+It prints `green`, `pending (2 checks still running: ...)` or `failed: <check names>`. Exit code 0 is green (or no checks), 2 pending, 1 failed, 3 GitHub could not be asked, so a script can loop on it. (`GET /api/companies/:companyId/projects/:projectId/ci-status?sha=<7-40 hex>`.)
+
 ## Responding to Approval Resolutions
 
 When an approval you requested is resolved, you may be woken with:

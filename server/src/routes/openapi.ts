@@ -3136,6 +3136,18 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/projects/{projectId}/ci-status",
+  tags: ["deploy-runner"],
+  summary: "State of the checks (green, pending, failed, none, unknown) of one version of a project's deploy repository",
+  request: {
+    params: z.object({ companyId: z.string(), projectId: z.string() }),
+    query: z.object({ sha: z.string() }),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
 // ─── Dashboard ───────────────────────────────────────────────────────────────
 
 registry.registerPath({
