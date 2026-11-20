@@ -21,6 +21,7 @@ import {
   approvalDeployTargetCommitText,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
+  approvalChecksOverrideNote,
   approvalIsRollbackDeploy,
   approvalLabel,
   approvalTargetBadge,
@@ -207,6 +208,31 @@ describe("approvalDeployChangeSummaryText (pointless-deploy-card guard)", () => 
     expect(approvalDeployChangeSummaryText({ kind: "deploy", commit: "abc1234" })).toBeNull();
     expect(approvalDeployChangeSummaryText({ kind: "merge_pr", changesSinceLive: { liveCommit: "a" } })).toBeNull();
     expect(approvalDeployChangeSummaryText(null)).toBeNull();
+  });
+});
+
+describe("approvalChecksOverrideNote (DUR-5183)", () => {
+  it("says in one plain line that a card was filed before checks finished or despite failed checks", () => {
+    expect(
+      approvalChecksOverrideNote({
+        kind: "deploy",
+        checksOverride: { state: "pending", failedChecks: [], pendingChecks: ["build", "unit tests"] },
+      }),
+    ).toBe("Filed before this version's checks finished (still running: build, unit tests)");
+    expect(
+      approvalChecksOverrideNote({
+        kind: "deploy",
+        checksOverride: { state: "failed", failedChecks: ["unit tests"], pendingChecks: [] },
+      }),
+    ).toBe("Filed although this version failed its checks: unit tests");
+  });
+
+  it("is null for an ordinary card, a non-deploy card or a malformed stamp", () => {
+    expect(approvalChecksOverrideNote({ kind: "deploy", commit: "abc1234" })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "merge_pr", checksOverride: { state: "failed", failedChecks: ["x"] } })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "deploy", checksOverride: "yes" })).toBeNull();
+    expect(approvalChecksOverrideNote({ kind: "deploy", checksOverride: { state: "green" } })).toBeNull();
+    expect(approvalChecksOverrideNote(null)).toBeNull();
   });
 });
 

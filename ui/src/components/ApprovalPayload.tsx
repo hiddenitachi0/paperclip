@@ -331,6 +331,34 @@ export function approvalIsRollbackDeploy(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * DUR-5183: a deploy card is normally refused while its version's checks are running or
+ * failed. When the board filed it anyway on purpose (allowUnfinishedChecks), the server stamps
+ * `checksOverride` on the card. Returns one plain line so a second person approving sees it,
+ * or null for an ordinary card. Reads only the server-written stamp, never the filer's flag.
+ */
+export function approvalChecksOverrideNote(payload?: Record<string, unknown> | null): string | null {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const stamp = payload?.checksOverride;
+  if (!stamp || typeof stamp !== "object") return null;
+  const { state, failedChecks, pendingChecks } = stamp as {
+    state?: unknown;
+    failedChecks?: unknown;
+    pendingChecks?: unknown;
+  };
+  const names = (value: unknown): string =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0).join(", ") : "";
+  if (state === "failed") {
+    const failed = names(failedChecks);
+    return `Filed although this version failed its checks${failed ? `: ${failed}` : ""}`;
+  }
+  if (state === "pending") {
+    const pending = names(pendingChecks);
+    return `Filed before this version's checks finished${pending ? ` (still running: ${pending})` : ""}`;
+  }
+  return null;
+}
+
+/**
  * Key used to detect two pending approvals that target the same underlying
  * thing — same repo+PR for a merge, same commit for a deploy — so the Now
  * view can flag them as duplicates of each other (DUR-156). Mirrors the

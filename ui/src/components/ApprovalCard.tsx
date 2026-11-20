@@ -14,6 +14,7 @@ import {
   DeployCardRevision,
   DeployItemsList,
   approvalDeployTargetCommitText,
+  approvalChecksOverrideNote,
   approvalIsRollbackDeploy,
   typeIcon,
   defaultTypeIcon,
@@ -106,6 +107,7 @@ export function ApprovalCard({
   const technicalReference = approvalTechnicalReference(payload);
   const branchInfo = approvalDeployBranchInfo(payload);
   const isRollback = approvalIsRollbackDeploy(payload);
+  const checksOverrideNote = approvalChecksOverrideNote(payload);
   const deployChangeSummary = approvalDeployChangeSummaryText(payload);
   const deployTargetCommit = approvalDeployTargetCommitText(payload);
   const issueRefs = (linkedIssues ?? [])
@@ -201,6 +203,12 @@ export function ApprovalCard({
                     <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
                       <AlertTriangle className="h-3 w-3" />
                       Rollback — approving moves production back to an older version
+                    </span>
+                  )}
+                  {checksOverrideNote && (
+                    <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                      <AlertTriangle className="h-3 w-3" />
+                      {checksOverrideNote}
                     </span>
                   )}
                   <span>{subject ?? kindLabel}</span>
