@@ -1175,6 +1175,35 @@ describe("effective run execution workspace config freshness", () => {
     expect(realizeWorkspace).not.toHaveBeenCalled();
   });
 
+  it("under requireIsolation, does not restore a task bound to the shared checkout, but keeps a git worktree (DUR-5184)", () => {
+    const base = {
+      issueExecutionWorkspaceId: "workspace-old",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: "active",
+    };
+    expect(
+      resolveExecutionWorkspaceReuseRequestForIssue({
+        ...base,
+        requireIsolation: true,
+        existingExecutionWorkspaceStrategyType: "project_primary",
+      }),
+    ).toMatchObject({ requestedShouldReuseExisting: false, existingExecutionWorkspaceAvailable: false });
+    expect(
+      resolveExecutionWorkspaceReuseRequestForIssue({
+        ...base,
+        requireIsolation: true,
+        existingExecutionWorkspaceStrategyType: "git_worktree",
+      }),
+    ).toMatchObject({ requestedShouldReuseExisting: true, existingExecutionWorkspaceAvailable: true });
+    // Without requireIsolation the shared checkout is still restored as before.
+    expect(
+      resolveExecutionWorkspaceReuseRequestForIssue({
+        ...base,
+        existingExecutionWorkspaceStrategyType: "project_primary",
+      }),
+    ).toMatchObject({ requestedShouldReuseExisting: true, existingExecutionWorkspaceAvailable: true });
+  });
+
   it.each([
     { name: "missing", status: null },
     { name: "archived", status: "archived" },

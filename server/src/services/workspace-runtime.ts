@@ -395,6 +395,12 @@ function renderWorkspaceTemplate(template: string, input: {
   });
 }
 
+/** `run-<first 8 hex chars of the run id>`; null when there is no usable run id. */
+export function runScopedBranchName(runId: string | null | undefined): string | null {
+  const short = (runId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  return short.length > 0 ? `run-${short}` : null;
+}
+
 function sanitizeBranchName(value: string): string {
   return value
     .trim()
@@ -746,6 +752,9 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   sourceIssue: ExecutionWorkspaceIssueRef | null;
   executionWorkspaceId?: string | null;
   baseRef?: string | null;
+  allowSwitchFromOtherBranch?: boolean;
+  /** DUR-5184: another live run is using this folder, so its branch must not be switched under it. */
+  anotherRunUsesFolder?: boolean;
 }): Promise<GitWorktreeBranchIncoherenceEvidence> {
   const status = await runGit(
     ["status", "--porcelain", "--untracked-files=all"],
@@ -771,8 +780,20 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   const sameHead = Boolean(expectedHeadSha && actualHeadSha && expectedHeadSha === actualHeadSha);
   const expectedBranchExists = Boolean(expectedHeadSha);
 
+  // DUR-5184: at the start of a run (allowSwitchFromOtherBranch), a clean folder
+  // sitting on another *named* branch is put back on the expected branch even
+  // when the two branches differ. The end-of-run check keeps the strict rule: a
+  // run that switched branches and committed there is flagged, not hidden. Nothing is lost: the
+  // folder has no local changes, and the branch it is leaving still holds every
+  // commit (registeredBranchMatchesHead is only true for a named, registered
+  // branch). Dirty or detached folders still block, so uncommitted work is never
+  // touched. `git checkout` itself refuses if the expected branch is checked out
+  // in another folder, which surfaces as a failed repair.
   const checkoutExistingEligible =
-    cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
+    cleanliness === "clean" &&
+    expectedBranchExists &&
+    registeredBranchMatchesHead &&
+    (sameHead || (input.allowSwitchFromOtherBranch === true && input.anotherRunUsesFolder !== true));
   // The expected branch is gone entirely -- most commonly because it already
   // merged and was deleted -- but the worktree directory is still registered and
   // has no local changes to lose. Recreating the branch from the base ref gets a
@@ -791,7 +812,9 @@ async function inspectGitWorktreeBranchIncoherence(input: {
       ? "create_from_base"
       : null;
   const safeRepairReason = checkoutExistingEligible
-    ? "clean worktree and expected branch points at the current HEAD"
+    ? sameHead
+      ? "clean worktree and expected branch points at the current HEAD"
+      : `clean worktree on branch "${formatBranchForMessage(input.actualBranchName)}"; switching back to the expected branch (the other branch keeps its commits)`
     : createFromBaseEligible
       ? `expected branch does not exist; recreating it from base ref "${input.baseRef}"`
       : cleanliness !== "clean"
@@ -804,6 +827,8 @@ async function inspectGitWorktreeBranchIncoherence(input: {
             : "expected branch does not exist"
         : !registeredBranchMatchesHead
           ? "registered worktree branch does not match HEAD"
+        : !sameHead && input.anotherRunUsesFolder === true
+          ? "another run is using this folder right now, so its branch was not switched; retry once that run has finished"
         : !sameHead
           ? "expected branch and current HEAD differ"
           : "safe repair could not be proven";
@@ -883,6 +908,11 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   // all (e.g. deleted after merging). Omit to keep the old strict behavior of
   // always failing when the expected branch is missing.
   baseRef?: string | null;
+  // Start-of-run only: put a clean folder back on the expected branch even if
+  // it is on a different named branch (DUR-5184). Dirty folders still block.
+  allowSwitchFromOtherBranch?: boolean;
+  /** DUR-5184: true when another live run is using this folder (locks are per task, not per folder). */
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const expectedBranchName = input.expectedBranchName?.trim();
@@ -893,6 +923,10 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     : await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], input.worktreePath).catch(() => null);
   if (currentBranch === expectedBranchName) return;
 
+  const anotherRunUsesFolder =
+    input.allowSwitchFromOtherBranch === true && input.isInUseByAnotherRun
+      ? await input.isInUseByAnotherRun(input.worktreePath).catch(() => true)
+      : false;
   const evidence = await inspectGitWorktreeBranchIncoherence({
     repoRoot: input.repoRoot,
     worktreePath: input.worktreePath,
@@ -901,6 +935,8 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     sourceIssue: input.sourceIssue,
     executionWorkspaceId: input.executionWorkspaceId ?? null,
     baseRef: input.baseRef ?? null,
+    allowSwitchFromOtherBranch: input.allowSwitchFromOtherBranch === true,
+    anotherRunUsesFolder,
   });
 
   if (!evidence.safeRepair.eligible) {
@@ -930,7 +966,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
       },
       successMessage: evidence.safeRepair.mode === "create_from_base"
         ? `Repaired git worktree at ${input.worktreePath}: recreated missing branch ${expectedBranchName} from ${input.baseRef}\n`
-        : `Repaired clean git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
+        : `Workspace ${input.worktreePath} was on branch "${formatBranchForMessage(currentBranch)}" instead of "${expectedBranchName}", and had no uncommitted changes, so it was switched back to "${expectedBranchName}". The other branch was not changed.\n`,
       failureLabel: `git ${repairArgs.join(" ")}`,
     });
   } catch (error) {
@@ -1687,18 +1723,28 @@ export async function realizeExecutionWorkspace(input: {
   config: Record<string, unknown>;
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
+  /** DUR-5184: names the private branch of a run that has no issue (`run-<shortRunId>`). */
+  runId?: string | null;
+  /** DUR-5184: true when another live run uses this folder; a start-of-run branch switch is then refused. */
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RealizedExecutionWorkspace> {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
   const strategyType = asString(rawStrategy.type, "project_primary");
   if (strategyType !== "git_worktree") {
+    const sharedWarnings = await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd);
+    if (!input.issue) {
+      sharedWarnings.push(
+        "This run has no issue and is working in the project's shared checkout, which other runs may also use. Do not commit or reset there. This project's runs share one folder: ask the board to turn on \"one folder per task\" for this project.",
+      );
+    }
     return {
       ...input.base,
       strategy: "project_primary",
       cwd: input.base.baseCwd,
       branchName: null,
       worktreePath: null,
-      warnings: await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd),
+      warnings: sharedWarnings,
       created: false,
       baseRefSha: null,
     };
@@ -1706,7 +1752,10 @@ export async function realizeExecutionWorkspace(input: {
 
   const repoRoot = await resolveGitOwnerRepoRoot(input.base.baseCwd);
   const branchTemplate = asString(rawStrategy.branchTemplate, "{{issue.identifier}}-{{slug}}");
-  const renderedBranch = renderWorkspaceTemplate(branchTemplate, {
+  // DUR-5184: a run without an issue has no identifier to put in the branch name,
+  // so the template used to render a shared "issue" branch/folder. Give it its own.
+  const runScopedBranch = !input.issue ? runScopedBranchName(input.runId) : null;
+  const renderedBranch = runScopedBranch ?? renderWorkspaceTemplate(branchTemplate, {
     issue: input.issue,
     agent: input.agent,
     projectId: input.base.projectId,
@@ -1813,6 +1862,8 @@ export async function realizeExecutionWorkspace(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: null,
         baseRef,
+        allowSwitchFromOtherBranch: true,
+        isInUseByAnotherRun: input.isInUseByAnotherRun ?? null,
         recorder: input.recorder ?? null,
       });
       return await validateLinkedGitWorktree({
@@ -1937,6 +1988,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   };
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
+  isInUseByAnotherRun?: ((worktreePath: string) => Promise<boolean>) | null;
   recorder?: WorkspaceOperationRecorder | null;
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
@@ -1979,6 +2031,8 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: input.workspace.id ?? null,
         baseRef: reuseBaseRef,
+        allowSwitchFromOtherBranch: true,
+        isInUseByAnotherRun: input.isInUseByAnotherRun ?? null,
         recorder: input.recorder ?? null,
       });
     }

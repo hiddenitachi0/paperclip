@@ -76,6 +76,7 @@ import { parseObject } from "../adapters/utils.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
+  childMayShareParentWorkspace,
   issueExecutionWorkspaceModeForPersistedWorkspace,
   parseIssueExecutionWorkspaceSettings,
   parseProjectExecutionWorkspacePolicy,
@@ -5864,11 +5865,40 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
               .select({
                 id: executionWorkspaces.id,
                 mode: executionWorkspaces.mode,
+                strategyType: executionWorkspaces.strategyType,
               })
               .from(executionWorkspaces)
               .where(eq(executionWorkspaces.id, workspaceSource.executionWorkspaceId))
               .then((rows) => rows[0] ?? null);
-            if (sourceWorkspace) {
+            const childProjectRow = issueData.projectId
+              ? await tx
+                  .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
+                  .from(projects)
+                  .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
+                  .then((rows) => rows[0] ?? null)
+              : null;
+            const childRequiresIsolation =
+              parseProjectExecutionWorkspacePolicy(childProjectRow?.executionWorkspacePolicy)?.requireIsolation === true;
+            if (
+              sourceWorkspace &&
+              workspaceInheritanceIssueId === issueData.parentId &&
+              !childMayShareParentWorkspace({
+                parentWorkspaceMode: sourceWorkspace.mode,
+                childWorkMode: issueData.workMode,
+                requireIsolation: childRequiresIsolation,
+                parentStrategyType: sourceWorkspace.strategyType,
+              })
+            ) {
+              // DUR-5184: a child that will write code must not run in the
+              // parent's git folder -- a run that switches branches there
+              // breaks the parent's next run. Leave the binding empty, ask
+              // for an isolated workspace, and the child's first run
+              // provisions its own worktree and branch.
+              executionWorkspaceSettings = {
+                ...((workspaceSource.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? {}),
+                mode: "isolated_workspace",
+              };
+            } else if (sourceWorkspace) {
               executionWorkspaceId = sourceWorkspace.id;
               executionWorkspacePreference = "reuse_existing";
               executionWorkspaceSettings = {

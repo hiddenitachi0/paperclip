@@ -8,6 +8,7 @@ import {
   parseProjectExecutionWorkspacePolicy,
   resolveExecutionWorkspaceEnvironmentId,
   resolveExecutionWorkspaceMode,
+  childMayShareParentWorkspace,
 } from "../services/execution-workspace-policy.ts";
 
 describe("execution workspace policy helpers", () => {
@@ -279,5 +280,162 @@ describe("execution workspace policy helpers", () => {
         true,
       ),
     ).toEqual({ enabled: true, defaultMode: "isolated_workspace" });
+  });
+
+  describe("requireIsolation (DUR-5184)", () => {
+    const required = { enabled: true, defaultMode: "shared_workspace", requireIsolation: true } as const;
+
+    it("parses requireIsolation and drops anything that is not literally true", () => {
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true, requireIsolation: true })).toMatchObject({
+        requireIsolation: true,
+      });
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true, requireIsolation: "true" })).not.toHaveProperty(
+        "requireIsolation",
+      );
+      expect(parseProjectExecutionWorkspacePolicy({ enabled: true })).not.toHaveProperty("requireIsolation");
+    });
+
+    it("keeps the policy when the experimental flag is off, and still drops an ordinary one", () => {
+      expect(gateProjectExecutionWorkspacePolicy(required, false)).toEqual(required);
+      expect(gateProjectExecutionWorkspacePolicy({ enabled: true, defaultMode: "isolated_workspace" }, false)).toBeNull();
+    });
+
+    it("with the flag off returns only what isolation needs, never workspaceRuntime or other policy (DUR-5228)", () => {
+      const gated = gateProjectExecutionWorkspacePolicy(
+        {
+          ...required,
+          workspaceStrategy: { type: "git_worktree", baseRef: "custom" },
+          workspaceRuntime: { services: [{ name: "x", command: "PROBE_HOST_COMMAND" }] },
+          branchPolicy: { a: 1 },
+          runtimePolicy: { b: 2 },
+          cleanupPolicy: { c: 3 },
+          authorizationPolicy: { d: 4 },
+        } as never,
+        false,
+      );
+      expect(gated).toEqual({ ...required, workspaceStrategy: { type: "git_worktree", baseRef: "custom" } });
+      expect(gated).not.toHaveProperty("workspaceRuntime");
+    });
+
+    it("forces isolated_workspace over the project default, the issue setting and the legacy opt-out", () => {
+      expect(
+        resolveExecutionWorkspaceMode({ projectPolicy: required, issueSettings: null, legacyUseProjectWorkspace: null }),
+      ).toBe("isolated_workspace");
+      for (const mode of ["shared_workspace", "operator_branch", "agent_default"] as const) {
+        expect(
+          resolveExecutionWorkspaceMode({
+            projectPolicy: required,
+            issueSettings: { mode },
+            legacyUseProjectWorkspace: false,
+          }),
+        ).toBe("isolated_workspace");
+      }
+    });
+
+    it("applies even when the policy is not otherwise enabled", () => {
+      expect(
+        resolveExecutionWorkspaceMode({
+          projectPolicy: { enabled: false, requireIsolation: true },
+          issueSettings: null,
+          legacyUseProjectWorkspace: null,
+        }),
+      ).toBe("isolated_workspace");
+    });
+
+    it("defaults new issues of the project to isolated_workspace", () => {
+      expect(defaultIssueExecutionWorkspaceSettingsForProject(required)).toEqual({ mode: "isolated_workspace" });
+    });
+
+    it("forces the git_worktree strategy over a stored project_primary one but keeps its worktree settings", () => {
+      const config = buildExecutionWorkspaceAdapterConfig({
+        agentConfig: {},
+        projectPolicy: {
+          ...required,
+          workspaceStrategy: { type: "project_primary", baseRef: "origin/custom", provisionCommand: "bash ./setup.sh" },
+        },
+        issueSettings: { mode: "shared_workspace", workspaceStrategy: { type: "project_primary" } },
+        mode: "isolated_workspace",
+        legacyUseProjectWorkspace: null,
+      });
+      expect(config.workspaceStrategy).toEqual({ type: "git_worktree" });
+      const keeps = buildExecutionWorkspaceAdapterConfig({
+        agentConfig: {},
+        projectPolicy: {
+          ...required,
+          workspaceStrategy: { type: "project_primary", baseRef: "origin/custom", provisionCommand: "bash ./setup.sh" },
+        },
+        issueSettings: null,
+        mode: "isolated_workspace",
+        legacyUseProjectWorkspace: null,
+      });
+      expect(keeps.workspaceStrategy).toEqual({
+        type: "git_worktree",
+        baseRef: "origin/custom",
+        provisionCommand: "bash ./setup.sh",
+      });
+    });
+
+    it("gives the Nordstrand policy (shared_workspace + project_primary) a worktree once required", () => {
+      const nordstrand = {
+        enabled: true,
+        defaultMode: "shared_workspace",
+        workspaceStrategy: { type: "project_primary" },
+      } as const;
+      const mode = resolveExecutionWorkspaceMode({
+        projectPolicy: { ...nordstrand, requireIsolation: true },
+        issueSettings: null,
+        legacyUseProjectWorkspace: null,
+      });
+      expect(mode).toBe("isolated_workspace");
+      expect(
+        buildExecutionWorkspaceAdapterConfig({
+          agentConfig: {},
+          projectPolicy: { ...nordstrand, requireIsolation: true },
+          issueSettings: null,
+          mode,
+          legacyUseProjectWorkspace: null,
+        }).workspaceStrategy,
+      ).toMatchObject({ type: "git_worktree" });
+    });
+  });
+});
+
+describe("childMayShareParentWorkspace (DUR-5184)", () => {
+  it("gives a code-writing child of a git-worktree parent its own folder", () => {
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "standard" })).toBe(false);
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: undefined })).toBe(false);
+  });
+
+  it("lets a read-only child share the parent's folder", () => {
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "ask" })).toBe(true);
+    expect(childMayShareParentWorkspace({ parentWorkspaceMode: "isolated_workspace", childWorkMode: "planning" })).toBe(true);
+  });
+
+  it("under requireIsolation, never hands a child a folder that is not a git worktree", () => {
+    for (const childWorkMode of ["standard", "ask", "planning"]) {
+      expect(
+        childMayShareParentWorkspace({
+          parentWorkspaceMode: "shared_workspace",
+          parentStrategyType: "project_primary",
+          childWorkMode,
+          requireIsolation: true,
+        }),
+      ).toBe(false);
+    }
+    // A read-only child may still share a parent that is a real worktree.
+    expect(
+      childMayShareParentWorkspace({
+        parentWorkspaceMode: "isolated_workspace",
+        parentStrategyType: "git_worktree",
+        childWorkMode: "ask",
+        requireIsolation: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps existing inheritance for parents that are not git worktrees", () => {
+    for (const mode of ["shared_workspace", "operator_branch", "adapter_managed", "cloud_sandbox", null]) {
+      expect(childMayShareParentWorkspace({ parentWorkspaceMode: mode, childWorkMode: "standard" })).toBe(true);
+    }
   });
 });

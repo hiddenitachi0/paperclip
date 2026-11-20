@@ -408,6 +408,29 @@ describe.sequential("workspace runtime service route authorization", () => {
     expect(mockProjectService.create).not.toHaveBeenCalled();
   });
 
+  it("keeps requireIsolation when an agent replaces the project policy without the key, or sends null (DUR-5184)", async () => {
+    const agent = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    };
+    for (const sent of [{ enabled: true }, { enabled: true, defaultMode: "shared_workspace" }, null]) {
+      mockProjectService.update.mockClear();
+      mockProjectService.getById.mockResolvedValue({
+        ...buildProject(),
+        executionWorkspacePolicy: { enabled: true, requireIsolation: true },
+      });
+      mockProjectService.update.mockResolvedValue(buildProject());
+      const app = await createProjectApp(agent);
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+      expect(res.status).toBe(200);
+      const written = mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy;
+      expect(written.requireIsolation).toBe(true);
+    }
+  }, 15000);
+
   it("rejects agent callers that update project workspace cleanup commands", async () => {
     mockProjectService.getById.mockResolvedValue(buildProject());
     const app = await createProjectApp({

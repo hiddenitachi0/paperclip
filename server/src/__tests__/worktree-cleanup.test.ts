@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  deleteMergedLocalBranch,
   evaluateWorktreeForRemoval,
   runWorktreeCleanup,
   type WorktreeCleanupCandidate,
@@ -161,8 +162,26 @@ describe("worktree cleanup (DUR-4497)", () => {
       expect(fs.existsSync(clean)).toBe(false);
       expect(fs.existsSync(dirty)).toBe(true);
       expect(fs.existsSync(ahead)).toBe(true);
-      // The branch itself is never deleted.
-      expect(sh(repo, "branch", "--list", "clean")).toContain("clean");
+      // DUR-5184: the removed worktree's branch (fully merged: it is at origin/main) is
+      // deleted with `git branch -d`; the kept ones keep theirs.
+      expect(result.branchesDeleted).toBe(1);
+      expect(sh(repo, "branch", "--list", "clean")).toBe("");
+      expect(sh(repo, "branch", "--list", "dirty2")).toContain("dirty2");
+      expect(sh(repo, "branch", "--list", "ahead")).toContain("ahead");
+    });
+
+    it("removes the worktree of an unmerged branch but keeps the branch (git branch -d refuses)", async () => {
+      const wt = addWorktree("unmerged-pushed");
+      fs.writeFileSync(path.join(wt, "feature.txt"), "f\n");
+      sh(wt, "add", ".");
+      sh(wt, "commit", "-q", "-m", "feature");
+      sh(wt, "push", "-q", "origin", "unmerged-pushed");
+      const { deps, cleaned } = setup([cand("9", wt, "unmerged-pushed")]);
+      const result = await runWorktreeCleanup(deps);
+      expect(result).toMatchObject({ removed: 1, branchesDeleted: 0 });
+      expect(cleaned).toEqual(["9"]);
+      expect(fs.existsSync(wt)).toBe(false);
+      expect(sh(repo, "branch", "--list", "unmerged-pushed")).toContain("unmerged-pushed");
     });
 
     it("never touches a worktree that listCandidates did not return (open task)", async () => {
@@ -173,6 +192,129 @@ describe("worktree cleanup (DUR-4497)", () => {
       expect(flagged).toEqual([]);
       expect(cleaned).toEqual([]);
       expect(fs.existsSync(open)).toBe(true);
+    });
+
+    describe("after a PR merges", () => {
+      function mergeIntoMain(branch: string) {
+        // What GitHub's "Create a merge commit" does, done through a scratch clone of origin.
+        const scratch = path.join(root, `scratch-${branch}`);
+        sh(root, "clone", "-q", origin, scratch);
+        sh(scratch, "merge", "-q", "--no-ff", "-m", `Merge ${branch}`, `origin/${branch}`);
+        sh(scratch, "push", "-q", "origin", "HEAD:main");
+      }
+      const mergedCand = (id: string, cwd: string, branch: string): WorktreeCleanupCandidate => ({
+        ...cand(id, cwd, branch),
+        mode: "merged_pr",
+      });
+
+      it("removes the worktree and deletes the merged branch", async () => {
+        const wt = addWorktree("pr-merged");
+        fs.writeFileSync(path.join(wt, "feature.txt"), "f\n");
+        sh(wt, "add", ".");
+        sh(wt, "commit", "-q", "-m", "feature");
+        sh(wt, "push", "-q", "origin", "pr-merged");
+        mergeIntoMain("pr-merged");
+        // The main checkout follows main, as it does in production, so `branch -d` sees the merge.
+        sh(repo, "pull", "-q", "--ff-only", "origin", "main");
+
+        const { deps, cleaned, flagged } = setup([mergedCand("1", wt, "pr-merged")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 1, kept: 0, branchesDeleted: 1 });
+        expect(cleaned).toEqual(["1"]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(wt)).toBe(false);
+        expect(sh(repo, "branch", "--list", "pr-merged")).toBe("");
+      });
+
+      it("keeps an unmerged branch's worktree and does not flag it", async () => {
+        const wt = addWorktree("pr-open");
+        fs.writeFileSync(path.join(wt, "feature.txt"), "f\n");
+        sh(wt, "add", ".");
+        sh(wt, "commit", "-q", "-m", "feature");
+        sh(wt, "push", "-q", "origin", "pr-open");
+        const { deps, cleaned, flagged } = setup([mergedCand("2", wt, "pr-open")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 0, kept: 1 });
+        expect(cleaned).toEqual([]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(wt)).toBe(true);
+        expect(sh(repo, "branch", "--list", "pr-open")).toContain("pr-open");
+      });
+
+      it("keeps the worktree of a branch with no commits of its own (a no-code task is not 'merged')", async () => {
+        const wt = addWorktree("pr-no-commits");
+        const { deps, cleaned, flagged } = setup([mergedCand("4", wt, "pr-no-commits")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 0, kept: 1 });
+        expect(cleaned).toEqual([]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(wt)).toBe(true);
+      });
+
+      it("removes an unused run-<id> folder at the idle-run pass but keeps one with a commit of its own", async () => {
+        const unused = addWorktree("run-unused01");
+        const used = addWorktree("run-used0002");
+        fs.writeFileSync(path.join(used, "feature.txt"), "f\n");
+        sh(used, "add", ".");
+        sh(used, "commit", "-q", "-m", "work");
+        sh(used, "push", "-q", "origin", "run-used0002");
+        const idleCand = (id: string, cwd: string, branch: string): WorktreeCleanupCandidate => ({
+          ...cand(id, cwd, branch),
+          flagIssueId: null,
+          flagIssueIdentifier: null,
+          mode: "idle_run",
+        });
+        const { deps, cleaned, flagged } = setup([idleCand("5", unused, "run-unused01"), idleCand("6", used, "run-used0002")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 1, kept: 1 });
+        expect(cleaned).toEqual(["5"]);
+        expect(flagged).toEqual([]);
+        expect(fs.existsSync(unused)).toBe(false);
+        expect(sh(repo, "branch", "--list", "run-unused01")).toBe("");
+        expect(fs.existsSync(used)).toBe(true);
+        expect(sh(repo, "branch", "--list", "run-used0002")).toContain("run-used0002");
+      });
+
+      it("keeps a merged branch that still has uncommitted work", async () => {
+        const wt = addWorktree("pr-merged-dirty");
+        fs.writeFileSync(path.join(wt, "feature.txt"), "f\n");
+        sh(wt, "add", ".");
+        sh(wt, "commit", "-q", "-m", "feature");
+        sh(wt, "push", "-q", "origin", "pr-merged-dirty");
+        mergeIntoMain("pr-merged-dirty");
+        fs.writeFileSync(path.join(wt, "later.txt"), "after the merge\n");
+        const { deps, cleaned } = setup([mergedCand("3", wt, "pr-merged-dirty")]);
+        const result = await runWorktreeCleanup(deps);
+        expect(result).toMatchObject({ removed: 0, kept: 1 });
+        expect(cleaned).toEqual([]);
+        expect(fs.existsSync(path.join(wt, "later.txt"))).toBe(true);
+      });
+    });
+  });
+
+  describe("deleteMergedLocalBranch (git branch -d, never -D)", () => {
+    it("refuses an unmerged branch and keeps it", async () => {
+      sh(repo, "checkout", "-q", "-b", "wip");
+      fs.writeFileSync(path.join(repo, "w.txt"), "w\n");
+      sh(repo, "add", ".");
+      sh(repo, "commit", "-q", "-m", "wip");
+      sh(repo, "checkout", "-q", "main");
+      const result = await deleteMergedLocalBranch(repo, "wip");
+      expect(result.deleted).toBe(false);
+      expect(sh(repo, "branch", "--list", "wip")).toContain("wip");
+    });
+
+    it("deletes a fully merged branch", async () => {
+      sh(repo, "branch", "merged-already", "main");
+      expect(await deleteMergedLocalBranch(repo, "merged-already")).toEqual({ deleted: true });
+      expect(sh(repo, "branch", "--list", "merged-already")).toBe("");
+    });
+
+    it("never deletes the checked-out branch and rejects option-like names", async () => {
+      expect((await deleteMergedLocalBranch(repo, "main")).deleted).toBe(false);
+      expect((await deleteMergedLocalBranch(repo, "-D")).deleted).toBe(false);
+      expect((await deleteMergedLocalBranch(repo, null)).deleted).toBe(false);
+      expect(sh(repo, "branch", "--list", "main")).toContain("main");
     });
   });
 });
