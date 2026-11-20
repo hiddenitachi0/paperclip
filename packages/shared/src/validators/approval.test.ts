@@ -3,6 +3,8 @@ import {
   DEPLOY_CHANGED_FILES_STAMP_LIMIT,
   DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
   addApprovalCommentSchema,
+  addDeployItemsSchema,
+  deployCardItemSchema,
   deployRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
   requestApprovalRevisionSchema,
@@ -197,5 +199,58 @@ describe("approval validators", () => {
       expect(() => featureLaunchRequestPayloadSchema.parse(missing)).toThrow();
       expect(() => featureLaunchRequestPayloadSchema.parse({ ...payload, [field]: "  " })).toThrow();
     }
+  });
+});
+
+describe("deploy card items (one deploy card per day)", () => {
+  const basePayload = {
+    kind: "deploy" as const,
+    projectId: "11111111-1111-4111-8111-111111111111",
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    title: "Deploy",
+    note: "Ship it",
+  };
+
+  it("accepts a deploy card that lists items, and one that lists none", () => {
+    const items = [
+      { summary: "Fixes the sign-in error", issueId: "NOR-1", branch: "fix/login", commit: "abc1234" },
+      { summary: "Adds the weekly report email" },
+    ];
+    expect(deployRequestPayloadSchema.parse({ ...basePayload, items }).items).toEqual(items);
+    expect(deployRequestPayloadSchema.parse(basePayload).items).toBeUndefined();
+  });
+
+  it("allows at most 50 items on a card", () => {
+    const make = (count: number) => Array.from({ length: count }, (_, i) => ({ summary: `Item ${i}` }));
+    expect(deployRequestPayloadSchema.parse({ ...basePayload, items: make(50) }).items).toHaveLength(50);
+    expect(() => deployRequestPayloadSchema.parse({ ...basePayload, items: make(51) })).toThrow();
+  });
+
+  it("needs a summary of 1 to 300 characters and refuses unknown item fields", () => {
+    expect(() => deployCardItemSchema.parse({ summary: "" })).toThrow();
+    expect(() => deployCardItemSchema.parse({ summary: "   " })).toThrow();
+    expect(() => deployCardItemSchema.parse({})).toThrow();
+    expect(deployCardItemSchema.parse({ summary: "x".repeat(300) }).summary).toHaveLength(300);
+    expect(() => deployCardItemSchema.parse({ summary: "x".repeat(301) })).toThrow();
+    expect(() => deployCardItemSchema.parse({ summary: "ok", extra: true })).toThrow();
+  });
+
+  it("validates the body for adding items to an open card", () => {
+    const parsed = addDeployItemsSchema.parse({ commit: "a".repeat(40), items: [{ summary: "Fixes it" }] });
+    expect(parsed.issueIds).toEqual([]);
+    expect(() => addDeployItemsSchema.parse({ commit: "a".repeat(40), items: [] })).toThrow();
+    expect(() => addDeployItemsSchema.parse({ items: [{ summary: "Fixes it" }] })).toThrow();
+    expect(() =>
+      addDeployItemsSchema.parse({ commit: "a".repeat(40), items: [{ summary: "x" }], issueIds: ["NOR-1"] }),
+    ).toThrow();
+  });
+
+  it("takes a card revision on the payload and on approve, and only a whole number from 1", () => {
+    expect(deployRequestPayloadSchema.parse({ ...basePayload, cardRevision: 2 }).cardRevision).toBe(2);
+    expect(() => deployRequestPayloadSchema.parse({ ...basePayload, cardRevision: 0 })).toThrow();
+    expect(resolveApprovalSchema.parse({ expectedCardRevision: 3 }).expectedCardRevision).toBe(3);
+    expect(resolveApprovalSchema.parse({}).expectedCardRevision).toBeUndefined();
+    expect(() => resolveApprovalSchema.parse({ expectedCardRevision: 1.5 })).toThrow();
+    expect(() => resolveApprovalSchema.parse({ expectedCardRevision: 0 })).toThrow();
   });
 });

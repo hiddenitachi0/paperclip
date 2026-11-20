@@ -86,6 +86,7 @@ import {
   resolveApprovalSchema,
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
+  addDeployItemsSchema,
   withdrawApprovalSchema,
   modelBoostBossReviewDecisionSchema,
   addApprovalCommentSchema,
@@ -2861,6 +2862,18 @@ registry.registerPath({
     body: jsonBody(resubmitApprovalSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/deploy-items",
+  tags: ["approvals"],
+  summary: "Add finished items (and the new combined commit) to a deploy card that is still waiting. Only the agent that filed the card, or the board, may do this, and never on a card a person filed. Raises payload.cardRevision.",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(addDeployItemsSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
