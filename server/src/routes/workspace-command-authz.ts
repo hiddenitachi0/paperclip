@@ -61,10 +61,21 @@ export function collectAgentAdapterWorkspaceCommandPaths(
 
 export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): string[] {
   if (!isRecord(policy)) return [];
-  return collectWorkspaceStrategyCommandPaths(
+  const paths = collectWorkspaceStrategyCommandPaths(
     policy.workspaceStrategy,
     "executionWorkspacePolicy.workspaceStrategy",
   );
+  // workspaceRuntime.services[].command runs on the host with the running
+  // agent's environment, so it is board-only like the commands above.
+  if (hasOwn(policy, "workspaceRuntime")) {
+    paths.push("executionWorkspacePolicy.workspaceRuntime");
+  }
+  // requireIsolation is the operator's safety setting: an agent must not be
+  // able to switch it off and put the project's runs back on the shared checkout.
+  if (hasOwn(policy, "requireIsolation")) {
+    paths.push("executionWorkspacePolicy.requireIsolation");
+  }
+  return paths;
 }
 
 /**

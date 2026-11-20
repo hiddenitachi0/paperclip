@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { companies, createDb, executionWorkspaces, issues, projects } from "@paperclipai/db";
+import { agents, companies, createDb, executionWorkspaces, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -25,6 +25,8 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
 
   afterEach(async () => {
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
     await db.delete(executionWorkspaces);
     await db.delete(projects);
     await db.delete(companies);
@@ -145,5 +147,48 @@ describeEmbeddedPostgres("worktree cleanup candidate selection", () => {
     expect(found[0]!.flagIssueId).toBeNull();
     // Keeping it must not throw for lack of an issue to comment on.
     await expect(deps.flagUnsavedWork(found[0]!, "has changes")).resolves.toBeUndefined();
+  });
+
+  it("keeps a worktree out of the merged pass while a run is live on it or on a linked issue (DUR-5228)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date("2026-10-04T12:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: "TST", requireBoardApprovalForNewAgents: false });
+    await db.insert(projects).values({ id: projectId, companyId, name: "P", status: "in_progress" });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "A", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const cases = [
+      { key: "run-on-issue", runStatus: "running", via: "issue" },
+      { key: "run-on-workspace", runStatus: "queued", via: "context" },
+      { key: "run-finished", runStatus: "succeeded", via: "issue" },
+      { key: "no-run", runStatus: null, via: null },
+    ] as const;
+    for (const c of cases) {
+      const wsId = randomUUID();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: wsId, companyId, projectId, mode: "isolated_workspace", strategyType: "git_worktree",
+        name: c.key, status: "active", providerType: "local_fs",
+        cwd: `/paperclip/x/repo/.paperclip/worktrees/${c.key}`, branchName: c.key,
+        lastUsedAt: new Date(now.getTime() - 120 * 60_000),
+      });
+      if (c.runStatus) {
+        await db.insert(heartbeatRuns).values({
+          id: runId, companyId, agentId, status: c.runStatus,
+          contextSnapshot: c.via === "context" ? { executionWorkspaceId: wsId } : {},
+        });
+      }
+      await db.insert(issues).values({
+        id: issueId, companyId, title: c.key, status: "in_review", executionWorkspaceId: wsId,
+        executionRunId: c.runStatus && c.via === "issue" ? runId : null,
+      });
+    }
+    const deps = createDbWorktreeCleanupDeps(db);
+    const merged = await deps.listMergedCandidates!(now);
+    expect(merged.map((c) => c.cwd.split("/").pop()).sort()).toEqual(["no-run", "run-finished"]);
   });
 });

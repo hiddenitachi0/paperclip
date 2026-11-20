@@ -2,8 +2,8 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, like, ne, or } from "drizzle-orm";
-import { companies, executionWorkspaces, issueComments, issues, type Db } from "@paperclipai/db";
+import { and, eq, inArray, like, ne, or, sql } from "drizzle-orm";
+import { companies, executionWorkspaces, heartbeatRuns, issueComments, issues, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { issueService } from "./issues.js";
@@ -423,6 +423,51 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
       );
   }
 
+  /**
+   * DUR-5228: true when a queued or running heartbeat run is using this
+   * workspace, either directly (its context names the workspace) or through a
+   * linked issue it holds the checkout / execution lock on. `lastUsedAt` is only
+   * stamped when a run starts, so it cannot prove a long run is finished.
+   */
+  async function hasLiveRun(
+    ws: { id: string; companyId: string },
+    linked: Array<{ id: string }>,
+  ): Promise<boolean> {
+    const live = ["queued", "running"];
+    const direct = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, ws.companyId),
+          inArray(heartbeatRuns.status, live),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'executionWorkspaceId' = ${ws.id}`,
+        ),
+      )
+      .limit(1);
+    if (direct.length > 0) return true;
+    if (linked.length === 0) return false;
+    const viaIssue = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .innerJoin(
+        issues,
+        or(eq(issues.executionRunId, heartbeatRuns.id), eq(issues.checkoutRunId, heartbeatRuns.id)),
+      )
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, ws.companyId),
+          inArray(heartbeatRuns.status, live),
+          inArray(
+            issues.id,
+            linked.map((i) => i.id),
+          ),
+        ),
+      )
+      .limit(1);
+    return viaIssue.length > 0;
+  }
+
   async function listFinishedCandidates(now: Date, defaultRetentionDays: number): Promise<WorktreeCleanupCandidate[]> {
     const workspaces = await loadWorkspaceRows();
     const out: WorktreeCleanupCandidate[] = [];
@@ -494,6 +539,9 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
       const linked = await loadLinkedIssues(ws);
       if (linked.length === 0) continue;
       if (linked.some((i) => !MERGED_PASS_SAFE_STATUSES.has(i.status))) continue;
+      // A long run can outlive the idle window and park its issue in in_review
+      // mid-run; never remove a folder a live run is still using.
+      if (await hasLiveRun(ws, linked)) continue;
       const flagIssue = linked.find((i) => i.id === ws.sourceIssueId) ?? linked[0]!;
       out.push({
         executionWorkspaceId: ws.id,

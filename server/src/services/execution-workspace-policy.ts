@@ -89,7 +89,20 @@ export function gateProjectExecutionWorkspacePolicy(
   // DUR-5184: requireIsolation is an operator's safety setting, not an
   // experiment, so it survives the experimental flag being off.
   if (!isolatedWorkspacesEnabled) {
-    return projectPolicy?.requireIsolation ? projectPolicy : null;
+    if (!projectPolicy?.requireIsolation) return null;
+    // Only what isolation needs. The rest of the policy (workspaceRuntime
+    // service commands, branch/PR/runtime/cleanup/authorization policy) stays
+    // behind the experimental flag, so switching requireIsolation on cannot
+    // also switch on host-run commands (DUR-5228 finding 1).
+    return {
+      enabled: projectPolicy.enabled,
+      ...(projectPolicy.defaultMode ? { defaultMode: projectPolicy.defaultMode } : {}),
+      requireIsolation: true,
+      ...(projectPolicy.defaultProjectWorkspaceId
+        ? { defaultProjectWorkspaceId: projectPolicy.defaultProjectWorkspaceId }
+        : {}),
+      ...(projectPolicy.workspaceStrategy ? { workspaceStrategy: projectPolicy.workspaceStrategy } : {}),
+    };
   }
   return projectPolicy;
 }

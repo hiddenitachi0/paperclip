@@ -300,6 +300,23 @@ describe("execution workspace policy helpers", () => {
       expect(gateProjectExecutionWorkspacePolicy({ enabled: true, defaultMode: "isolated_workspace" }, false)).toBeNull();
     });
 
+    it("with the flag off returns only what isolation needs, never workspaceRuntime or other policy (DUR-5228)", () => {
+      const gated = gateProjectExecutionWorkspacePolicy(
+        {
+          ...required,
+          workspaceStrategy: { type: "git_worktree", baseRef: "custom" },
+          workspaceRuntime: { services: [{ name: "x", command: "PROBE_HOST_COMMAND" }] },
+          branchPolicy: { a: 1 },
+          runtimePolicy: { b: 2 },
+          cleanupPolicy: { c: 3 },
+          authorizationPolicy: { d: 4 },
+        } as never,
+        false,
+      );
+      expect(gated).toEqual({ ...required, workspaceStrategy: { type: "git_worktree", baseRef: "custom" } });
+      expect(gated).not.toHaveProperty("workspaceRuntime");
+    });
+
     it("forces isolated_workspace over the project default, the issue setting and the legacy opt-out", () => {
       expect(
         resolveExecutionWorkspaceMode({ projectPolicy: required, issueSettings: null, legacyUseProjectWorkspace: null }),
