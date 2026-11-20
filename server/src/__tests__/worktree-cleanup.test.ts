@@ -7,6 +7,7 @@ import {
   deleteMergedLocalBranch,
   evaluateWorktreeForRemoval,
   runWorktreeCleanup,
+  worktreeCleanupDryRunFromEnv,
   type WorktreeCleanupCandidate,
   type WorktreeCleanupDeps,
 } from "../services/worktree-cleanup.js";
@@ -192,6 +193,145 @@ describe("worktree cleanup (DUR-4497)", () => {
       expect(flagged).toEqual([]);
       expect(cleaned).toEqual([]);
       expect(fs.existsSync(open)).toBe(true);
+    });
+
+    it("DUR-5236: a worktree folder that is already gone is kept silently, not flagged as unsaved work", async () => {
+      const gone = path.join(repo, ".paperclip", "worktrees", "never-existed");
+      const { deps, flagged, cleaned } = setup([cand("1", gone, "never-existed")]);
+      const result = await runWorktreeCleanup(deps);
+      expect(result).toMatchObject({ considered: 1, removed: 0, kept: 1, missing: 1 });
+      expect(flagged).toEqual([]);
+      expect(cleaned).toEqual([]);
+    });
+
+    it("DUR-5236: dry run reports what it would remove and touches nothing", async () => {
+      const clean = addWorktree("dry-clean");
+      const dirty = addWorktree("dry-dirty");
+      fs.writeFileSync(path.join(dirty, "scratch.txt"), "x\n");
+      const { deps, flagged, cleaned } = setup([cand("1", clean, "dry-clean"), cand("2", dirty, "dry-dirty")]);
+      const result = await runWorktreeCleanup(deps, { dryRun: true });
+      expect(result).toMatchObject({ considered: 2, removed: 0, kept: 1, wouldRemove: 1, dryRun: true, capped: false });
+      expect(cleaned).toEqual([]);
+      expect(flagged).toEqual([]); // no comments posted in a dry run
+      expect(fs.existsSync(clean)).toBe(true);
+      expect(sh(repo, "branch", "--list", "dry-clean")).toContain("dry-clean");
+    });
+
+    it("DUR-5236: removal is opt-in -- only LIVE=true goes live, DRY_RUN=true wins, anything else previews", () => {
+      expect(worktreeCleanupDryRunFromEnv({})).toBe(true);
+      expect(worktreeCleanupDryRunFromEnv({ PAPERCLIP_WORKTREE_CLEANUP_LIVE: "1" })).toBe(true);
+      expect(worktreeCleanupDryRunFromEnv({ PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN: "false" })).toBe(true);
+      expect(worktreeCleanupDryRunFromEnv({ PAPERCLIP_WORKTREE_CLEANUP_LIVE: "true" })).toBe(false);
+      expect(
+        worktreeCleanupDryRunFromEnv({ PAPERCLIP_WORKTREE_CLEANUP_LIVE: "true", PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN: "true" }),
+      ).toBe(true);
+    });
+
+    it("DUR-5236: the preview lists each folder with path, branch, task and reason, and removes nothing", async () => {
+      const clean = addWorktree("plan-clean");
+      const dirty = addWorktree("plan-dirty");
+      fs.writeFileSync(path.join(dirty, "x.txt"), "x\n");
+      const { deps } = setup([
+        { ...cand("1", clean, "plan-clean"), mode: "finished_task" },
+        cand("2", dirty, "plan-dirty"),
+      ]);
+      const result = await runWorktreeCleanup(deps, { dryRun: true });
+      expect(result.plan).toEqual([
+        {
+          executionWorkspaceId: "1",
+          cwd: clean,
+          branchName: "plan-clean",
+          issue: "DUR-1",
+          mode: "finished_task",
+          reason: expect.stringContaining("clean"),
+        },
+      ]);
+      expect(result.wouldFlag).toBe(1);
+      expect(fs.existsSync(clean)).toBe(true);
+    });
+
+    it("DUR-5236: never removes a folder another run or task is using, in either mode", async () => {
+      const busy = addWorktree("busy");
+      const free = addWorktree("free");
+      const { deps, cleaned } = setup([cand("1", busy, "busy"), cand("2", free, "free")]);
+      deps.isInUse = async (c) => c.executionWorkspaceId === "1";
+      const dry = await runWorktreeCleanup(deps, { dryRun: true });
+      expect(dry).toMatchObject({ wouldRemove: 1, inUse: 1 });
+      expect(dry.plan.map((p) => p.executionWorkspaceId)).toEqual(["2"]);
+      const live = await runWorktreeCleanup(deps);
+      expect(live).toMatchObject({ removed: 1, inUse: 1, kept: 1 });
+      expect(cleaned).toEqual(["2"]);
+      expect(fs.existsSync(busy)).toBe(true);
+      expect(fs.existsSync(free)).toBe(false);
+    });
+
+    it("DUR-5236: a failing in-use check keeps the folder (fail closed)", async () => {
+      const wt = addWorktree("check-fails");
+      const { deps } = setup([cand("1", wt, "check-fails")]);
+      deps.isInUse = async () => {
+        throw new Error("db down");
+      };
+      expect(await runWorktreeCleanup(deps)).toMatchObject({ removed: 0, inUse: 1 });
+      expect(fs.existsSync(wt)).toBe(true);
+    });
+
+    it("DUR-5236: evaluates a folder once even when two candidates share it", async () => {
+      const wt = addWorktree("shared-folder");
+      const { deps, cleaned } = setup([cand("1", wt, "shared-folder"), cand("2", wt, "shared-folder")]);
+      const result = await runWorktreeCleanup(deps);
+      expect(result).toMatchObject({ removed: 1, kept: 1, failed: 0 });
+      expect(cleaned).toEqual(["1"]);
+    });
+
+    it("DUR-5236: posts at most maxFlags 'unsaved work' comments per sweep; already-flagged ones do not count", async () => {
+      const dirty = ["a", "b", "c", "d"].map((n) => {
+        const wt = addWorktree(`flood-${n}`);
+        fs.writeFileSync(path.join(wt, "x.txt"), "x\n");
+        return wt;
+      });
+      const { deps, flagged } = setup(dirty.map((wt, i) => cand(String(i), wt, path.basename(wt))));
+      const first = await runWorktreeCleanup(deps, { maxFlags: 2 });
+      expect(first).toMatchObject({ kept: 4, flagged: 2, flagSuppressed: 2 });
+      expect(flagged.map((f) => f.id)).toEqual(["0", "1"]);
+
+      // The first folder was flagged on an earlier day (flag returns false): it must not use up the cap.
+      const calls: string[] = [];
+      const second = setup(dirty.map((wt, i) => cand(String(i), wt, path.basename(wt))));
+      second.deps.flagUnsavedWork = async (c) => {
+        calls.push(c.executionWorkspaceId);
+        return c.executionWorkspaceId !== "0";
+      };
+      const result = await runWorktreeCleanup(second.deps, { maxFlags: 2 });
+      expect(result).toMatchObject({ flagged: 2, flagSuppressed: 1 });
+      expect(calls).toEqual(["0", "1", "2"]);
+    });
+
+    it("DUR-5236: stops at the daily cap, counting what earlier sweeps already removed", async () => {
+      const wts = ["day-a", "day-b", "day-c"].map((n) => addWorktree(n));
+      const { deps, cleaned } = setup(wts.map((wt, i) => cand(String(i), wt, path.basename(wt))));
+      let removedToday = 48;
+      deps.removedSince = async () => removedToday;
+      const first = await runWorktreeCleanup(deps, { maxRemovalsPerDay: 50 });
+      expect(first).toMatchObject({ removed: 2, capped: true, dailyCapped: true });
+      expect(cleaned).toEqual(["0", "1"]);
+      removedToday = 50;
+      const second = await runWorktreeCleanup(setup([cand("2", wts[2]!, "day-c")]).deps, { maxRemovalsPerDay: 50 });
+      expect(second.removed).toBe(1); // no removedSince dep => no daily cap, so the per-sweep cap rules
+      const third = setup([cand("2", wts[2]!, "day-c")]);
+      third.deps.removedSince = async () => removedToday;
+      expect(await runWorktreeCleanup(third.deps, { maxRemovalsPerDay: 50 })).toMatchObject({ removed: 0, dailyCapped: true, capped: true });
+    });
+
+    it("DUR-5236: stops after maxRemovals and leaves the rest for the next sweep", async () => {
+      const wts = ["cap-a", "cap-b", "cap-c"].map((n) => addWorktree(n));
+      const { deps, cleaned } = setup(wts.map((wt, i) => cand(String(i), wt, path.basename(wt))));
+      const first = await runWorktreeCleanup(deps, { maxRemovals: 2 });
+      expect(first).toMatchObject({ considered: 3, removed: 2, capped: true });
+      expect(cleaned).toEqual(["0", "1"]);
+      expect(fs.existsSync(wts[2]!)).toBe(true);
+      const second = await runWorktreeCleanup(setup([cand("2", wts[2]!, "cap-c")]).deps, { maxRemovals: 2 });
+      expect(second).toMatchObject({ removed: 1, capped: false });
+      expect(fs.existsSync(wts[2]!)).toBe(false);
     });
 
     describe("after a PR merges", () => {
