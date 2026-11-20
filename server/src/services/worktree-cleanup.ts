@@ -82,7 +82,7 @@ const MERGED_PASS_SAFE_STATUSES = new Set(["done", "cancelled"]);
 
 export type WorktreeVerdict =
   | { action: "remove"; repoRoot: string; worktreePath: string }
-  | { action: "keep"; reason: string };
+  | { action: "keep"; reason: string; /** DUR-5236: the folder is already gone, so there is no work to lose and nothing to flag. */ missing?: boolean };
 
 async function git(args: string[], cwd: string, timeoutMs = GIT_TIMEOUT_MS): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
@@ -210,6 +210,11 @@ export async function evaluateWorktreeForRemoval(
   options: EvaluateWorktreeOptions = {},
 ): Promise<WorktreeVerdict> {
   try {
+    // DUR-5236: several rows can point at one folder, and folders get deleted by hand. A
+    // folder that does not exist holds no work: keep the row, but do not call it "unsaved work".
+    if (cwd && path.isAbsolute(cwd) && (await fs.lstat(cwd).then(() => false, (e: NodeJS.ErrnoException) => e.code === "ENOENT"))) {
+      return { action: "keep", reason: "the worktree folder no longer exists", missing: true };
+    }
     const { repoRoot, worktreePath } = await resolveManagedWorktree(cwd);
 
     const status = await git(["status", "--porcelain=v1", "--untracked-files=all"], worktreePath);
@@ -369,6 +374,8 @@ export interface WorktreeCleanupResult {
   failed: number;
   /** DUR-5184: local branches deleted with `git branch -d` after their worktree was removed. */
   branchesDeleted: number;
+  /** DUR-5236: kept because the folder no longer exists (no flag comment is posted for these). */
+  missing: number;
   /** DUR-5236: dry run only -- worktrees that passed every safety check and would have been removed. */
   wouldRemove: number;
   /** DUR-5236: true when the per-sweep removal cap stopped the sweep early. */
@@ -401,6 +408,7 @@ export async function runWorktreeCleanup(
     kept: 0,
     failed: 0,
     branchesDeleted: 0,
+    missing: 0,
     wouldRemove: 0,
     capped: false,
     dryRun,
@@ -420,7 +428,8 @@ export async function runWorktreeCleanup(
       });
       if (verdict.action === "keep") {
         result.kept += 1;
-        if (!mergedPass && !dryRun) await deps.flagUnsavedWork(candidate, verdict.reason);
+        if (verdict.missing) result.missing += 1;
+        else if (!mergedPass && !dryRun) await deps.flagUnsavedWork(candidate, verdict.reason);
         continue;
       }
       if (dryRun) {

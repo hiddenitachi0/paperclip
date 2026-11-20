@@ -194,6 +194,15 @@ describe("worktree cleanup (DUR-4497)", () => {
       expect(fs.existsSync(open)).toBe(true);
     });
 
+    it("DUR-5236: a worktree folder that is already gone is kept silently, not flagged as unsaved work", async () => {
+      const gone = path.join(repo, ".paperclip", "worktrees", "never-existed");
+      const { deps, flagged, cleaned } = setup([cand("1", gone, "never-existed")]);
+      const result = await runWorktreeCleanup(deps);
+      expect(result).toMatchObject({ considered: 1, removed: 0, kept: 1, missing: 1 });
+      expect(flagged).toEqual([]);
+      expect(cleaned).toEqual([]);
+    });
+
     it("DUR-5236: dry run reports what it would remove and touches nothing", async () => {
       const clean = addWorktree("dry-clean");
       const dirty = addWorktree("dry-dirty");
