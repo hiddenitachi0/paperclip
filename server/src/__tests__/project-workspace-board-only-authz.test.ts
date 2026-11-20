@@ -218,7 +218,7 @@ describe.sequential("project workspace code-location is board-only", () => {
       const app = await createApp(agentActor);
       const res = await request(app).patch(`/api/projects/${projectId}`).send(body);
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain("requireIsolation");
+      expect(res.body.error).toContain("workspaceRuntime");
       expect(mockProjectService.update).not.toHaveBeenCalled();
     }, 15000);
 

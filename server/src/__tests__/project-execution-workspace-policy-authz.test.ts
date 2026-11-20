@@ -44,7 +44,6 @@ describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
   };
   const all = [
     "executionWorkspacePolicy.workspaceRuntime",
-    "executionWorkspacePolicy.requireIsolation",
     "executionWorkspacePolicy.workspaceStrategy.provisionCommand",
     "executionWorkspacePolicy.workspaceStrategy.teardownCommand",
   ];
@@ -59,8 +58,8 @@ describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
 
   it("flags only the field that changed", () => {
     expect(
-      collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, requireIsolation: false }, stored),
-    ).toEqual(["executionWorkspacePolicy.requireIsolation"]);
+      collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, workspaceRuntime: { services: [] } }, stored),
+    ).toEqual(["executionWorkspacePolicy.workspaceRuntime"]);
   });
 
   it("allows a write that keeps the protected fields, and a project with none stored", () => {
