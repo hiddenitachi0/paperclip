@@ -511,7 +511,7 @@ describeEmbeddedPostgres("waiting only on a board approval (embedded postgres)",
       expect(wakeups[0]?.opts.reason).toBe("issue_continuation_needed");
     });
 
-    it("leaves a task with other open work exactly as it was", async () => {
+    it("still sends no continuation wake when other open work exists but the card is pending (DUR-5207)", async () => {
       const fixture = await seed();
       await addComment(fixture, {
         body: "Please also update the release note before the deploy.",
@@ -523,12 +523,15 @@ describeEmbeddedPostgres("waiting only on a board approval (embedded postgres)",
 
       const result = await recovery.reconcileStrandedAssignedIssues();
 
+      // The person's own comment wakes the agent through the normal comment
+      // path; the pending card means a continuation wake adds nothing.
       expect(result.waitingOnBoardApproval).toBe(0);
-      expect(result.continuationRequeued).toBe(1);
-      expect(wakeups).toHaveLength(1);
+      expect(result.continuationHeldForCard).toBe(1);
+      expect(result.continuationRequeued).toBe(0);
+      expect(wakeups).toHaveLength(0);
     });
 
-    it("fails open: when the check breaks, the sweep behaves exactly as before", async () => {
+    it("fails open: when the check breaks, the pending-card hold still applies (DUR-5207)", async () => {
       await seed();
       boardApprovalWaitControl.forceCheckFailure = true;
       const { recovery, wakeups } = sweepService();
@@ -536,8 +539,9 @@ describeEmbeddedPostgres("waiting only on a board approval (embedded postgres)",
       const result = await recovery.reconcileStrandedAssignedIssues();
 
       expect(result.waitingOnBoardApproval).toBe(0);
-      expect(result.continuationRequeued).toBe(1);
-      expect(wakeups).toHaveLength(1);
+      expect(result.continuationHeldForCard).toBe(1);
+      expect(result.continuationRequeued).toBe(0);
+      expect(wakeups).toHaveLength(0);
     });
   });
 

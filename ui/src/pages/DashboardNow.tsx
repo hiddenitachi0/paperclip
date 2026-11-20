@@ -13,6 +13,7 @@ import {
 import { Link } from "@/lib/router";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
+import { approvalCardRevision } from "../lib/approval-card-revision";
 import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
 import { issuesApi } from "../api/issues";
 import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
@@ -913,7 +914,7 @@ function ApprovalRow({
   const showNoTicketFlag = linkedIssues !== undefined && issueRefs.length === 0;
 
   const approveMutation = useMutation({
-    mutationFn: () => approvalsApi.approve(approval.id),
+    mutationFn: () => approvalsApi.approve(approval.id, undefined, undefined, approvalCardRevision(approval)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
     },

@@ -5,6 +5,7 @@ import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type InfiniteD
 import { ApiError } from "../api/client";
 import { issuesApi } from "../api/issues";
 import { approvalsApi } from "../api/approvals";
+import { approvalCardRevision } from "../lib/approval-card-revision";
 import { activityApi, type RunForIssue } from "../api/activity";
 import { heartbeatsApi, type ActiveRunForIssue, type LiveRunForIssue } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -1064,7 +1065,7 @@ type IssueDetailActivityTabProps = {
   currentUserId: string | null;
   userProfileMap: Map<string, import("../lib/company-members").CompanyUserProfile>;
   pendingApprovalAction: { approvalId: string; action: "approve" | "reject" } | null;
-  onApprovalAction: (approvalId: string, action: "approve" | "reject", note?: string) => void;
+  onApprovalAction: (approvalId: string, action: "approve" | "reject", note?: string, revision?: number) => void;
   onCheckMonitorNow: () => void;
   checkingMonitorNow: boolean;
   handoffFocusSignal?: number;
@@ -1312,7 +1313,7 @@ function IssueDetailActivityTab({
               key={approval.id}
               approval={approval}
               requesterAgent={approval.requestedByAgentId ? agentMap.get(approval.requestedByAgentId) ?? null : null}
-              onApprove={() => onApprovalAction(approval.id, "approve")}
+              onApprove={() => onApprovalAction(approval.id, "approve", undefined, approvalCardRevision(approval))}
               onReject={(note) => onApprovalAction(approval.id, "reject", note)}
               detailLink={`/approvals/${approval.id}`}
               isPending={pendingApprovalAction?.approvalId === approval.id}
@@ -2205,9 +2206,9 @@ export function IssueDetail() {
   });
 
   const approvalDecision = useMutation({
-    mutationFn: async ({ approvalId, action, note }: { approvalId: string; action: "approve" | "reject"; note?: string }) => {
+    mutationFn: async ({ approvalId, action, note, revision }: { approvalId: string; action: "approve" | "reject"; note?: string; revision?: number }) => {
       if (action === "approve") {
-        return approvalsApi.approve(approvalId);
+        return approvalsApi.approve(approvalId, undefined, undefined, revision);
       }
       return approvalsApi.reject(approvalId, note);
     },
@@ -4417,8 +4418,8 @@ export function IssueDetail() {
               userProfileMap={userProfileMap}
               pendingApprovalAction={pendingApprovalAction}
               handoffFocusSignal={handoffFocusSignal}
-              onApprovalAction={(approvalId, action, note) => {
-                approvalDecision.mutate({ approvalId, action, note });
+              onApprovalAction={(approvalId, action, note, revision) => {
+                approvalDecision.mutate({ approvalId, action, note, revision });
               }}
               onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
               checkingMonitorNow={checkIssueMonitorNow.isPending}

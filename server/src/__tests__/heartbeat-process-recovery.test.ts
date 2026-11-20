@@ -26,6 +26,8 @@ import {
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  approvals,
+  issueApprovals,
   issueComments,
   issueDocuments,
   issuePlanDecompositions,
@@ -417,6 +419,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
     await db.delete(agentWakeupRequests);
     await db.delete(budgetPolicies);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       // A fire-and-forget run (e.g. the process-loss retry a reap dispatches)
       // can still log activity for its agent after the wipes above; clear it
@@ -5317,7 +5321,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retryRun?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("modelProfile");
   });
 
-  it("exempts stranded-recovery escalation when assignee posted a recent comment (GGU-809)", async () => {
+  it("exempts stranded-recovery escalation when the run also changed something real (GGU-809, DUR-5207)", async () => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "succeeded",
@@ -5325,13 +5329,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       runSource: "issue.productive_terminal_continuation_recovery",
       livenessState: "advanced",
     });
-    // Recent agent-authored comment should suppress the repeat-productive
-    // escalation and let the normal continuation-retry path proceed.
+    // A recent comment AND a real change (a work product here) suppress the
+    // repeat-productive escalation and let the continuation retry proceed.
     await db.insert(issueComments).values({
       companyId,
       issueId,
       authorAgentId: agentId,
       body: "frame 02/08 generated, attaching shortly",
+    });
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId,
+      type: "pull_request",
+      provider: "github",
+      title: "Frame generator PR",
+      status: "active",
     });
     const heartbeat = heartbeatService(db);
 
@@ -5357,6 +5369,217 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       issueId,
       retryReason: "issue_continuation_needed",
       source: "issue.productive_terminal_continuation_recovery",
+    });
+  });
+
+  it("does not let a comment alone earn the recent-progress exemption (DUR-5207)", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      livenessState: "advanced",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId,
+      authorAgentId: agentId,
+      body: "Still waiting.",
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.recentProgressExempted).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.escalated).toBe(1);
+  });
+
+  async function seedPendingApproval(companyId: string, issueId: string, agentId: string) {
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "request_board_approval",
+      requestedByAgentId: agentId,
+      status: "pending",
+      payload: { title: "Merge the change" },
+    });
+    await db.insert(issueApprovals).values({ companyId, issueId, approvalId });
+    return approvalId;
+  }
+
+  async function skippedWakeActivity(issueId: string) {
+    return db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, issueId), eq(activityLog.action, "issue.continuation_wake_skipped")));
+  }
+
+  it("queues no continuation wake while a linked approval waits for a person, and records why (DUR-5207)", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      livenessState: "advanced",
+    });
+    const approvalId = await seedPendingApproval(companyId, issueId, agentId);
+    // A comment from a person defeats the older "waiting only on an approval"
+    // check, which is how the continuation loop slipped through before.
+    await db.insert(issueComments).values({ companyId, issueId, authorUserId: "board-user-1", body: "Any news?" });
+    const heartbeat = heartbeatService(db);
+
+    for (let i = 0; i < 2; i += 1) {
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.continuationHeldForCard).toBe(1);
+    }
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    const skipped = await skippedWakeActivity(issueId);
+    expect(skipped).toHaveLength(1); // recorded once per card, not once per sweep
+    expect(skipped[0]?.details).toMatchObject({ reason: "waiting_on_card", cardKind: "approval", cardId: approvalId });
+
+    // Once the card is decided the sweep behaves as before.
+    await db.update(approvals).set({ status: "approved", decidedAt: new Date() }).where(eq(approvals.id, approvalId));
+    const after = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(after.continuationHeldForCard).toBe(0);
+    expect(after.continuationRequeued + after.escalated).toBe(1);
+  });
+
+  it("queues no continuation wake while a card question waits for a person (DUR-5207)", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      livenessState: "advanced",
+    });
+    await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "none",
+      payload: {},
+      createdByAgentId: agentId,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationHeldForCard).toBe(1);
+    expect(result.continuationRequeued).toBe(0);
+    const skipped = await skippedWakeActivity(issueId);
+    expect(skipped[0]?.details).toMatchObject({ reason: "waiting_on_card", cardKind: "interaction" });
+  });
+
+  describe("back-stop after 6 continuation wakes with no real change (DUR-5207)", () => {
+    const PAUSE_TEXT =
+      "Paused automatic follow-ups: nothing has changed in the last 6 runs. " +
+      "A new comment, a card decision or a status change will wake the agent again.";
+
+    // The fixture's own run is the newest of the streak; add 5 older ones.
+    async function seedStreak(fixture: { companyId: string; agentId: string; issueId: string }) {
+      for (let i = 1; i <= 5; i += 1) {
+        const at = new Date(Date.now() - i * 60 * 60 * 1000);
+        await db.insert(heartbeatRuns).values({
+          companyId: fixture.companyId,
+          agentId: fixture.agentId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: "succeeded",
+          contextSnapshot: {
+            issueId: fixture.issueId,
+            taskId: fixture.issueId,
+            retryReason: "issue_continuation_needed",
+            source: "issue.continuation_recovery",
+          },
+          startedAt: at,
+          finishedAt: at,
+          createdAt: at,
+          updatedAt: at,
+          livenessState: "needs_followup",
+        });
+      }
+    }
+
+    async function seed() {
+      const fixture = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        retryReason: "issue_continuation_needed",
+        runSource: "issue.continuation_recovery",
+        livenessState: "needs_followup",
+      });
+      await seedStreak(fixture);
+      return fixture;
+    }
+
+    async function pauseComments(issueId: string) {
+      const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      return rows.filter((row) => row.body === PAUSE_TEXT);
+    }
+
+    it("stops re-waking and says so once", async () => {
+      const fixture = await seed();
+      const heartbeat = heartbeatService(db);
+
+      for (let i = 0; i < 2; i += 1) {
+        const result = await heartbeat.reconcileStrandedAssignedIssues();
+        expect(result.continuationPausedNoChange).toBe(1);
+        expect(result.continuationRequeued).toBe(0);
+      }
+
+      const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixture.agentId));
+      expect(runs).toHaveLength(6);
+      expect(await pauseComments(fixture.issueId)).toHaveLength(1);
+    });
+
+    it("wakes again after a card decision", async () => {
+      const fixture = await seed();
+      const heartbeat = heartbeatService(db);
+      expect((await heartbeat.reconcileStrandedAssignedIssues()).continuationPausedNoChange).toBe(1);
+
+      const approvalId = await seedPendingApproval(fixture.companyId, fixture.issueId, fixture.agentId);
+      await db.update(approvals).set({ status: "approved", decidedAt: new Date() }).where(eq(approvals.id, approvalId));
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationPausedNoChange).toBe(0);
+      expect(result.continuationRequeued).toBe(1);
+    });
+
+    it("wakes again after a new comment from a person", async () => {
+      const fixture = await seed();
+      const heartbeat = heartbeatService(db);
+      expect((await heartbeat.reconcileStrandedAssignedIssues()).continuationPausedNoChange).toBe(1);
+
+      await db.insert(issueComments).values({
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        authorUserId: "board-user-1",
+        body: "Please carry on.",
+      });
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationPausedNoChange).toBe(0);
+      expect(result.continuationRequeued).toBe(1);
+    });
+
+    it("does not pause when something real changed during the streak", async () => {
+      const fixture = await seed();
+      await db.insert(issueWorkProducts).values({
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        type: "pull_request",
+        provider: "github",
+        title: "PR",
+        status: "active",
+      });
+      const heartbeat = heartbeatService(db);
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationPausedNoChange).toBe(0);
+      expect(await pauseComments(fixture.issueId)).toHaveLength(0);
     });
   });
 

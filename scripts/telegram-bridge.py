@@ -675,6 +675,28 @@ def log_company_notice_bot(company_id, cbots, roles):
           f"go to {bot.get('name')} ({why})", flush=True)
 
 
+# Cards that can only be decided on the approval card in Paperclip (DUR-5199).
+# Mirrors isApprovalCardOnlyKind in server/src/services/approvals.ts. A tap
+# here would run `approval approve` with the operator's board key, so a
+# 300-character preview could switch a strategy to rules a Trader proposed,
+# send money, or start a deploy.
+CARD_ONLY_KINDS = frozenset({
+    "operator_action", "deploy", "crypto_wallet_tx", "crypto_sweep_address",
+    "crypto_topup_request", "trading_strategy_version",
+})
+DEPLOY_LIKE_KIND = re.compile(r"deploy|release|rollout|ship", re.IGNORECASE)
+
+
+def is_card_only_approval(a):
+    if (a or {}).get("type") != "request_board_approval":
+        return False
+    kind = ((a.get("payload") or {}).get("kind"))
+    if not isinstance(kind, str):
+        return False
+    kind = kind.strip()
+    return kind in CARD_ONLY_KINDS or bool(DEPLOY_LIKE_KIND.search(kind))
+
+
 def approval_title(a):
     p = a.get("payload") or {}
     subject = p.get("title") or p.get("name") or p.get("summary")
@@ -753,6 +775,7 @@ def notify_approvals(state, bots):
             p = a.get("payload") or {}
             detail = p.get("note") or p.get("summary") or p.get("description") or ""
             is_cred = a.get("type") == "credential_request"
+            card_only = is_card_only_approval(a)
             text = f"*{approval_title(a)}*"
             if detail:
                 text += f"\n{detail[:300]}"
@@ -768,10 +791,14 @@ def notify_approvals(state, bots):
                 text += f"\n_(on behalf of {names.get(requester, 'a teammate')})_"
             if is_cred:
                 text += "\n⚠️ Provide the value in Paperclip — a button can't carry a secret."
+            if card_only:
+                text += "\n⚠️ Open the card in Paperclip to read it in full and decide — it can't be decided from Telegram."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/approvals/{aid})"
             # Credential requests need a value, not an Approve/Reject tap — send them
             # without the keyboard so the only path is the (secure) dashboard form.
-            kb = None if is_cred else {"inline_keyboard": [[
+            # Card-only kinds (trading rules, wallet payments, deploys, host actions)
+            # get no buttons either: only the link (DUR-5199).
+            kb = None if (is_cred or card_only) else {"inline_keyboard": [[
                 {"text": "✅ Approve", "callback_data": f"approve:{aid}"},
                 {"text": "❌ Reject", "callback_data": f"reject:{aid}"},
             ]]}
@@ -2805,6 +2832,13 @@ def handle_callback(cq):
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"), text="Not allowed")
         return
     if action in ("approve", "reject") and rest:
+        # Messages sent before DUR-5199 still carry buttons for card-only kinds:
+        # look the card up and refuse. If it can't be read, refuse too.
+        card = cli("approval", "get", rest)
+        if not isinstance(card, dict) or is_card_only_approval(card):
+            tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"),
+               text="Open this card in Paperclip to decide it", show_alert=True)
+            return
         ok = cli("approval", "approve" if action == "approve" else "reject", rest) is not None
         label = "Approved ✅" if action == "approve" else "Rejected ❌"
     elif action in ("iaccept", "ireject", "ia", "ir") and rest.count(":") == 1:
