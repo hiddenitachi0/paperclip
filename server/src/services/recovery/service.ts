@@ -22,9 +22,12 @@ import {
   heartbeatRunEvents,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
+  documentRevisions,
   issueAttachments,
   issueComments,
   issueApprovals,
+  issueDocuments,
+  issueWorkProducts,
   issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
@@ -113,6 +116,16 @@ export const STRANDED_RECENT_PROGRESS_EXEMPTION_MS = Math.max(
   60_000,
   Number(process.env.STRANDED_RECENT_PROGRESS_EXEMPTION_MS) || 30 * 60 * 1000,
 );
+
+// DUR-5207: back-stop for continuation wake-ups. After this many continuation
+// wakes in a row for one issue with no real change in between, the sweep stops
+// re-waking the agent and says so once.
+export const CONTINUATION_NO_CHANGE_BACKSTOP_RUNS = 6;
+const CONTINUATION_WAKE_SKIPPED_ACTION = "issue.continuation_wake_skipped";
+const CONTINUATION_PAUSED_ACTION = "issue.automatic_followups_paused";
+export const CONTINUATION_PAUSED_COMMENT =
+  "Paused automatic follow-ups: nothing has changed in the last 6 runs. " +
+  "A new comment, a card decision or a status change will wake the agent again.";
 
 type RecoveryWakeupOptions = {
   source?: "timer" | "assignment" | "on_demand" | "automation";
@@ -767,45 +780,261 @@ export function recoveryService(
       .then((rows) => Boolean(rows[0]));
   }
 
-  // GGU-809: visible-progress signal for stranded-recovery escalation guard.
-  // Returns true if the assignee posted a comment, OR any attachment was added
-  // to the issue, within `windowMs`. Used to suppress false-positive recovery
-  // issues for batch workflows that genuinely advance every heartbeat.
-  async function hasRecentVisibleProgress(
-    companyId: string,
-    issueId: string,
-    assigneeAgentId: string,
-    windowMs: number,
-  ) {
-    const since = new Date(Date.now() - windowMs);
-    const [comment, attachment] = await Promise.all([
-      db
-        .select({ id: issueComments.id })
-        .from(issueComments)
-        .where(
-          and(
-            eq(issueComments.companyId, companyId),
-            eq(issueComments.issueId, issueId),
-            eq(issueComments.authorAgentId, assigneeAgentId),
-            gt(issueComments.createdAt, since),
-          ),
-        )
-        .limit(1)
-        .then((rows) => rows[0] ?? null),
+  // DUR-5207: has this issue changed in a way that is real work -- not just a
+  // comment -- since `since`? A status change, a work product (which also
+  // covers a commit / PR head kept on it), a document revision or a new child
+  // issue. Attachments count too, as they did for GGU-809 batch workflows.
+  async function hasRealChangeSince(companyId: string, issueId: string, since: Date) {
+    const found = await Promise.all([
       db
         .select({ id: issueAttachments.id })
         .from(issueAttachments)
-        .where(
-          and(
-            eq(issueAttachments.companyId, companyId),
-            eq(issueAttachments.issueId, issueId),
-            gt(issueAttachments.createdAt, since),
-          ),
-        )
+        .where(and(
+          eq(issueAttachments.companyId, companyId),
+          eq(issueAttachments.issueId, issueId),
+          gt(issueAttachments.createdAt, since),
+        ))
+        .limit(1),
+      db
+        .select({ id: activityLog.id })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          eq(activityLog.action, "issue.updated"),
+          gt(activityLog.createdAt, since),
+          sql`${activityLog.details} -> '_previous' ? 'status'`,
+        ))
+        .limit(1),
+      db
+        .select({ id: issueWorkProducts.id })
+        .from(issueWorkProducts)
+        .where(and(
+          eq(issueWorkProducts.companyId, companyId),
+          eq(issueWorkProducts.issueId, issueId),
+          or(gt(issueWorkProducts.createdAt, since), gt(issueWorkProducts.updatedAt, since)),
+        ))
+        .limit(1),
+      db
+        .select({ id: documentRevisions.id })
+        .from(documentRevisions)
+        .innerJoin(issueDocuments, eq(issueDocuments.documentId, documentRevisions.documentId))
+        .where(and(
+          eq(issueDocuments.companyId, companyId),
+          eq(issueDocuments.issueId, issueId),
+          gt(documentRevisions.createdAt, since),
+        ))
+        .limit(1),
+      db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, companyId),
+          eq(issues.parentId, issueId),
+          gt(issues.createdAt, since),
+        ))
+        .limit(1),
+    ]);
+    return found.some((rows) => rows.length > 0);
+  }
+
+  // GGU-809: visible-progress signal for stranded-recovery escalation guard,
+  // used to suppress false-positive recovery issues for batch workflows that
+  // genuinely advance every heartbeat. DUR-5207: a comment alone no longer
+  // counts -- "still waiting" comments were being read as progress and kept
+  // the continuation retry going forever. Something real must have changed.
+  async function hasRecentVisibleProgress(
+    companyId: string,
+    issueId: string,
+    _assigneeAgentId: string,
+    windowMs: number,
+  ) {
+    return hasRealChangeSince(companyId, issueId, new Date(Date.now() - windowMs));
+  }
+
+  // DUR-5207: the newest pending card (approval or thread interaction) that
+  // waits on a person for this issue. Deciding it wakes the agent (or, once it
+  // is no longer pending, the next sweep resumes as before), so a continuation
+  // wake in the meantime has nothing to do.
+  async function findPendingPersonCard(companyId: string, issueId: string) {
+    const [approvalRow, interactionRow] = await Promise.all([
+      db
+        .select({ id: approvals.id })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+        .where(and(
+          eq(issueApprovals.companyId, companyId),
+          eq(issueApprovals.issueId, issueId),
+          eq(approvals.companyId, companyId),
+          eq(approvals.status, "pending"),
+        ))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ id: issueThreadInteractions.id })
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, companyId),
+          eq(issueThreadInteractions.issueId, issueId),
+          eq(issueThreadInteractions.status, "pending"),
+        ))
         .limit(1)
         .then((rows) => rows[0] ?? null),
     ]);
-    return Boolean(comment || attachment);
+    if (approvalRow) return { kind: "approval" as const, id: approvalRow.id };
+    if (interactionRow) return { kind: "interaction" as const, id: interactionRow.id };
+    return null;
+  }
+
+  // Record (once per card) that the continuation wake was skipped and why.
+  // Fail-soft: a failed write must never decide whether the agent is woken.
+  async function recordContinuationWakeSkippedForCard(
+    issue: typeof issues.$inferSelect,
+    card: { kind: "approval" | "interaction"; id: string },
+  ) {
+    try {
+      const already = await db
+        .select({ id: activityLog.id })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, issue.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issue.id),
+          eq(activityLog.action, CONTINUATION_WAKE_SKIPPED_ACTION),
+          sql`${activityLog.details} ->> 'cardId' = ${card.id}`,
+        ))
+        .limit(1);
+      if (already.length > 0) return;
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "recovery",
+        agentId: issue.assigneeAgentId ?? null,
+        runId: null,
+        action: CONTINUATION_WAKE_SKIPPED_ACTION,
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          reason: "waiting_on_card",
+          cardKind: card.kind,
+          cardId: card.id,
+          message:
+            "Did not wake the agent again: this task is only waiting for a person to decide a card. " +
+            "The decision will wake the agent.",
+          source: "recovery.continuation_hold",
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "failed to record a skipped continuation wake");
+    }
+  }
+
+  // DUR-5207 back-stop. Returns true when this issue already had
+  // CONTINUATION_NO_CHANGE_BACKSTOP_RUNS continuation wakes in a row with no
+  // real change, in which case the wake is NOT queued. The count restarts from
+  // the newest of: a real change, a comment from anyone but the assignee, or a
+  // card decision. The pause is announced with one comment per quiet stretch.
+  // Fail-open: an error answers "not paused" and the wake goes ahead as before.
+  async function holdContinuationAfterNoChange(issue: typeof issues.$inferSelect, agentId: string) {
+    try {
+      const runs = await db
+        .select({ createdAt: heartbeatRuns.createdAt, contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, issue.companyId),
+          eq(heartbeatRuns.agentId, agentId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+        ))
+        .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+        .limit(CONTINUATION_NO_CHANGE_BACKSTOP_RUNS + 1);
+
+      const streak: Date[] = [];
+      for (const run of runs) {
+        const ctx = parseObject(run.contextSnapshot);
+        if (readNonEmptyString(ctx.retryReason) !== "issue_continuation_needed") break;
+        streak.push(new Date(run.createdAt));
+      }
+      if (streak.length < CONTINUATION_NO_CHANGE_BACKSTOP_RUNS) return false;
+
+      // The oldest run of the streak is the 6th newest; anything that happened
+      // after it breaks "nothing has changed in the last 6 runs".
+      const streakStart = streak[CONTINUATION_NO_CHANGE_BACKSTOP_RUNS - 1]!;
+      if (await hasRealChangeSince(issue.companyId, issue.id, streakStart)) return false;
+
+      const [otherComment, decidedApproval, resolvedInteraction] = await Promise.all([
+        db
+          .select({ id: issueComments.id })
+          .from(issueComments)
+          .where(and(
+            eq(issueComments.companyId, issue.companyId),
+            eq(issueComments.issueId, issue.id),
+            isNull(issueComments.deletedAt),
+            gt(issueComments.createdAt, streakStart),
+            or(
+              sql`${issueComments.authorUserId} is not null`,
+              sql`(${issueComments.authorAgentId} is not null and ${issueComments.authorAgentId} <> ${agentId}::uuid)`,
+            ),
+          ))
+          .limit(1),
+        db
+          .select({ id: approvals.id })
+          .from(issueApprovals)
+          .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+          .where(and(
+            eq(issueApprovals.companyId, issue.companyId),
+            eq(issueApprovals.issueId, issue.id),
+            gt(approvals.decidedAt, streakStart),
+          ))
+          .limit(1),
+        db
+          .select({ id: issueThreadInteractions.id })
+          .from(issueThreadInteractions)
+          .where(and(
+            eq(issueThreadInteractions.companyId, issue.companyId),
+            eq(issueThreadInteractions.issueId, issue.id),
+            gt(issueThreadInteractions.resolvedAt, streakStart),
+          ))
+          .limit(1),
+      ]);
+      if (otherComment.length > 0 || decidedApproval.length > 0 || resolvedInteraction.length > 0) return false;
+
+      const alreadyAnnounced = await db
+        .select({ id: activityLog.id })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, issue.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issue.id),
+          eq(activityLog.action, CONTINUATION_PAUSED_ACTION),
+          gt(activityLog.createdAt, streakStart),
+        ))
+        .limit(1);
+      if (alreadyAnnounced.length === 0) {
+        await issuesSvc.addComment(issue.id, CONTINUATION_PAUSED_COMMENT, {}, { authorType: "system" });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "recovery",
+          agentId,
+          runId: null,
+          action: CONTINUATION_PAUSED_ACTION,
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            reason: "no_change_in_last_runs",
+            runs: CONTINUATION_NO_CHANGE_BACKSTOP_RUNS,
+            source: "recovery.continuation_backstop",
+          },
+        });
+      }
+      return true;
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "continuation back-stop check failed; waking as before");
+      return false;
+    }
   }
 
   async function enqueueStrandedIssueRecovery(input: {
@@ -3202,6 +3431,10 @@ export function recoveryService(
       escalated: 0,
       waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
+      /** DUR-5207: continuation wakes not queued because the task waits only on a card (also counted in `skipped`). */
+      continuationHeldForCard: 0,
+      /** DUR-5207: continuation wakes not queued after 6 runs in a row with no real change (also counted in `skipped`). */
+      continuationPausedNoChange: 0,
       skipped: 0,
       /** DUR-3973: wake-ups NOT queued because the heartbeat would reject them (also counted in `skipped`). */
       assigneeCannotWakeHeld: 0,
@@ -3565,6 +3798,16 @@ export function recoveryService(
           continue;
         }
 
+        // DUR-5207: the task only waits for a person to decide a card; the
+        // decision wakes the agent, so a "still waiting" run is not stuck.
+        const pendingCard = await findPendingPersonCard(issue.companyId, issue.id);
+        if (pendingCard) {
+          await recordContinuationWakeSkippedForCard(issue, pendingCard);
+          result.continuationHeldForCard += 1;
+          result.skipped += 1;
+          continue;
+        }
+
         if (isRepeatedProductiveContinuationRecovery(successfulRun)) {
           // GGU-809: skip escalation if the assignee has shown visible progress
           // (comment or attachment) within the exemption window. Falling
@@ -3602,6 +3845,12 @@ export function recoveryService(
         }
 
         if (await holdIfAssigneeCannotWake()) continue;
+
+        if (await holdContinuationAfterNoChange(issue, agentId)) {
+          result.continuationPausedNoChange += 1;
+          result.skipped += 1;
+          continue;
+        }
 
         const queued = await enqueueStrandedIssueRecovery({
           issueId: issue.id,
@@ -3699,6 +3948,12 @@ export function recoveryService(
       }
 
       if (await holdIfAssigneeCannotWake()) continue;
+
+      if (await holdContinuationAfterNoChange(issue, agentId)) {
+        result.continuationPausedNoChange += 1;
+        result.skipped += 1;
+        continue;
+      }
 
       const queued = await enqueueStrandedIssueRecovery({
         issueId: issue.id,

@@ -2694,6 +2694,17 @@ export function approvalRoutes(
         assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "a trading strategy's rules");
         const info = getActorInfo(req);
         if (info.actorType !== "user") throw forbidden("Only a person can approve a trading strategy's rules.");
+        // DUR-5199: a board API key (the CLI, the Telegram bridge's stored
+        // credential) is the operator's identity but not the operator looking
+        // at the card. A Telegram tap showed 300 characters of the Trader's
+        // proposal and would have switched the strategy to it. The card route
+        // (a browser session) is the only way to approve. Reject stays open: it closes
+        // a draft and leaves the running rules alone.
+        if (req.actor.source === "board_key") {
+          throw forbidden(
+            "A trading strategy's rules can only be approved on the approval card in Paperclip, not through the CLI, an API key or Telegram.",
+          );
+        }
         if (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested") {
           await tradingVersionsSvc.approveFromCard(existingForKindCheck.companyId, existingForKindCheck.id, info.actorId);
         }
