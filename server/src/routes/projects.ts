@@ -36,7 +36,8 @@ import {
   collectDeployPolicyCommandPaths,
   collectProjectDeployTransportCommandPaths,
   collectProjectExecutionWorkspaceCommandPaths,
-  collectProjectExecutionWorkspacePolicyDropPaths,
+  carryForwardProtectedProjectPolicyFields,
+  assertNoAgentProtectedProjectSettingChange,
   collectProjectWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
 import { assertCanManageProjectWorkspaceRuntimeServices } from "./workspace-runtime-service-authz.js";
@@ -375,31 +376,19 @@ export function projectRoutes(rawDb: Db) {
     assertBoardOnlyWorkspaceSettingsMutation(
       req,
       [
-        ...collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
-        // Omitting a board-set protected field (or sending null) drops it too.
-        ...(Object.prototype.hasOwnProperty.call(body, "executionWorkspacePolicy")
-          ? collectProjectExecutionWorkspacePolicyDropPaths(
-              body.executionWorkspacePolicy,
-              existing.executionWorkspacePolicy,
-            ).filter((path) => !collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy).includes(path))
-          : []),
         ...collectDeployPolicyCommandPaths(body.deployPolicy),
         ...collectProjectDeployTransportCommandPaths(body),
       ],
     );
-    // requireIsolation is board-only, and a PATCH replaces the whole policy, so an
-    // agent that leaves the key out (or sends `null`) must not be able to drop it.
-    // Carry the stored value forward for agent writes.
-    if (
-      isBoardOnlyBlockedActor(req) &&
-      body.executionWorkspacePolicy !== undefined &&
-      (existing.executionWorkspacePolicy as { requireIsolation?: unknown } | null)?.requireIsolation === true
-    ) {
-      body.executionWorkspacePolicy = {
-        enabled: false,
-        ...(body.executionWorkspacePolicy ?? {}),
-        requireIsolation: true,
-      };
+    // A PATCH replaces the whole policy. For agent writes, keep the board-set protected fields
+    // the agent left out, and refuse only when it sends a different value for one of them.
+    if (isBoardOnlyBlockedActor(req) && Object.prototype.hasOwnProperty.call(body, "executionWorkspacePolicy")) {
+      const { policy, changedPaths } = carryForwardProtectedProjectPolicyFields(
+        body.executionWorkspacePolicy,
+        existing.executionWorkspacePolicy,
+      );
+      assertNoAgentProtectedProjectSettingChange(req, changedPaths);
+      body.executionWorkspacePolicy = policy;
     }
     await assertProjectEnvironmentSelection(
       existing.companyId,

@@ -484,21 +484,29 @@ describe.sequential("workspace runtime service route authorization", () => {
       executionWorkspacePolicy: { enabled: true, authorizationPolicy: policy },
     });
 
-    it("refuses an agent project PATCH that drops, nulls, omits, or rewrites a stored policy", async () => {
-      for (const sent of [
-        { enabled: true },
-        null,
-        { enabled: false },
-        { enabled: true, authorizationPolicy: { protectedAgent: { requiresApproval: false } } },
-        { enabled: true, authorizationPolicy: null },
-        { enabled: true, authorizationPolicy: policy },
-      ]) {
+    it("keeps a stored policy when an agent omits it, sends null, or sends it back unchanged", async () => {
+      for (const sent of [{ enabled: true }, null, { enabled: false }, { enabled: true, authorizationPolicy: policy }]) {
+        mockProjectService.update.mockClear();
+        mockProjectService.getById.mockResolvedValue(storedProject());
+        mockProjectService.update.mockResolvedValue(buildProject());
+        const app = await createProjectApp(agent);
+        const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+        expect(res.status).toBe(200);
+        expect(mockProjectService.update.mock.calls[0]![1].executionWorkspacePolicy.authorizationPolicy).toEqual(policy);
+      }
+    }, 20000);
+
+    it("refuses an agent project PATCH that rewrites or nulls a stored policy, and writes nothing", async () => {
+      for (const sentPolicy of [{ protectedAgent: { requiresApproval: false } }, null]) {
         mockProjectService.update.mockClear();
         mockProjectService.getById.mockResolvedValue(storedProject());
         const app = await createProjectApp(agent);
-        const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+        const res = await request(app)
+          .patch(`/api/projects/${projectId}`)
+          .send({ executionWorkspacePolicy: { enabled: true, authorizationPolicy: sentPolicy } });
         expect(res.status).toBe(403);
         expect(res.body.error).toContain("authorizationPolicy");
+        expect(res.body.error).toContain("settings only the board can change");
         expect(mockProjectService.update).not.toHaveBeenCalled();
       }
     }, 20000);
