@@ -36,6 +36,15 @@ export const TRADING_DEFAULT_FEE_PCT_PER_SIDE = 0.4;
 export const TRADING_ASSUMED_SPREAD_PCT = 0.1;
 export const TRADING_BASELINE_KEYS = ["baseline:always_up", "baseline:persistence", "baseline:coin_flip"] as const;
 export type TradingBaselineKey = (typeof TRADING_BASELINE_KEYS)[number];
+/**
+ * DUR-5020: the forecaster key of the Trader agent's own probability calls (forecaster_kind 'llm').
+ * Scored like any other probabilistic forecaster, forward only, never backtested.
+ */
+export const TRADING_LLM_FORECASTER_KEY = "llm:trader";
+/** A call must be logged this soon after the bar it is about closed: the reference price is that bar's close. */
+export const TRADING_LLM_FORECAST_MAX_AGE_MS = 15 * 60_000;
+/** Refused: a probability of 0 or 1 is a claim of certainty and would make a single miss unbounded in log loss. */
+export const TRADING_LLM_PROBABILITY_BOUNDS = { min: 0.01, max: 0.99 } as const;
 
 /** Half the round-trip cost: two fees plus the assumed spread, halved. */
 export function defaultFlatBandPct(feePctPerSide = TRADING_DEFAULT_FEE_PCT_PER_SIDE, spreadPct = TRADING_ASSUMED_SPREAD_PCT): number {
