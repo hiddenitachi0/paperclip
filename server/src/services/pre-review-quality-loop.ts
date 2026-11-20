@@ -17,7 +17,7 @@ import {
   resolveProjectWorkspaceTestCommand,
   isHandOffToReview,
 } from "./quality-loops.js";
-import { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
+import { sanitizeRuntimeServiceBaseEnv, serverChildProcessEnv } from "./runtime-env.js";
 import {
   MISSING_RUN_ID_GATE_MESSAGE,
   getCurrentHeadShaForIssueWorkspace,
@@ -188,12 +188,19 @@ const DIRTY_FOLDER_NOTE =
   "Note: the folder had uncommitted changes when the tests ran, so this result covers those changes too, not only the commit above.";
 
 /** True when the working folder has uncommitted or untracked changes; false when clean or unreadable. */
-async function workspaceHasUncommittedChanges(cwd: string): Promise<boolean> {
+export async function workspaceHasUncommittedChanges(cwd: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
-      cwd,
-      maxBuffer: 1024 * 1024,
-    });
+    // The folder is agent-writable: a planted core.fsmonitor or hook would run with the server's
+    // environment (BETTER_AUTH_SECRET, database URLs). Strip the server's keys and turn both off.
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", cwd, "status", "--porcelain"],
+      {
+        cwd,
+        maxBuffer: 1024 * 1024,
+        env: serverChildProcessEnv({ GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" }),
+      },
+    );
     return stdout.trim().length > 0;
   } catch {
     return false;

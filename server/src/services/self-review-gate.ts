@@ -13,6 +13,7 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
+import { serverChildProcessEnv } from "./runtime-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -370,10 +371,15 @@ export async function getCurrentHeadShaForIssueWorkspace(
   const resolved = await resolveIssueWorkspaceCheckout(db, input);
   if (!resolved) return null;
   try {
-    const { stdout } = await execFileAsync("git", ["-C", resolved.workspacePath, "rev-parse", "HEAD"], {
-      cwd: resolved.workspacePath,
-      maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
-    });
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", resolved.workspacePath, "rev-parse", "HEAD"],
+      {
+        cwd: resolved.workspacePath,
+        maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
+        env: serverChildProcessEnv({ GIT_CONFIG_NOSYSTEM: "1" }),
+      },
+    );
     const sha = stdout.trim();
     return sha.length > 0 ? sha : null;
   } catch {

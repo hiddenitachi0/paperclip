@@ -34,11 +34,36 @@ import {
   evaluatePreReviewQualityLoop,
   lastLines,
   waitForPreReviewCheck,
+  workspaceHasUncommittedChanges,
   type PreReviewTestRunner,
 } from "./pre-review-quality-loop.js";
 import { projectService } from "./projects.js";
 import { resolveEffectiveQualityLoops, resolveProjectWorkspaceTestCommand } from "./quality-loops.js";
 import { MISSING_RUN_ID_GATE_MESSAGE, type SelfReviewGateWakeup } from "./self-review-gate.js";
+
+
+describe("pre-review loop: git runs in an agent-writable folder", () => {
+  it("never runs a planted core.fsmonitor or hook, and never hands it the server's secrets", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pre-review-git-"));
+    const previousSecret = process.env.BETTER_AUTH_SECRET;
+    process.env.BETTER_AUTH_SECRET = "server-secret-that-must-not-leak";
+    try {
+      const marker = path.join(dir, "pwned");
+      const hook = path.join(dir, "hook.sh");
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\nenv > ${marker}.env\n`, { mode: 0o755 });
+      execFileSync("git", ["init", "-q", dir]);
+      execFileSync("git", ["-C", dir, "config", "core.fsmonitor", hook]);
+      fs.writeFileSync(path.join(dir, "file.txt"), "changed\n");
+      await expect(workspaceHasUncommittedChanges(dir)).resolves.toBe(true);
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(fs.existsSync(`${marker}.env`)).toBe(false);
+    } finally {
+      if (previousSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+      else process.env.BETTER_AUTH_SECRET = previousSecret;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("pre-review loop: pure pieces", () => {
   it("is off by default and switched on by the company row only", () => {
