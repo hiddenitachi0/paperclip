@@ -106,6 +106,12 @@ function registerModuleMocks() {
     logActivity: mockLogActivity,
     secretService: () => mockSecretService,
   }));
+  // DUR-5222: filing now looks the PR's head up on GitHub and refuses when it cannot; this suite
+  // is about something else, so keep it off the network (the lookup has its own tests).
+  vi.doMock("../services/merge-card-head-commit.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/merge-card-head-commit.js")>()),
+    withResolvedMergePrHeadCommit: async (_db: unknown, _companyId: string, payload: Record<string, unknown>) => payload,
+  }));
   vi.doMock("../services/deploy-branches.js", () => ({
     resolveProjectDeployBranches: mockResolveProjectDeployBranches,
   }));
