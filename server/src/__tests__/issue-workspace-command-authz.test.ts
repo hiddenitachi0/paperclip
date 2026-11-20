@@ -301,7 +301,7 @@ describe("issue workspace command authorization", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("host-executed workspace commands");
+    expect(res.body.error).toContain("Only a person on the board can change workspace commands");
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
@@ -470,7 +470,7 @@ describe("issue workspace command authorization", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("host-executed workspace commands");
+    expect(res.body.error).toContain("Only a person on the board can change workspace commands");
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 

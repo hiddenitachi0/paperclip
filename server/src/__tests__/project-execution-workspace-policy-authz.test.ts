@@ -45,6 +45,8 @@ describe("collectProjectExecutionWorkspaceCommandPaths", () => {
 
 // DUR-5231: leaving a protected field out of a replacing write drops it.
 describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
+  const enabledPath = "executionWorkspacePolicy.enabled";
+  const defaultModePath = "executionWorkspacePolicy.defaultMode";
   const stored = {
     enabled: true,
     requireIsolation: true,
@@ -57,12 +59,12 @@ describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
     "executionWorkspacePolicy.workspaceStrategy.teardownCommand",
   ];
 
-  it("treats { enabled: false } as dropping every protected field", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual(all);
+  it("treats { enabled: false } as dropping every protected field and switching the policy off", () => {
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual([...all, enabledPath]);
   });
 
-  it("treats null as dropping every protected field", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual(all);
+  it("treats null as dropping every protected field and switching the policy off", () => {
+    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual([...all, enabledPath]);
   });
 
   it("flags only the field that changed", () => {
@@ -71,8 +73,34 @@ describe("collectProjectExecutionWorkspacePolicyDropPaths", () => {
     ).toEqual(["executionWorkspacePolicy.workspaceRuntime"]);
   });
 
+  // DUR-5246: pausing the stored fields (enabled:false / defaultMode) is as good as dropping them.
+  it("flags enabled and defaultMode changes while a board-only field is stored", () => {
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, enabled: false }, stored)).toEqual([enabledPath]);
+    expect(
+      collectProjectExecutionWorkspacePolicyDropPaths(
+        { ...stored, defaultMode: "adapter_default" },
+        { ...stored, defaultMode: "isolated_workspace" },
+      ),
+    ).toEqual([defaultModePath]);
+    expect(
+      collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, defaultMode: "isolated_workspace" }, {
+        ...stored,
+        defaultMode: "isolated_workspace",
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not guard enabled/defaultMode when no board-only field is stored", () => {
+    expect(
+      collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false, defaultMode: "adapter_default" }, {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+      }),
+    ).toEqual([]);
+  });
+
   it("allows a write that keeps the protected fields, and a project with none stored", () => {
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored, enabled: false }, stored)).toEqual([]);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ ...stored }, stored)).toEqual([]);
     expect(collectProjectExecutionWorkspacePolicyDropPaths(null, { enabled: true })).toEqual([]);
     expect(collectProjectExecutionWorkspacePolicyDropPaths(null, null)).toEqual([]);
   });
@@ -85,8 +113,11 @@ describe("authorizationPolicy drop paths", () => {
 
   it("flags omitted, null, and {enabled:false} writes", () => {
     expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: true }, stored)).toEqual(path);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual(path);
-    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual(path);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths(null, stored)).toEqual([...path, "executionWorkspacePolicy.enabled"]);
+    expect(collectProjectExecutionWorkspacePolicyDropPaths({ enabled: false }, stored)).toEqual([
+      ...path,
+      "executionWorkspacePolicy.enabled",
+    ]);
   });
 
   it("flags a substituted policy", () => {

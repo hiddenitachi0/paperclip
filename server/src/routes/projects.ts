@@ -29,6 +29,7 @@ import {
 } from "../services/workspace-runtime.js";
 import {
   assertBoardOnlyProjectWorkspaceChange,
+  assertBoardOnlyWorkspaceSettingsMutation,
   assertNoAgentHostWorkspaceCommandMutation,
   isBoardOnlyBlockedActor,
   collectProjectWorkspaceCodeLocationChanges,
@@ -298,7 +299,7 @@ export function projectRoutes(rawDb: Db) {
       readProjectPolicyEnvironmentId(projectData.executionWorkspacePolicy),
     );
     assertBoardOnlyProjectWorkspaceChange(req, workspace !== undefined ? true : []);
-    assertNoAgentHostWorkspaceCommandMutation(
+    assertBoardOnlyWorkspaceSettingsMutation(
       req,
       [
         ...collectProjectExecutionWorkspaceCommandPaths(projectData.executionWorkspacePolicy),
@@ -371,7 +372,7 @@ export function projectRoutes(rawDb: Db) {
       return;
     }
     const body = { ...req.body };
-    assertNoAgentHostWorkspaceCommandMutation(
+    assertBoardOnlyWorkspaceSettingsMutation(
       req,
       [
         ...collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),

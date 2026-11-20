@@ -147,7 +147,7 @@ async function alertOwningCompanyOfCrossCompanyWriteAttempt(
   });
 }
 import {
-  assertNoAgentHostWorkspaceCommandMutation,
+  assertBoardOnlyWorkspaceSettingsMutation,
   collectIssueWorkspaceCommandPaths,
   assertAgentIssueWorkspaceOverrideAllowed,
   isBoardOnlyBlockedActor,
@@ -6144,7 +6144,7 @@ export function issueRoutes(
     if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(companyId);
-    assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId);
     const { watchdogDiscovery: rawWatchdogDiscovery, bragOnDone: requestedBragOnDone, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
@@ -6496,7 +6496,7 @@ export function issueRoutes(
     if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(parent.companyId);
-    assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : parent.projectId);
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -6711,7 +6711,7 @@ export function issueRoutes(
       if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       if (!assertBragOnDoneFieldAllowed(req, res, childBody)) return;
-      assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
+      assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       await assertIssueWorkspaceOverrideAllowed(req, childBody, childBody.projectId !== undefined ? childBody.projectId : sourceIssue.projectId);
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       applyPinnedAssigneeAdapterOverrides(req, childBody, null);
@@ -6995,7 +6995,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : existing.projectId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;

@@ -404,7 +404,7 @@ describe.sequential("workspace runtime service route authorization", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("host-executed workspace commands");
+    expect(res.body.error).toContain("Only a person on the board can change workspace commands");
     expect(mockProjectService.create).not.toHaveBeenCalled();
   });
 
@@ -416,7 +416,8 @@ describe.sequential("workspace runtime service route authorization", () => {
       source: "agent_key",
       runId: "run-1",
     };
-    for (const sent of [{ enabled: true }, { enabled: true, defaultMode: "shared_workspace" }, null]) {
+    // Only a write that leaves enabled/defaultMode alone is carried forward (DUR-5246).
+    for (const sent of [{ enabled: true }]) {
       mockProjectService.update.mockClear();
       mockProjectService.getById.mockResolvedValue({
         ...buildProject(),
@@ -430,6 +431,44 @@ describe.sequential("workspace runtime service route authorization", () => {
       expect(written.requireIsolation).toBe(true);
     }
   }, 15000);
+
+  // DUR-5246: pausing the board's stored fields is as good as deleting them.
+  it("refuses an agent project PATCH that changes enabled or defaultMode while a board-only field is stored", async () => {
+    const agent = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    };
+    const stored = {
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm install" },
+    };
+    for (const [sent, path] of [
+      [{ ...stored, enabled: false }, "executionWorkspacePolicy.enabled"],
+      [{ ...stored, defaultMode: "adapter_default" }, "executionWorkspacePolicy.defaultMode"],
+      [{ enabled: true, defaultMode: "isolated_workspace" }, "provisionCommand"],
+    ] as const) {
+      mockProjectService.update.mockClear();
+      mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: stored });
+      const app = await createProjectApp(agent);
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: sent });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain(path);
+      expect(res.body.error).toContain("Only a person on the board");
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    }
+    // a board user may change them
+    mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: stored });
+    mockProjectService.update.mockResolvedValue(buildProject());
+    const boardApp = await createProjectApp({ type: "board", userId: "u1", source: "local_implicit", isInstanceAdmin: true });
+    const ok = await request(boardApp)
+      .patch(`/api/projects/${projectId}`)
+      .send({ executionWorkspacePolicy: { ...stored, enabled: false } });
+    expect(ok.status).toBe(200);
+  }, 20000);
 
   describe("project authorizationPolicy is board-only (DUR-5242)", () => {
     const agent = {

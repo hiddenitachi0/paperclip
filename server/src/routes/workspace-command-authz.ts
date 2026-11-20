@@ -55,6 +55,18 @@ export function assertNoAgentHostWorkspaceCommandMutation(req: Request, paths: s
   );
 }
 
+/**
+ * DUR-5246: the project and task routes guard more than commands (runtime services,
+ * authorizationPolicy, requireIsolation, enabled/defaultMode), so they use plain text
+ * that stays true for every one of those fields.
+ */
+export function assertBoardOnlyWorkspaceSettingsMutation(req: Request, paths: string[]) {
+  if (!isBoardOnlyBlockedActor(req) || paths.length === 0) return;
+  throw forbidden(
+    `Only a person on the board can change workspace commands, runtime services or isolation settings (${paths.join(", ")}).`,
+  );
+}
+
 export function collectAgentAdapterWorkspaceCommandPaths(
   adapterConfig: unknown,
   prefix = "adapterConfig",
@@ -89,6 +101,10 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
     paths.push("executionWorkspacePolicy.authorizationPolicy");
   }
   return paths;
+}
+
+function isNonEmptyCommand(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 /**
@@ -128,6 +144,23 @@ export function collectProjectExecutionWorkspacePolicyDropPaths(
     storedStrategy?.teardownCommand,
     nextStrategy?.teardownCommand,
   );
+  // DUR-5246: `enabled: false` or `defaultMode: "adapter_default"` leaves the stored fields in
+  // place but makes runs ignore them (unless requireIsolation is on), so while any board-only
+  // field is stored an agent may not change either switch.
+  const storedHasBoardOnlyField =
+    (storedPolicy.workspaceRuntime !== undefined && storedPolicy.workspaceRuntime !== null)
+    || (storedPolicy.authorizationPolicy !== undefined && storedPolicy.authorizationPolicy !== null)
+    || storedPolicy.requireIsolation === true
+    || isNonEmptyCommand(storedStrategy?.provisionCommand)
+    || isNonEmptyCommand(storedStrategy?.teardownCommand);
+  if (storedHasBoardOnlyField) {
+    if (Boolean(storedPolicy.enabled) !== Boolean(next?.enabled)) {
+      paths.push("executionWorkspacePolicy.enabled");
+    }
+    if (!sameValue(storedPolicy.defaultMode, next?.defaultMode)) {
+      paths.push("executionWorkspacePolicy.defaultMode");
+    }
+  }
   return paths;
 }
 
