@@ -196,6 +196,47 @@ describe.sequential("project workspace code-location is board-only", () => {
     expect(mockProjectService.createWorkspace).not.toHaveBeenCalled();
   }, 15000);
 
+  // DUR-5231: a project PATCH replaces the whole executionWorkspacePolicy, so omitting a
+  // board-set protected field drops it just like naming it would change it.
+  describe("project PATCH cannot drop a board-set execution workspace policy", () => {
+    const storedPolicy = {
+      enabled: true,
+      requireIsolation: true,
+      workspaceRuntime: { services: [{ name: "x", command: "id" }] },
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "p" },
+    };
+
+    beforeEach(() => {
+      mockProjectService.getById.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: storedPolicy });
+      mockProjectService.update.mockResolvedValue({ ...buildProject(), executionWorkspacePolicy: null });
+    });
+
+    it.each([
+      ["{ enabled: false }", { executionWorkspacePolicy: { enabled: false } }],
+      ["null", { executionWorkspacePolicy: null }],
+    ])("refuses an agent sending executionWorkspacePolicy: %s", async (_label, body) => {
+      const app = await createApp(agentActor);
+      const res = await request(app).patch(`/api/projects/${projectId}`).send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("requireIsolation");
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    }, 15000);
+
+    it("lets an agent PATCH other fields without touching the policy", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ name: "Renamed" });
+      expect(res.status).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalledTimes(1);
+    }, 15000);
+
+    it("lets a board user clear the policy", async () => {
+      const app = await createApp(boardActor);
+      const res = await request(app).patch(`/api/projects/${projectId}`).send({ executionWorkspacePolicy: null });
+      expect(res.status).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalledTimes(1);
+    }, 15000);
+  });
+
   it("refuses an agent deleting a workspace", async () => {
     const app = await createApp(agentActor);
     const res = await request(app).delete(`/api/projects/${projectId}/workspaces/${workspaceId}`);
