@@ -41,6 +41,7 @@ import {
   evaluateQualitySelfReviewGate,
   maybeScheduleQualityCheckFollowUp,
   pinQualityLoopPolicyFields,
+  isHandOffToReview,
   issueHasReviewOrApprovalStage,
   qualityLoopSettingsService,
   resolveEffectiveQualityLoops,
@@ -924,5 +925,18 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     expect(
       await applyDefaultReviewerPolicy(db, { ...base, companyId: nonCode.companyId, projectId: nonCode.projectId }),
     ).toBeNull();
+  });
+});
+
+describe("isHandOffToReview (a worker's done on a task with a review stage goes to review)", () => {
+  const stages = { stages: [{ type: "review", participants: [{ type: "agent", agentId: "reviewer" }] }] };
+  it("covers in_review, and done only when a reviewer stage will take it", () => {
+    expect(isHandOffToReview({ requestedStatus: "in_review", currentStatus: "in_progress", executionPolicy: null })).toBe(true);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: stages, assigneeAgentId: "worker" })).toBe(true);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: null })).toBe(false);
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_review", executionPolicy: stages })).toBe(false);
+    expect(isHandOffToReview({ requestedStatus: "in_review", currentStatus: "in_review", executionPolicy: null })).toBe(false);
+    // a stage staffed only by the worker reviews nothing
+    expect(isHandOffToReview({ requestedStatus: "done", currentStatus: "in_progress", executionPolicy: stages, assigneeAgentId: "reviewer" })).toBe(false);
   });
 });

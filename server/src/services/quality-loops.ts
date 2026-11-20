@@ -229,6 +229,25 @@ function workerExclusion(issue: {
   return { agentIds: [issue.assigneeAgentId], userIds: [issue.assigneeUserId] };
 }
 
+/**
+ * True when this status change is a worker handing the task over for review: a move to
+ * in_review, or a "done" on a task with a review/approval stage that is not yet in review
+ * (the stage engine turns that "done" into a hand-off to the reviewer).
+ */
+export function isHandOffToReview(input: {
+  requestedStatus: string | undefined;
+  currentStatus: string;
+  executionPolicy: unknown;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  executionState?: unknown;
+}): boolean {
+  if (input.currentStatus === "in_review") return false;
+  if (input.requestedStatus === "in_review") return true;
+  if (input.requestedStatus !== "done" || input.currentStatus === "done") return false;
+  return issueHasReviewOrApprovalStage(input.executionPolicy, workerExclusion(input));
+}
+
 export async function readQualityLoopSettingsRow(db: Db, companyId: string): Promise<SettingsRow | null> {
   const [row] = await db
     .select()
@@ -683,12 +702,14 @@ export type QualityDoneCheckOutcome =
 export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Promise<QualityDoneCheckOutcome> {
   // The pre-review loop (pre-review-quality-loop.ts) runs the same check on the move to
   // in_review: the diff against the task's acceptance criteria, before a person looks.
-  const beforeReview = input.requestedStatus === "in_review";
-  if (beforeReview) {
+  const isReviewMove = input.requestedStatus === "in_review";
+  if (isReviewMove) {
     if (input.currentStatus === "in_review") return { applies: false };
   } else if (input.requestedStatus !== "done" || input.currentStatus === "done") {
     return { applies: false };
   }
+  // A worker's "done" on a task with a review stage is a hand-off to review too.
+  let beforeReview = isReviewMove || isHandOffToReview({ ...input, ...input.issue });
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return { applies: false };
   const { db, issue } = input;
   const agentId = input.actor.agentId;
@@ -703,14 +724,22 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
   const effective = resolveEffectiveQualityLoops(row, issue.executionPolicy);
   if (beforeReview) {
     // Only where the whole loop applies: company switch on AND the project has a test command.
-    if (!effective.preReviewQualityLoop) return { applies: false };
-    try {
-      if (!(await resolveProjectWorkspaceTestCommand(db, issue.companyId, issue.projectId))) return { applies: false };
-    } catch (err) {
-      logger.warn({ err, issueId: issue.id }, "pre-review check: could not read the test command; skipping the criteria check");
-      return { applies: false };
+    let loopOn = effective.preReviewQualityLoop;
+    if (loopOn) {
+      try {
+        loopOn = Boolean(await resolveProjectWorkspaceTestCommand(db, issue.companyId, issue.projectId));
+      } catch (err) {
+        logger.warn({ err, issueId: issue.id }, "pre-review check: could not read the test command; skipping the criteria check");
+        loopOn = false;
+      }
     }
-  } else if (!effective.doneCheckEnabled) return { applies: false };
+    if (!loopOn) {
+      if (isReviewMove) return { applies: false };
+      // A "done" hand-off with the loop off keeps the normal finish-check behaviour below.
+      beforeReview = false;
+    }
+  }
+  if (!beforeReview && !effective.doneCheckEnabled) return { applies: false };
 
   // A task with reviewers/approvers is checked by them. The worker's "done" is only a
   // hand-off to the reviewer, and the final move to done is the last approver's verdict
@@ -817,7 +846,8 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
       description: issue.description,
     },
     actor: input.actor,
-    requestedStatus: input.requestedStatus,
+    // A worker's "done" that hands the task to a reviewer is checked as the move to review.
+    requestedStatus: beforeReview ? "in_review" : input.requestedStatus,
     currentStatus: input.currentStatus,
     patchComment: input.patchComment ?? null,
     readGeneralSettings: async () => ({}) as never,

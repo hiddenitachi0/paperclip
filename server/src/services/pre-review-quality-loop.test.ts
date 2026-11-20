@@ -286,6 +286,45 @@ describeEmbeddedPostgres("pre-review quality loop (DB-backed, real temp repo)", 
     expect(await loopComments(f.issueId)).toHaveLength(1);
   });
 
+  it("two moves at the same moment start one test run, one round, one wake", async () => {
+    const f = await seed();
+    const w = recordingWakeup();
+    let started = 0;
+    const runner: PreReviewTestRunner = async () => {
+      started += 1;
+      await new Promise((r) => setTimeout(r, 50));
+      return { exitCode: 1, timedOut: false, output: "FAIL" };
+    };
+    const [a, b] = await Promise.all([move(f, w.wakeup, { runner }), move(f, w.wakeup, { runner })]);
+    expect(a?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    expect(b?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    expect(started).toBe(1);
+    expect(await loopComments(f.issueId)).toHaveLength(1);
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it("a slot reserved by a move that ends early is released (the next move can start)", async () => {
+    const f = await seed({ withWorkspace: false });
+    const w = recordingWakeup();
+    expect(await move(f, w.wakeup, { runner: passing })).toBeNull(); // could not run: lets it through
+    expect(await move(f, w.wakeup, { runner: passing })).toBeNull();
+    const g = await seed();
+    expect((await move(g, w.wakeup, { runner: passing }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(g.issueId);
+  });
+
+  it("a worker's done on a task with a review stage is a hand-off to review, so the tests run first", async () => {
+    const other = randomUUID();
+    const f = await seed({ executionPolicy: { stages: [{ type: "review", participants: [{ type: "agent", agentId: other }] }] } });
+    const w = recordingWakeup();
+    expect((await move(f, w.wakeup, { runner: failing, requestedStatus: "done" }))?.message).toBe(PRE_REVIEW_RUNNING_MESSAGE);
+    await waitForPreReviewCheck(f.issueId);
+    expect(await loopComments(f.issueId)).toHaveLength(1);
+    // The reviewer's own done (task already in review) is their verdict, not a hand-off.
+    expect(await move(f, w.wakeup, { runner: failing, requestedStatus: "done", currentStatus: "in_review" })).toBeNull();
+  });
+
   it("pass: posts the commit, wakes the agent to retry, and the next move for that commit goes through", async () => {
     const f = await seed();
     const w = recordingWakeup();

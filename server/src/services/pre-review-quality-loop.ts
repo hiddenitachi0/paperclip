@@ -14,6 +14,7 @@ import {
   readQualityLoopSettingsRow,
   resolveEffectiveQualityLoops,
   resolveProjectWorkspaceTestCommand,
+  isHandOffToReview,
 } from "./quality-loops.js";
 import { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
 import {
@@ -308,6 +309,9 @@ export interface PreReviewQualityLoopInput {
     companyId: string;
     projectId: string | null;
     executionPolicy: unknown;
+    assigneeAgentId?: string | null;
+    assigneeUserId?: string | null;
+    executionState?: unknown;
   };
   actor: { actorType: string; agentId: string | null; runId: string | null };
   requestedStatus: string | undefined;
@@ -325,7 +329,8 @@ export interface PreReviewQualityLoopInput {
 export async function evaluatePreReviewQualityLoop(
   input: PreReviewQualityLoopInput,
 ): Promise<{ message: string } | null> {
-  if (input.requestedStatus !== "in_review" || input.currentStatus === "in_review") return null;
+  // A move to in_review, or a worker's "done" that the stage engine turns into a hand-off to a reviewer.
+  if (!isHandOffToReview({ ...input, ...input.issue })) return null;
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
   const { db, issue } = input;
   const agentId = input.actor.agentId;
@@ -343,9 +348,48 @@ export async function evaluatePreReviewQualityLoop(
   // The loop applies, so an agent with no trusted run cannot slip past it (same rule as the other gates).
   if (!input.actor.runId) return { message: MISSING_RUN_ID_GATE_MESSAGE };
   const sourceRunId = input.actor.runId;
-  const base = { companyId: issue.companyId, issueId: issue.id };
 
+  // Reserve the slot before any await, so two moves at the same moment cannot both start a run.
   if (runningChecks.has(issue.id)) return { message: PRE_REVIEW_RUNNING_MESSAGE };
+  let releaseSlot: () => void = () => {};
+  runningChecks.set(
+    issue.id,
+    new Promise<void>((resolve) => {
+      releaseSlot = resolve;
+    }),
+  );
+  let started = false;
+  try {
+    return await startPreReviewCheck(input, {
+      testCommand,
+      sourceRunId,
+      agentId,
+      markStarted: () => {
+        started = true;
+      },
+      releaseSlot,
+    });
+  } finally {
+    if (!started) {
+      runningChecks.delete(issue.id);
+      releaseSlot();
+    }
+  }
+}
+
+async function startPreReviewCheck(
+  input: PreReviewQualityLoopInput,
+  ctx: {
+    testCommand: string;
+    sourceRunId: string;
+    agentId: string;
+    markStarted: () => void;
+    releaseSlot: () => void;
+  },
+): Promise<{ message: string } | null> {
+  const { db, issue } = input;
+  const { testCommand, sourceRunId, agentId } = ctx;
+  const base = { companyId: issue.companyId, issueId: issue.id };
 
   let since: Date | null = null;
   try {
@@ -394,8 +438,10 @@ export async function evaluatePreReviewQualityLoop(
     })
     .finally(() => {
       runningChecks.delete(issue.id);
+      ctx.releaseSlot();
     });
   runningChecks.set(issue.id, job);
+  ctx.markStarted();
   return { message: PRE_REVIEW_RUNNING_MESSAGE };
 }
 
