@@ -1571,22 +1571,37 @@ export function issueRoutes(
     if (!isBoardOnlyBlockedActor(req)) return;
     const existing = context.existing ?? null;
     const bodySettings = body.executionWorkspaceSettings;
+    // On create, a child copies the parent's / inherit source's stored settings (the service only
+    // swaps `mode`), so those are the settings it will carry into whatever project it ends up in.
+    const inheritSources: Array<{ projectId: string | null; executionWorkspaceSettings: unknown }> = [];
+    if (!existing) {
+      for (const sourceId of [...(context.inheritFromIssueIds ?? []), body.parentId, body.inheritExecutionWorkspaceFromIssueId]) {
+        if (!sourceId) continue;
+        const source = await svc.getById(sourceId);
+        if (source && source.companyId === companyId) inheritSources.push(source);
+      }
+    }
+    const isNonEmptySettings = (value: unknown) =>
+      !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0;
+    // The service replaces the inherited `mode` with the source workspace's own, so only the
+    // strategy `type` (which it keeps) can carry a bypass from the parent into another project.
+    const inheritedSettings = inheritSources
+      .map((source) => source.executionWorkspaceSettings)
+      .filter(isNonEmptySettings)
+      .map((settings) => (settings as { workspaceStrategy?: { type?: unknown } }).workspaceStrategy?.type)
+      .filter((type): type is string => typeof type === "string")
+      .map((type) => ({ workspaceStrategy: { type } }));
     const storedSettings = existing?.executionWorkspaceSettings ?? null;
-    const storedHasSettings = !!storedSettings && typeof storedSettings === "object"
-      && !Array.isArray(storedSettings) && Object.keys(storedSettings).length > 0;
-    if (bodySettings === undefined && !storedHasSettings) return;
+    const storedHasSettings = isNonEmptySettings(storedSettings);
+    if (bodySettings === undefined && !storedHasSettings && inheritedSettings.length === 0) return;
 
     const candidateProjectIds = new Set<string>();
     if (typeof body.projectId === "string" && body.projectId) {
       candidateProjectIds.add(body.projectId);
     } else {
       if (existing?.projectId && body.projectId === undefined) candidateProjectIds.add(existing.projectId);
-      if (!existing) {
-        for (const sourceId of [...(context.inheritFromIssueIds ?? []), body.parentId, body.inheritExecutionWorkspaceFromIssueId]) {
-          if (!sourceId) continue;
-          const source = await svc.getById(sourceId);
-          if (source && source.companyId === companyId && source.projectId) candidateProjectIds.add(source.projectId);
-        }
+      for (const source of inheritSources) {
+        if (source.projectId) candidateProjectIds.add(source.projectId);
       }
       const projectWorkspaceId = body.projectWorkspaceId ?? existing?.projectWorkspaceId ?? null;
       if (projectWorkspaceId) {
@@ -1609,16 +1624,23 @@ export function issueRoutes(
       // Settings the request does not name are the stored ones: they only need checking when
       // the task is moving into a different project than the one they were stored under.
       if (bodySettings === undefined && unchangedProject) continue;
-      const settings = bodySettings !== undefined ? bodySettings : storedSettings;
       const project = await projectsSvc.getById(projectId);
       const policy = project?.executionWorkspacePolicy ?? null;
-      assertAgentIssueWorkspaceOverrideAllowed(req, { executionWorkspaceSettings: settings }, policy);
-      // A task `mode` can switch off the project's board-set commands/services without naming them.
-      // The stored mode only excuses a mode while the task stays in the project it was stored under.
-      assertBoardOnlyWorkspaceSettingsMutation(
-        req,
-        collectAgentTaskModeDropPaths(settings, policy, unchangedProject ? storedSettings : undefined),
-      );
+      // Settings the request does not name: the stored ones (PATCH) or the ones copied from the
+      // parent / inherit source (create). Each is checked under the project the task ends up in.
+      const settingsToCheck = bodySettings !== undefined
+        ? [bodySettings]
+        : storedHasSettings ? [storedSettings] : inheritedSettings;
+      for (const settings of settingsToCheck) {
+        assertAgentIssueWorkspaceOverrideAllowed(req, { executionWorkspaceSettings: settings }, policy);
+        // A task `mode` or strategy `type` can switch off the project's board-set commands/services
+        // without naming them. The stored value only excuses itself while the task stays in the
+        // project it was stored under.
+        assertBoardOnlyWorkspaceSettingsMutation(
+          req,
+          collectAgentTaskModeDropPaths(settings, policy, unchangedProject ? storedSettings : undefined),
+        );
+      }
     }
   };
   const goalsSvc = goalService(db);

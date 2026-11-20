@@ -730,5 +730,74 @@ describe("issue workspace command authorization", () => {
         .send({ executionWorkspaceSettings: { mode: "agent_default" } });
       expect(res.status).not.toBe(403);
     });
+    describe("workspaceStrategy.type that skips provision/teardown", () => {
+      it("refuses an agent create, PATCH and child create with a non-git_worktree type", async () => {
+        const app = await createApp(agentActor);
+        for (const type of ["project_primary", "adapter_managed", "cloud_sandbox"]) {
+          for (const executionWorkspaceSettings of [
+            { workspaceStrategy: { type } },
+            { mode: "isolated_workspace", workspaceStrategy: { type } },
+          ]) {
+            const created = await request(app)
+              .post(`/api/companies/${COMPANY_ID}/issues`)
+              .send({ title: "Skip", projectId: PROJECT_ID, executionWorkspaceSettings });
+            expect(created.status).toBe(403);
+            expect(created.body.error).toContain("workspaceStrategy.type");
+          }
+        }
+        const issue = makeIssue({ projectId: PROJECT_ID });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const patched = await request(app)
+          .patch("/api/issues/issue-1")
+          .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(patched.status).toBe(403);
+        expect(mockIssueService.create).not.toHaveBeenCalled();
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("allows git_worktree, a board user, and an agent resending the stored type", async () => {
+        const app = await createApp(agentActor);
+        const ok = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Ok", projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } } });
+        expect(ok.status).toBe(201);
+        const boardApp = await createApp(boardActor);
+        const board = await request(boardApp)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Board", projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(board.status).toBe(201);
+        const issue = makeIssue({ projectId: PROJECT_ID, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const resend = await request(app)
+          .patch("/api/issues/issue-1")
+          .send({ executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        expect(resend.status).not.toBe(403);
+      });
+
+      it("refuses an agent PATCH that moves a task with a stored non-worktree type into the project", async () => {
+        const issue = makeIssue({ projectId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.getByIdentifier.mockResolvedValue(issue);
+        const app = await createApp(agentActor);
+        const res = await request(app).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+        expect(res.status).toBe(403);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("refuses an agent create whose parent's stored type would be copied into the project", async () => {
+        const parentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        mockIssueService.getById.mockResolvedValue(
+          makeIssue({ id: parentId, projectId: null, executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } }),
+        );
+        const app = await createApp(agentActor);
+        const res = await request(app)
+          .post(`/api/companies/${COMPANY_ID}/issues`)
+          .send({ title: "Child", parentId, projectId: PROJECT_ID });
+        expect(res.status).toBe(403);
+        expect(mockIssueService.create).not.toHaveBeenCalled();
+      });
+    });
   });
 });

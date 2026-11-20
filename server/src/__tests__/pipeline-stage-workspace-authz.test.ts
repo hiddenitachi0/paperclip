@@ -154,4 +154,38 @@ describe("pipeline stage workspace settings authorization (DUR-5246)", () => {
       ),
     ).rejects.toMatchObject({ status: 403 });
   });
+  it("refuses an agent's workspaceStrategy.type that skips the project's provision/teardown commands", async () => {
+    const loader = vi.fn(async () => ({
+      enabled: true,
+      defaultMode: "isolated_workspace",
+      workspaceStrategy: { type: "git_worktree", provisionCommand: "pnpm i" },
+    }));
+    for (const type of ["project_primary", "adapter_managed", "cloud_sandbox"]) {
+      await expect(
+        assertAgentStageConfigWorkspaceSettingsAllowed(
+          agent,
+          { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type } } } },
+          null,
+          loader,
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+    }
+    // git_worktree is what the project already uses, and a board user is not bound.
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        agent,
+        { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree" } } } },
+        null,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertAgentStageConfigWorkspaceSettingsAllowed(
+        board,
+        { automation: { projectId: "p", executionWorkspaceSettings: { workspaceStrategy: { type: "project_primary" } } } },
+        null,
+        loader,
+      ),
+    ).resolves.toBeUndefined();
+  });
 });
