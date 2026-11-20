@@ -141,11 +141,33 @@ describe("withResolvedMergePrHeadCommit (card creation)", () => {
     ).rejects.toMatchObject({ status: 422, message });
   });
 
-  it("has nothing to look up without a repo / PR number, and leaves the payload alone", async () => {
+  it("has nothing to look up without a repo / PR number, and stores no commit", async () => {
     const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
     const fetchImpl = vi.fn();
     const original = { kind: "merge_pr", url: "https://github.com/acme/paperclip/pull/1" };
-    expect(await withResolvedMergePrHeadCommit({} as any, "company-a", original, { fetchImpl })).toBe(original);
+    expect(await withResolvedMergePrHeadCommit({} as any, "company-a", original, { fetchImpl })).toEqual(original);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // Security review of DUR-5222 (Finding 1): a filer-named commit must never be stored unchecked
+  // just because the card names no pull request GitHub can be asked about.
+  it.each([
+    ["only a url", { url: "https://github.com/o/r/pull/753" }],
+    ["a '#'-prefixed prNumber", { repo: "o/r", prNumber: "#753" }],
+    ["prNumber 0", { repo: "o/r", prNumber: 0 }],
+    ["a repo without an owner/name split", { repo: "o-r", prNumber: 753 }],
+    ["a repo with extra path segments", { repo: "o/r/x", prNumber: 753 }],
+  ])("drops a filer-named commit when the card has %s", async (_label, extra) => {
+    const { withResolvedMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    const fetchImpl = vi.fn();
+    const bad = "0".repeat(36) + "0bad";
+    const payload = await withResolvedMergePrHeadCommit(
+      {} as any,
+      "company-a",
+      { kind: "merge_pr", ...extra, commit: bad },
+      { fetchImpl },
+    );
+    expect(payload.commit).toBeUndefined();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -246,6 +268,25 @@ describe("refreshMergePrHeadCommit (on-demand refresh)", () => {
     );
 
     expect(result.headCommit).toBe("existing-head");
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it("fails closed: reports no commit when the card's PR cannot be identified", async () => {
+    const { refreshMergePrHeadCommit } = await import("./merge-card-head-commit.js");
+    const { db, updateCalls } = fakeDb({ id: "a1", companyId: "company-a", payload: {} });
+    const fetchImpl = vi.fn();
+
+    const result = await refreshMergePrHeadCommit(
+      db as any,
+      {
+        id: "a1",
+        companyId: "company-a",
+        payload: { kind: "merge_pr", url: "https://github.com/o/r/pull/1", prNumber: "#1", commit: "unverified" },
+      },
+      { fetchImpl },
+    );
+
+    expect(result.headCommit).toBeNull();
     expect(updateCalls).toHaveLength(0);
   });
 

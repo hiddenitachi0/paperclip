@@ -57,6 +57,12 @@ const mockPersonaService = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  // DUR-5222: filing a merge_pr card looks up the PR's head on GitHub; this suite is about who may
+  // file, not about GitHub, so the lookup is stubbed (merge-card-head-commit.test.ts covers it).
+  vi.doMock("../services/merge-card-head-commit.js", async () => ({
+    ...(await vi.importActual<typeof import("../services/merge-card-head-commit.js")>("../services/merge-card-head-commit.js")),
+    withResolvedMergePrHeadCommit: async (_db: unknown, _companyId: string, payload: Record<string, unknown>) => payload,
+  }));
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     agentInstructionsService: () => ({ readFile: vi.fn(), writeFile: vi.fn() }),
