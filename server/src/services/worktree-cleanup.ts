@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, inArray, like, ne, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, like, ne, or, sql } from "drizzle-orm";
 import { companies, executionWorkspaces, heartbeatRuns, issueComments, issues, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
@@ -19,11 +19,29 @@ export const DEFAULT_MERGED_WORKTREE_SWEEP_INTERVAL_MS = 15 * 60 * 1_000;
 /** DUR-5184: a worktree used more recently than this is never removed by the merged pass. */
 export const MERGED_WORKTREE_IDLE_MS = 30 * 60 * 1_000;
 
+/**
+ * DUR-5236: most worktrees one sweep may remove. Production holds ~1,000 worktree rows that
+ * were never selected before, so the first live sweeps would otherwise delete all of them at
+ * once. The rest wait for the next sweep. Kept (not removed) worktrees do not count.
+ */
+export const DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_SWEEP = 25;
+/**
+ * DUR-5236: most worktrees removed in any rolling 24 hours across both passes (counted from
+ * the archived rows, so it survives restarts). 25 per 15-minute sweep alone would be ~100 an
+ * hour. Operators raise it with PAPERCLIP_WORKTREE_CLEANUP_MAX_PER_DAY once the first days look right.
+ */
+export const DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_DAY = 50;
+/** DUR-5236: most "has unsaved work" comments one sweep may post; the rest wait for a later sweep. */
+export const DEFAULT_WORKTREE_CLEANUP_MAX_FLAGS_PER_SWEEP = 5;
+
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_FETCH_TIMEOUT_MS = 120_000;
 
 /** First line of the "has unsaved work" flag comment; also the de-dupe key. */
 export const WORKTREE_UNSAVED_WORK_MARKER = "<!-- worktree-cleanup:unsaved-work -->";
+
+/** DUR-5236: execution_workspaces.provider_type values that can back a managed worktree. */
+export const WORKTREE_PROVIDER_TYPES = ["git_worktree", "local_fs"];
 
 const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
 /**
@@ -72,7 +90,7 @@ const MERGED_PASS_SAFE_STATUSES = new Set(["done", "cancelled"]);
 
 export type WorktreeVerdict =
   | { action: "remove"; repoRoot: string; worktreePath: string }
-  | { action: "keep"; reason: string };
+  | { action: "keep"; reason: string; /** DUR-5236: the folder is already gone, so there is no work to lose and nothing to flag. */ missing?: boolean };
 
 async function git(args: string[], cwd: string, timeoutMs = GIT_TIMEOUT_MS): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
@@ -200,6 +218,11 @@ export async function evaluateWorktreeForRemoval(
   options: EvaluateWorktreeOptions = {},
 ): Promise<WorktreeVerdict> {
   try {
+    // DUR-5236: several rows can point at one folder, and folders get deleted by hand. A
+    // folder that does not exist holds no work: keep the row, but do not call it "unsaved work".
+    if (cwd && path.isAbsolute(cwd) && (await fs.lstat(cwd).then(() => false, (e: NodeJS.ErrnoException) => e.code === "ENOENT"))) {
+      return { action: "keep", reason: "the worktree folder no longer exists", missing: true };
+    }
     const { repoRoot, worktreePath } = await resolveManagedWorktree(cwd);
 
     const status = await git(["status", "--porcelain=v1", "--untracked-files=all"], worktreePath);
@@ -339,13 +362,20 @@ export interface WorktreeCleanupCandidate {
   branchName: string | null;
   /** DUR-5184. Defaults to "finished_task". "merged_pr" keeps silently instead of flagging. */
   mode?: WorktreeCleanupMode;
+  /** DUR-5236: other non-archived rows for the same folder; all qualified, and all are archived with this one. */
+  siblingWorkspaces?: Array<{ id: string; companyId: string }>;
 }
 
 export interface WorktreeCleanupDeps {
   listCandidates(now: Date, defaultRetentionDays: number): Promise<WorktreeCleanupCandidate[]>;
   /** DUR-5184: DB-backed deps only. */
   listMergedCandidates?(now: Date): Promise<WorktreeCleanupCandidate[]>;
-  flagUnsavedWork(candidate: WorktreeCleanupCandidate, reason: string): Promise<void>;
+  /** Returns false when no comment was posted (already flagged, or nothing to comment on); those do not count toward the per-sweep flag cap. */
+  flagUnsavedWork(candidate: WorktreeCleanupCandidate, reason: string): Promise<boolean | void>;
+  /** DUR-5236: true when another run or task is using this folder (checked right before removal). Fail closed: throw or true => keep. */
+  isInUse?(candidate: WorktreeCleanupCandidate): Promise<boolean>;
+  /** DUR-5236: how many worktrees the cleanup archived since `since`; feeds the daily cap. */
+  removedSince?(since: Date): Promise<number>;
   markCleaned(candidate: WorktreeCleanupCandidate, worktreePath: string, mode?: WorktreeCleanupMode): Promise<void>;
   evaluate?: typeof evaluateWorktreeForRemoval;
   remove?: typeof removeApprovedWorktree;
@@ -359,12 +389,63 @@ export interface WorktreeCleanupResult {
   failed: number;
   /** DUR-5184: local branches deleted with `git branch -d` after their worktree was removed. */
   branchesDeleted: number;
+  /** DUR-5236: kept because the folder no longer exists (no flag comment is posted for these). */
+  missing: number;
+  /** DUR-5236: dry run only -- worktrees that passed every safety check and would have been removed. */
+  wouldRemove: number;
+  /** DUR-5236: true when the per-sweep or daily removal cap stopped the sweep early. */
+  capped: boolean;
+  /** DUR-5236: true when it was the daily cap (not the per-sweep cap) that stopped it. */
+  dailyCapped: boolean;
+  /** DUR-5236: kept because another run or task is using the folder. */
+  inUse: number;
+  /** DUR-5236: "has unsaved work" comments posted this sweep. */
+  flagged: number;
+  /** DUR-5236: comments not posted this sweep because the per-sweep flag cap was reached. */
+  flagSuppressed: number;
+  /** DUR-5236: dry run only -- kept worktrees that a live sweep would post an "unsaved work" comment for. */
+  wouldFlag: number;
+  dryRun: boolean;
+  /** DUR-5236: dry run only -- exactly which folders a live sweep would remove. Not logged as part of the summary. */
+  plan: WorktreePlanItem[];
 }
+
+export interface WorktreePlanItem {
+  executionWorkspaceId: string;
+  cwd: string;
+  branchName: string | null;
+  issue: string | null;
+  mode: WorktreeCleanupMode;
+  reason: string;
+}
+
+const MODE_REASON: Record<WorktreeCleanupMode, string> = {
+  finished_task: "task done/cancelled past the retention period; folder clean and every commit on origin",
+  merged_pr: "branch merged into an origin branch; task done/cancelled; idle; folder clean and every commit on origin",
+  idle_run: "unused run folder (branch has no commits of its own); idle; folder clean",
+};
 
 export async function runWorktreeCleanup(
   deps: WorktreeCleanupDeps,
-  opts: { now?: Date; defaultRetentionDays?: number } = {},
+  opts: {
+    now?: Date;
+    defaultRetentionDays?: number;
+    /** DUR-5236: evaluate everything but remove, flag, or mark nothing; report `plan` and `wouldRemove`. */
+    dryRun?: boolean;
+    /** DUR-5236: stop after this many removals in one sweep (default 25). */
+    maxRemovals?: number;
+    /** DUR-5236: stop once this many worktrees were removed in the last 24 hours (default 50). Needs `deps.removedSince`. */
+    maxRemovalsPerDay?: number;
+    /** DUR-5236: post at most this many "unsaved work" comments per sweep (default 5). */
+    maxFlags?: number;
+    /** DUR-5236: folders already listed in a preview log, so a repeating dry run does not log them again. */
+    previewLogged?: Set<string>;
+  } = {},
 ): Promise<WorktreeCleanupResult> {
+  const dryRun = opts.dryRun === true;
+  const maxRemovals = Math.max(1, opts.maxRemovals ?? DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_SWEEP);
+  const maxPerDay = Math.max(0, opts.maxRemovalsPerDay ?? DEFAULT_WORKTREE_CLEANUP_MAX_REMOVALS_PER_DAY);
+  const maxFlags = Math.max(0, opts.maxFlags ?? DEFAULT_WORKTREE_CLEANUP_MAX_FLAGS_PER_SWEEP);
   const now = opts.now ?? new Date();
   const candidates = await deps.listCandidates(now, opts.defaultRetentionDays ?? DEFAULT_WORKTREE_CLEANUP_RETENTION_DAYS);
   const evaluate = deps.evaluate ?? evaluateWorktreeForRemoval;
@@ -377,11 +458,57 @@ export async function runWorktreeCleanup(
     kept: 0,
     failed: 0,
     branchesDeleted: 0,
+    missing: 0,
+    wouldRemove: 0,
+    capped: false,
+    dailyCapped: false,
+    inUse: 0,
+    flagged: 0,
+    flagSuppressed: 0,
+    wouldFlag: 0,
+    dryRun,
+    plan: [],
   };
 
+  // The daily cap is measured from the archived rows, so it holds across restarts and both passes.
+  let sweepCap = maxRemovals;
+  if (!dryRun && deps.removedSince) {
+    const alreadyToday = await deps.removedSince(new Date(now.getTime() - 24 * 60 * 60 * 1_000));
+    const dailyRemaining = Math.max(0, maxPerDay - alreadyToday);
+    if (dailyRemaining < sweepCap) {
+      sweepCap = dailyRemaining;
+      result.dailyCapped = true;
+    }
+  }
+
+  // At most a handful of comments per sweep; the rest are picked up by a later sweep.
+  const flag = async (candidate: WorktreeCleanupCandidate, reason: string) => {
+    if (dryRun) {
+      result.wouldFlag += 1;
+      return;
+    }
+    if (result.flagged >= maxFlags) {
+      result.flagSuppressed += 1;
+      return;
+    }
+    if ((await deps.flagUnsavedWork(candidate, reason)) !== false) result.flagged += 1;
+  };
+
+  const seenFolders = new Set<string>();
   for (const candidate of candidates) {
+    if (!dryRun && result.removed >= sweepCap) {
+      result.capped = true;
+      break;
+    }
+    // One folder, one decision: a second row for the same folder is never evaluated on its own.
+    if (seenFolders.has(candidate.cwd)) {
+      result.kept += 1;
+      continue;
+    }
+    seenFolders.add(candidate.cwd);
     try {
-      const mergedPass = candidate.mode === "merged_pr" || candidate.mode === "idle_run";
+      const mode = candidate.mode ?? "finished_task";
+      const mergedPass = mode === "merged_pr" || mode === "idle_run";
       const verdict = await evaluate(candidate.cwd, candidate.branchName, {
         requireMerged: candidate.mode === "merged_pr",
         requireUntouched: candidate.mode === "idle_run",
@@ -389,7 +516,35 @@ export async function runWorktreeCleanup(
       });
       if (verdict.action === "keep") {
         result.kept += 1;
-        if (!mergedPass) await deps.flagUnsavedWork(candidate, verdict.reason);
+        if (verdict.missing) result.missing += 1;
+        else if (!mergedPass) await flag(candidate, verdict.reason);
+        continue;
+      }
+      // Last look right before the destructive step: a run may have started on the folder
+      // while the (slow) git checks ran. Fail closed if the check itself fails.
+      if (deps.isInUse && (await deps.isInUse(candidate).catch(() => true))) {
+        result.kept += 1;
+        result.inUse += 1;
+        continue;
+      }
+      if (dryRun) {
+        result.wouldRemove += 1;
+        const item: WorktreePlanItem = {
+          executionWorkspaceId: candidate.executionWorkspaceId,
+          cwd: candidate.cwd,
+          branchName: candidate.branchName,
+          issue: candidate.flagIssueIdentifier,
+          mode,
+          reason: MODE_REASON[mode],
+        };
+        result.plan.push(item);
+        if (!opts.previewLogged?.has(candidate.cwd)) {
+          opts.previewLogged?.add(candidate.cwd);
+          logger.info(
+            { path: item.cwd, branch: item.branchName, task: item.issue, mode, reason: item.reason },
+            "Worktree cleanup preview (dry run): would remove this folder",
+          );
+        }
         continue;
       }
       try {
@@ -397,14 +552,18 @@ export async function runWorktreeCleanup(
       } catch (err) {
         // git refused (e.g. raced with new changes) -> keep + flag, never force.
         result.kept += 1;
-        if (!mergedPass) await deps.flagUnsavedWork(candidate, `git refused to remove the worktree (${firstLine(err)})`);
+        if (!mergedPass) await flag(candidate, `git refused to remove the worktree (${firstLine(err)})`);
         continue;
       }
       result.removed += 1;
+      logger.info(
+        { path: verdict.worktreePath, branch: candidate.branchName, task: candidate.flagIssueIdentifier, mode },
+        "Worktree cleanup removed this folder",
+      );
       const branch = await deleteBranch(verdict.repoRoot, candidate.branchName);
       if (branch.deleted) result.branchesDeleted += 1;
       else logger.info({ branchName: candidate.branchName, reason: branch.reason }, "Worktree removed; local branch kept");
-      await deps.markCleaned(candidate, verdict.worktreePath, candidate.mode ?? "finished_task");
+      await deps.markCleaned(candidate, verdict.worktreePath, mode);
     } catch (err) {
       result.failed += 1;
       logger.warn({ err, executionWorkspaceId: candidate.executionWorkspaceId }, "Worktree cleanup failed for one workspace");
@@ -436,7 +595,9 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
       .where(
         and(
           eq(executionWorkspaces.strategyType, "git_worktree"),
-          eq(executionWorkspaces.providerType, "local_fs"),
+          // DUR-5236: heartbeat writes "git_worktree" for every worktree it creates; "local_fs"
+          // is the column default and may exist on older rows. Accept both.
+          inArray(executionWorkspaces.providerType, WORKTREE_PROVIDER_TYPES),
           ne(executionWorkspaces.status, "archived"),
           like(executionWorkspaces.cwd, "%/.paperclip/worktrees/%"),
         ),
@@ -508,7 +669,78 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
     return viaIssue.length > 0;
   }
 
+  const folderKey = (cwd: string) => path.normalize(cwd).replace(/\/+$/, "");
+
+  /**
+   * DUR-5236: true when a queued or running run names this exact folder in its workspace
+   * context. Locks are per task, not per folder, so this is checked on the folder itself.
+   */
+  async function isFolderInUse(cwd: string): Promise<boolean> {
+    const rows = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+          or(
+            sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'cwd' = ${cwd}`,
+            sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'worktreePath' = ${cwd}`,
+          ),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  /**
+   * DUR-5236: one folder can back several workspace rows (they can even belong to other
+   * tasks). A folder is only a candidate when EVERY non-archived row for it (of any type)
+   * qualified in this pass, they all agree on the branch, and nothing is running in it.
+   * The folder is returned once; its other rows ride along so they are archived together.
+   */
+  async function oneCandidatePerFolder(found: WorktreeCleanupCandidate[]): Promise<WorktreeCleanupCandidate[]> {
+    if (found.length === 0) return [];
+    const folderRows = await db
+      .select({
+        id: executionWorkspaces.id,
+        companyId: executionWorkspaces.companyId,
+        cwd: executionWorkspaces.cwd,
+        branchName: executionWorkspaces.branchName,
+      })
+      .from(executionWorkspaces)
+      .where(and(ne(executionWorkspaces.status, "archived"), like(executionWorkspaces.cwd, "%/.paperclip/worktrees/%")));
+    const rowsByFolder = new Map<string, typeof folderRows>();
+    for (const row of folderRows) {
+      if (!row.cwd) continue;
+      const key = folderKey(row.cwd);
+      rowsByFolder.set(key, [...(rowsByFolder.get(key) ?? []), row]);
+    }
+    const candidatesByFolder = new Map<string, WorktreeCleanupCandidate[]>();
+    for (const c of found) {
+      const key = folderKey(c.cwd);
+      candidatesByFolder.set(key, [...(candidatesByFolder.get(key) ?? []), c]);
+    }
+    const out: WorktreeCleanupCandidate[] = [];
+    for (const [key, group] of candidatesByFolder) {
+      const rows = rowsByFolder.get(key) ?? [];
+      const qualified = new Set(group.map((c) => c.executionWorkspaceId));
+      if (rows.length === 0 || rows.some((r) => !qualified.has(r.id))) continue; // another row still needs the folder
+      if (new Set(rows.map((r) => r.branchName ?? "")).size > 1) continue; // rows disagree about the branch
+      if (await isFolderInUse(group[0]!.cwd)) continue;
+      const [first, ...rest] = group;
+      out.push({
+        ...first!,
+        siblingWorkspaces: rest.map((c) => ({ id: c.executionWorkspaceId, companyId: c.companyId })),
+      });
+    }
+    return out;
+  }
+
   async function listFinishedCandidates(now: Date, defaultRetentionDays: number): Promise<WorktreeCleanupCandidate[]> {
+    return oneCandidatePerFolder(await listFinishedRowCandidates(now, defaultRetentionDays));
+  }
+
+  async function listFinishedRowCandidates(now: Date, defaultRetentionDays: number): Promise<WorktreeCleanupCandidate[]> {
     const workspaces = await loadWorkspaceRows();
     const out: WorktreeCleanupCandidate[] = [];
     for (const ws of workspaces) {
@@ -522,7 +754,7 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
         // else will ever mark it finished. Once it has sat unused for the retention
         // period it is eligible; every safety check still applies. Any other
         // worktree with no linked task still cannot be proven finished => left alone.
-        if (ws.branchName?.startsWith("run-") && ws.lastUsedAt.getTime() <= cutoff) {
+        if (ws.branchName?.startsWith("run-") && ws.lastUsedAt.getTime() <= cutoff && !(await hasLiveRun(ws, []))) {
           out.push({
             executionWorkspaceId: ws.id,
             companyId: ws.companyId,
@@ -548,6 +780,7 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
         }
       }
       if (!eligible) continue;
+      if (await hasLiveRun(ws, linked)) continue;
 
       const flagIssue = linked.find((i) => i.id === ws.sourceIssueId) ?? linked[0]!;
       out.push({
@@ -570,6 +803,10 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
    * everything else silently.
    */
   async function listMergedCandidates(now: Date): Promise<WorktreeCleanupCandidate[]> {
+    return oneCandidatePerFolder(await listMergedRowCandidates(now));
+  }
+
+  async function listMergedRowCandidates(now: Date): Promise<WorktreeCleanupCandidate[]> {
     const workspaces = await loadWorkspaceRows();
     const idleCutoff = now.getTime() - MERGED_WORKTREE_IDLE_MS;
     const out: WorktreeCleanupCandidate[] = [];
@@ -615,13 +852,38 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
     listCandidates: listFinishedCandidates,
     listMergedCandidates,
 
+    async isInUse(candidate) {
+      if (await isFolderInUse(candidate.cwd)) return true;
+      for (const ws of [
+        { id: candidate.executionWorkspaceId, companyId: candidate.companyId },
+        ...(candidate.siblingWorkspaces ?? []),
+      ]) {
+        const linked = await loadLinkedIssues({ ...ws, sourceIssueId: null });
+        if (await hasLiveRun(ws, linked)) return true;
+      }
+      return false;
+    },
+
+    async removedSince(since) {
+      const rows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(executionWorkspaces)
+        .where(
+          and(
+            like(executionWorkspaces.cleanupReason, "auto_cleanup_%"),
+            gte(executionWorkspaces.closedAt, since),
+          ),
+        );
+      return rows[0]?.n ?? 0;
+    },
+
     async flagUnsavedWork(candidate, reason) {
       if (!candidate.flagIssueId) {
         logger.info(
           { executionWorkspaceId: candidate.executionWorkspaceId, reason, cwd: candidate.cwd },
           "Worktree of an issue-less run kept; nothing to comment on",
         );
-        return;
+        return false;
       }
       const flagIssueId = candidate.flagIssueId;
       const existing = await db
@@ -634,7 +896,7 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
           ),
         )
         .limit(1);
-      if (existing.length > 0) return;
+      if (existing.length > 0) return false;
       const body = [
         WORKTREE_UNSAVED_WORK_MARKER,
         "**Has unsaved work — worktree kept.** The automatic cleanup of finished-task worktrees skipped this task's worktree so nothing is lost.",
@@ -655,6 +917,7 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
         entityId: flagIssueId,
         details: { executionWorkspaceId: candidate.executionWorkspaceId, reason, cwd: candidate.cwd },
       });
+      return true;
     },
 
     async markCleaned(candidate, worktreePath, mode = "finished_task") {
@@ -673,9 +936,11 @@ export function createDbWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
           updatedAt: now,
         })
         .where(
-          and(
-            eq(executionWorkspaces.id, candidate.executionWorkspaceId),
-            eq(executionWorkspaces.companyId, candidate.companyId),
+          or(
+            ...[
+              { id: candidate.executionWorkspaceId, companyId: candidate.companyId },
+              ...(candidate.siblingWorkspaces ?? []),
+            ].map((w) => and(eq(executionWorkspaces.id, w.id), eq(executionWorkspaces.companyId, w.companyId))),
           ),
         );
       if (!candidate.flagIssueId) return;
@@ -706,12 +971,24 @@ export function createDbMergedWorktreeCleanupDeps(db: Db): WorktreeCleanupDeps {
   };
 }
 
+/**
+ * DUR-5236: removal is opt-in. Only PAPERCLIP_WORKTREE_CLEANUP_LIVE=true turns it on, and
+ * PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN=true overrides that back to preview. Anything else previews.
+ */
+export function worktreeCleanupDryRunFromEnv(env: Record<string, string | undefined>): boolean {
+  return !(env.PAPERCLIP_WORKTREE_CLEANUP_LIVE === "true" && env.PAPERCLIP_WORKTREE_CLEANUP_DRY_RUN !== "true");
+}
+
 export function startWorktreeCleanup(
   db: Db,
   intervalMs: number = DEFAULT_WORKTREE_CLEANUP_INTERVAL_MS,
   defaultRetentionDays: number = DEFAULT_WORKTREE_CLEANUP_RETENTION_DAYS,
   mergedIntervalMs: number = DEFAULT_MERGED_WORKTREE_SWEEP_INTERVAL_MS,
+  options: { dryRun?: boolean; maxRemovals?: number; maxRemovalsPerDay?: number; maxFlags?: number } = {},
 ): () => void {
+  // DUR-5236: removing folders is opt-in. Unless the caller says `dryRun: false`, every sweep
+  // only previews (logs which folders it would remove) and changes nothing.
+  const sweepOptions = { ...options, dryRun: options.dryRun ?? true, previewLogged: new Set<string>() };
   const deps = createDbWorktreeCleanupDeps(db);
   const mergedDeps = createDbMergedWorktreeCleanupDeps(db);
   // One shared lock: the two passes never run at the same time.
@@ -720,15 +997,15 @@ export function startWorktreeCleanup(
     if (running) return;
     running = true;
     run()
-      .then((r) => logger.info(r, `${label} finished`))
+      .then(({ plan: _plan, ...summary }) => logger.info(summary, `${label} finished`))
       .catch((err) => logger.warn({ err }, `${label} failed`))
       .finally(() => {
         running = false;
       });
   };
-  const tick = guarded("Worktree cleanup sweep", () => runWorktreeCleanup(deps, { defaultRetentionDays }));
+  const tick = guarded("Worktree cleanup sweep", () => runWorktreeCleanup(deps, { defaultRetentionDays, ...sweepOptions }));
   const mergedTick = guarded("Merged-branch worktree sweep", () =>
-    runWorktreeCleanup(mergedDeps, { defaultRetentionDays }),
+    runWorktreeCleanup(mergedDeps, { defaultRetentionDays, ...sweepOptions }),
   );
   const timer = setInterval(tick, intervalMs);
   const mergedTimer = setInterval(mergedTick, mergedIntervalMs);

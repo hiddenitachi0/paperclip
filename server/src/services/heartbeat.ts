@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { isWorktreeInUseByAnotherRun as isWorktreeInUseByAnotherRunQuery } from "./worktree-in-use.js";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
@@ -3140,7 +3141,23 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
   requestedExecutionWorkspaceId: string | null;
   requestedShouldReuseExisting: boolean;
   existingExecutionWorkspaceAvailable: boolean;
+  /** DUR-5237: the stored folder was archived by the automatic cleanup and is rebuilt for this run. */
+  existingExecutionWorkspaceRebuiltAfterCleanup: boolean;
 };
+
+/** DUR-5237: cleanup_reason values written by the automatic worktree cleanup. */
+export function isAutoCleanupArchivedWorkspace(input: {
+  status?: string | null;
+  cleanupReason?: string | null;
+  strategyType?: string | null;
+}) {
+  return (
+    input.status === "archived" &&
+    input.strategyType === "git_worktree" &&
+    typeof input.cleanupReason === "string" &&
+    input.cleanupReason.startsWith("auto_cleanup_")
+  );
+}
 
 export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   issueExecutionWorkspaceId?: string | null;
@@ -3149,6 +3166,8 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   /** DUR-5184: the project demands a private git worktree for every run. */
   requireIsolation?: boolean;
   existingExecutionWorkspaceStrategyType?: string | null;
+  /** DUR-5237: why the stored folder was archived; only the automatic cleanup is rebuilt. */
+  existingExecutionWorkspaceCleanupReason?: string | null;
 }): ExecutionWorkspaceReuseRequestForIssue {
   const requestedExecutionWorkspaceId = readNonEmptyString(input.issueExecutionWorkspaceId);
   // DUR-5184: under requireIsolation a task still bound to the shared project
@@ -3164,6 +3183,17 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
     requestedExecutionWorkspaceId !== null &&
     !reuseTargetBreaksIsolation;
 
+  // DUR-5237: a done/cancelled task whose merged folder the automatic cleanup
+  // removed keeps its binding; the restore path rebuilds the folder from the
+  // task's branch (or the project branch when that branch is gone).
+  const rebuiltAfterCleanup =
+    requestedShouldReuseExisting &&
+    isAutoCleanupArchivedWorkspace({
+      status: input.existingExecutionWorkspaceStatus,
+      cleanupReason: input.existingExecutionWorkspaceCleanupReason,
+      strategyType: input.existingExecutionWorkspaceStrategyType,
+    });
+
   return {
     requestedExecutionWorkspaceId,
     requestedShouldReuseExisting,
@@ -3171,7 +3201,8 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
       requestedShouldReuseExisting &&
       input.existingExecutionWorkspaceStatus !== null &&
       input.existingExecutionWorkspaceStatus !== undefined &&
-      input.existingExecutionWorkspaceStatus !== "archived",
+      (input.existingExecutionWorkspaceStatus !== "archived" || rebuiltAfterCleanup),
+    existingExecutionWorkspaceRebuiltAfterCleanup: rebuiltAfterCleanup,
   };
 }
 
@@ -12154,6 +12185,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
       requireIsolation: projectRequiresIsolation(projectExecutionWorkspacePolicy),
       existingExecutionWorkspaceStrategyType: existingExecutionWorkspace?.strategyType ?? null,
+      existingExecutionWorkspaceCleanupReason: existingExecutionWorkspace?.cleanupReason ?? null,
     });
     const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
     const reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
@@ -12626,26 +12658,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null,
       issueId,
     });
-    // DUR-5184: locks are per task, not per folder. Before a start-of-run branch
-    // switch, check no other running run (any task) is working in this folder.
-    const isWorktreeInUseByAnotherRun = async (worktreePath: string) => {
-      const rows = await db
-        .select({ id: heartbeatRuns.id })
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.companyId, agent.companyId),
-            eq(heartbeatRuns.status, "running"),
-            ne(heartbeatRuns.id, run.id),
-            or(
-              sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'cwd' = ${worktreePath}`,
-              sql`${heartbeatRuns.contextSnapshot} -> 'paperclipWorkspace' ->> 'worktreePath' = ${worktreePath}`,
-            ),
-          ),
-        )
-        .limit(1);
-      return rows.length > 0;
-    };
+    // DUR-5184 / DUR-5237: locks are per task, not per folder; see worktree-in-use.ts.
+    const isWorktreeInUseByAnotherRun = (worktreePath: string) =>
+      isWorktreeInUseByAnotherRunQuery(db, {
+        companyId: agent.companyId,
+        runId: run.id,
+        worktreePath,
+      });
     const { executionWorkspace, reusedExecutionWorkspace, policy: resolvedWorkspaceReusePolicy } =
       await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>({
         requestedShouldReuseExisting,
@@ -12730,6 +12749,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             status: "active",
             lastUsedAt: new Date(),
             metadata: nextExecutionWorkspaceMetadata,
+            // DUR-5237: a folder the automatic cleanup archived is live again.
+            ...(workspaceReuseRequest.existingExecutionWorkspaceRebuiltAfterCleanup
+              ? { closedAt: null, cleanupReason: null, cleanupEligibleAt: null }
+              : {}),
           })
         : resolvedProjectId
           ? await executionWorkspacesSvc.create({
@@ -12805,6 +12828,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       throw error;
     }
     await workspaceOperationRecorder.attachExecutionWorkspaceId(persistedExecutionWorkspace?.id ?? null);
+    if (
+      workspaceReuseRequest.existingExecutionWorkspaceRebuiltAfterCleanup &&
+      persistedExecutionWorkspace &&
+      issueId
+    ) {
+      // DUR-5237: one plain note so nobody wonders why the folder looks new.
+      const rebuiltBranch = executionWorkspace.branchName;
+      const note = executionWorkspace.created
+        ? `This task's folder was removed by the automatic cleanup, and its branch${rebuiltBranch ? ` \`${rebuiltBranch}\`` : ""} no longer exists. A fresh folder was built from the project branch${executionWorkspace.repoRef ? ` \`${executionWorkspace.repoRef}\`` : ""} and the task is using it again.`
+        : `This task's folder was removed by the automatic cleanup. A fresh folder was built from the task's branch${rebuiltBranch ? ` \`${rebuiltBranch}\`` : ""} and the task is using it again.`;
+      try {
+        await issuesSvc.addComment(issueId, note, {}, { authorType: "system" });
+      } catch (err) {
+        logger.warn({ err, runId: run.id, issueId }, "Failed to post the rebuilt-folder note");
+      }
+    }
     await recordWorkspaceConfigFreshnessOperation({
       recorder: workspaceOperationRecorder,
       runId: run.id,

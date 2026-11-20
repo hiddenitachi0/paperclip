@@ -2,9 +2,13 @@ import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import { companyScope } from "../middleware/company-scope.js";
-import { forbidden } from "../errors.js";
+import { badRequest, forbidden } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { tradingTraderService } from "../services/trading-trader.js";
+import { tradingEvaluatorService } from "../services/trading-evaluator.js";
+import type { TradingMarketDataSource } from "../services/trading-market-data.js";
+import { TRADING_LLM_PROBABILITY_BOUNDS } from "@paperclipai/shared";
+import { z } from "zod";
 
 /**
  * DUR-5004: the Trader agent's trading tools. Every route here is agent-only
@@ -23,7 +27,23 @@ import { tradingTraderService } from "../services/trading-trader.js";
  * change itself, with no card, only from a finished experiment that passed every
  * check at double fees (see trading-trader.ts applyChange). These routes never
  * take a strategy status, a mode, a wallet or an order.
+ *
+ * DUR-5020: `forecasts` logs the Trader's own probability call to the prediction
+ * ledger (forecaster_kind 'llm'). The body has no time, price, bar or version:
+ * the server picks the bar that just closed and the database stamps the time.
+ * The call is scored forward only and has no path to an order.
  */
+
+/** The only fields a forecast call may carry. Anything else (a timestamp, a price, a bar) is refused. */
+const logForecastBodySchema = z
+  .object({
+    probabilityUp: z.number().min(TRADING_LLM_PROBABILITY_BOUNDS.min).max(TRADING_LLM_PROBABILITY_BOUNDS.max).refine((p) => p !== 0.5, "A probability of exactly 50% is no call; pick a side."),
+    reason: z
+      .string()
+      .transform((r) => r.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim())
+      .pipe(z.string().min(5).max(500)),
+  })
+  .strict();
 
 function requireAgentActor(req: Request): { agentId: string; companyId: string } {
   if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
@@ -32,10 +52,11 @@ function requireAgentActor(req: Request): { agentId: string; companyId: string }
   return { agentId: req.actor.agentId, companyId: req.actor.companyId };
 }
 
-export function agentTradingRoutes(rawDb: Db) {
+export function agentTradingRoutes(rawDb: Db, deps: { marketData?: TradingMarketDataSource; now?: () => Date } = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const trader = tradingTraderService(db, rawDb);
+  const evaluator = tradingEvaluatorService(db, { marketData: deps.marketData, now: deps.now });
 
   /** Agent-only (the company comes from the agent's own token), then the designation check inside the handler. */
   function agentScope() {
@@ -175,6 +196,30 @@ export function agentTradingRoutes(rawDb: Db) {
       details: { strategyId, ledgerEntryId: result.ledgerEntryId, tagged: result.tagged },
     });
     res.status(201).json(result);
+  });
+
+  // DUR-5020: log the Trader's own probability call for a strategy's newest closed bar. Forward only, never backtested, no effect on orders.
+  router.post("/agent-trading/strategies/:strategyId/forecasts", agentScope(), async (req, res) => {
+    const { agentId, companyId } = await designated(req);
+    const strategyId = req.params.strategyId as string;
+    const parsed = logForecastBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw badRequest("Invalid forecast. Send only probabilityUp (0.01 to 0.99, not 0.5) and a short reason.", parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strategyId)) throw badRequest("Invalid strategy id.");
+    const row = await evaluator.logLlmForecast(companyId, { strategyId, ...parsed.data });
+    await logActivity(db, {
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "trading.trader_logged_forecast",
+      entityType: "agent",
+      entityId: agentId,
+      details: { strategyId, predictionId: row.id, direction: row.direction, probabilityUp: row.probabilityUp, barCloseAt: row.barCloseAt.toISOString() },
+    });
+    res.status(201).json({
+      ...row,
+      message: "Your call is logged and will be scored when it resolves. It is never edited, never backtested and has no effect on any order.",
+    });
   });
 
   return router;

@@ -41,6 +41,17 @@ function collectExecutionWorkspaceConfigCommandPaths(raw: unknown, prefix: strin
   return paths;
 }
 
+/**
+ * DUR-5231: an agent tried to set a protected project setting to something other than what the
+ * board stored. The settings are not all commands, so the wording stays neutral.
+ */
+export function assertNoAgentProtectedProjectSettingChange(req: Request, paths: string[]) {
+  if (req.actor.type !== "agent" || paths.length === 0) return;
+  throw forbidden(
+    `This project has settings only the board can change (${paths.join(", ")}). Your update would change them. Leave them out, or ask the board.`,
+  );
+}
+
 export function assertNoAgentHostWorkspaceCommandMutation(req: Request, paths: string[]) {
   if (req.actor.type !== "agent" || paths.length === 0) return;
   throw forbidden(
@@ -75,7 +86,79 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
   if (hasOwn(policy, "requireIsolation")) {
     paths.push("executionWorkspacePolicy.requireIsolation");
   }
+  // DUR-5242: authorizationPolicy decides whether assignments into the project need
+  // approval and which trust preset/boundary applies, so only the board (or a plugin)
+  // may set it. On create there is nothing stored, so naming the key at all is refused.
+  if (hasOwn(policy, "authorizationPolicy")) {
+    paths.push("executionWorkspacePolicy.authorizationPolicy");
+  }
   return paths;
+}
+
+/**
+ * DUR-5231: a project PATCH replaces the whole `executionWorkspacePolicy`, so an agent that
+ * leaves a board-set protected field out (or sends `null`, or `{ enabled: false }`) would wipe
+ * it without ever naming it. For agent writes the stored protected fields are carried forward
+ * into the new policy instead, and the write is refused only when the agent sends a *different*
+ * value. Protected fields: requireIsolation, workspaceRuntime, authorizationPolicy and the
+ * strategy provision/teardown commands. Everything else in the policy stays editable.
+ *
+ * `changedPaths` lists protected fields the agent set to a value other than the stored one.
+ * `policy` is what should be written: the agent's policy plus the carried-forward fields.
+ * Only call this when the body actually contains `executionWorkspacePolicy`.
+ */
+export function carryForwardProtectedProjectPolicyFields(
+  nextPolicy: unknown,
+  storedPolicy: unknown,
+): { policy: unknown; changedPaths: string[] } {
+  const stored = isRecord(storedPolicy) ? storedPolicy : {};
+  const next = isRecord(nextPolicy) ? nextPolicy : null;
+  const named = (key: string) => next !== null && hasOwn(next, key) && next[key] !== undefined;
+  const changedPaths: string[] = [];
+  const carried: Record<string, unknown> = {};
+
+  // requireIsolation only means something when it is true; false and absent are the same setting.
+  const storedIsolation = stored.requireIsolation === true;
+  if (named("requireIsolation")) {
+    if ((next!.requireIsolation === true) !== storedIsolation) {
+      changedPaths.push("executionWorkspacePolicy.requireIsolation");
+    }
+  } else if (storedIsolation) {
+    carried.requireIsolation = true;
+  }
+
+  // Whole-value fields. authorizationPolicy (DUR-5242) decides whether assignments into the
+  // project need approval, so it is board-only like the host-run workspaceRuntime.
+  for (const key of ["workspaceRuntime", "authorizationPolicy"] as const) {
+    const storedValue = stored[key] ?? null;
+    if (named(key)) {
+      if (!sameValue(next![key], storedValue)) changedPaths.push(`executionWorkspacePolicy.${key}`);
+    } else if (storedValue !== null) {
+      carried[key] = storedValue;
+    }
+  }
+
+  const storedStrategy = isRecord(stored.workspaceStrategy) ? stored.workspaceStrategy : null;
+  const nextStrategy = next && isRecord(next.workspaceStrategy) ? next.workspaceStrategy : null;
+  const carriedCommands: Record<string, unknown> = {};
+  for (const key of ["provisionCommand", "teardownCommand"] as const) {
+    const storedCommand = storedStrategy?.[key] ?? null;
+    if (nextStrategy && nextStrategy[key] !== undefined) {
+      if (!sameValue(nextStrategy[key], storedCommand)) {
+        changedPaths.push(`executionWorkspacePolicy.workspaceStrategy.${key}`);
+      }
+    } else if (storedCommand !== null) {
+      carriedCommands[key] = storedCommand;
+    }
+  }
+  if (Object.keys(carriedCommands).length > 0) {
+    // Strategy left out or not an object: keep the stored one whole. Otherwise keep the
+    // agent's strategy and add back only the commands it left out.
+    carried.workspaceStrategy = nextStrategy ? { ...nextStrategy, ...carriedCommands } : storedStrategy;
+  }
+
+  if (Object.keys(carried).length === 0) return { policy: nextPolicy, changedPaths };
+  return { policy: { enabled: false, ...(next ?? {}), ...carried }, changedPaths };
 }
 
 /**
