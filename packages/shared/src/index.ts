@@ -3100,6 +3100,7 @@ export * from "./trading-spec.js";
 export * from "./trading-backtest.js";
 export * from "./trading-criteria.js";
 export * from "./trading-experiment.js";
+export * from "./trading-trader.js";
 export * from "./trading-templates.js";
 export * from "./trading-indicators.js";
 
