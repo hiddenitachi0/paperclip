@@ -67,6 +67,7 @@ import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
 import { openSecretBundle, sealSecretBundle, SecretBundlePassphraseError } from "./portable-secret-bundle.js";
 import { renderOrgChartPng, type OrgNode } from "../routes/org-chart-svg.js";
+import { collectImportedWorkspaceCodeLocationFields } from "../routes/workspace-command-authz.js";
 import { companySkillService } from "./company-skills.js";
 import { companyService } from "./companies.js";
 import { validateCron } from "./cron.js";
@@ -166,9 +167,9 @@ function collectAgentSafeImportPolicyErrors(
         if (workspace.cleanupCommand) {
           errors.push(`Safe import does not allow project ${project.slug} workspace ${workspace.key} cleanupCommand.`);
         }
-        // The pre-review test command is a shell string the server runs; board users only.
-        if (workspace.metadata && workspace.metadata.testCommand != null) {
-          errors.push(`Safe import does not allow project ${project.slug} workspace ${workspace.key} metadata.testCommand.`);
+        // DUR-5208: where a project's code lives is board-only.
+        for (const field of collectImportedWorkspaceCodeLocationFields(workspace)) {
+          errors.push(`Safe import does not allow project ${project.slug} workspace ${workspace.key} ${field}.`);
         }
       }
     }
