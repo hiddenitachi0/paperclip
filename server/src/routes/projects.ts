@@ -528,7 +528,7 @@ export function projectRoutes(rawDb: Db) {
       }
       assertNoAgentHostWorkspaceCommandMutation(
         req,
-        collectProjectWorkspaceCommandPaths(req.body),
+        collectProjectWorkspaceCommandPaths(req.body, "", { includeMetadataTestCommand: false }),
       );
       const currentWorkspace = (await svc.listWorkspaces(id)).find((workspace) => workspace.id === workspaceId);
       if (!currentWorkspace) {

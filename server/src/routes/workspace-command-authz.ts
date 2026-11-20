@@ -143,6 +143,7 @@ export function collectProjectDeployTransportCommandPaths(body: unknown): string
 export function collectProjectWorkspaceCommandPaths(
   workspacePatch: unknown,
   prefix = "",
+  options: { includeMetadataTestCommand?: boolean } = {},
 ): string[] {
   if (!isRecord(workspacePatch)) return [];
   const paths: string[] = [];
@@ -152,7 +153,13 @@ export function collectProjectWorkspaceCommandPaths(
   if (hasOwn(workspacePatch, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
     paths.push(prefixPath(prefix, PROJECT_WORKSPACE_TEST_COMMAND_KEY));
   }
-  if (isRecord(workspacePatch.metadata) && hasOwn(workspacePatch.metadata, PROJECT_WORKSPACE_TEST_COMMAND_KEY)) {
+  // A PATCH of an existing workspace passes includeMetadataTestCommand: false: the board-only
+  // code-location check compares against the stored value, so resending it unchanged is allowed.
+  if (
+    options.includeMetadataTestCommand !== false
+    && isRecord(workspacePatch.metadata)
+    && hasOwn(workspacePatch.metadata, PROJECT_WORKSPACE_TEST_COMMAND_KEY)
+  ) {
     paths.push(prefixPath(prefix, `metadata.${PROJECT_WORKSPACE_TEST_COMMAND_KEY}`));
   }
   return paths;
