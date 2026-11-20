@@ -1,6 +1,7 @@
 import type { Request } from "express";
 import { PROJECT_WORKSPACE_TEST_COMMAND_KEY } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
+import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -451,7 +452,9 @@ export function collectAgentTaskModeDropPaths(
   existingSettings?: unknown,
 ): string[] {
   if (!isRecord(settings) || !isRecord(projectPolicy)) return [];
-  const mode = settings.mode;
+  // Use the same reading of `mode` the run does: the old names `project_primary` and `isolated`
+  // still resolve to `shared_workspace` and `isolated_workspace` there.
+  const mode = parseIssueExecutionWorkspaceSettings(settings)?.mode;
   if (mode !== "shared_workspace" && mode !== "agent_default" && mode !== "operator_branch") return [];
   if (projectPolicy.enabled !== true || projectPolicy.requireIsolation === true) return [];
   const strategy = isRecord(projectPolicy.workspaceStrategy) ? projectPolicy.workspaceStrategy : null;
@@ -467,7 +470,7 @@ export function collectAgentTaskModeDropPaths(
         ? "agent_default"
         : "shared_workspace";
   if (mode === defaultMode) return [];
-  if (isRecord(existingSettings) && existingSettings.mode === mode) return [];
+  if (parseIssueExecutionWorkspaceSettings(existingSettings)?.mode === mode) return [];
   return ["executionWorkspaceSettings.mode"];
 }
 

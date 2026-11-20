@@ -673,6 +673,53 @@ describe("issue workspace command authorization", () => {
       expect(bare.status).toBe(201);
     });
 
+    const OTHER_PROJECT_ID = "99999999-9999-4999-8999-999999999999";
+    const policyFor = (id: string) =>
+      id === PROJECT_ID
+        ? { id, executionWorkspacePolicy: { enabled: true, allowIssueOverride: false, ...stored } }
+        : { id, executionWorkspacePolicy: null };
+
+    it("refuses an agent PATCH that moves a task with stored agent_default into a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      const issue = makeIssue({ projectId: null, executionWorkspaceSettings: { mode: "agent_default" } });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      // Moving it somewhere unprotected is fine, and so is a board user moving it.
+      const elsewhere = await request(app).patch("/api/issues/issue-1").send({ projectId: OTHER_PROJECT_ID });
+      expect(elsewhere.status).not.toBe(403);
+      const boardApp = await createApp(boardActor);
+      const board = await request(boardApp).patch("/api/issues/issue-1").send({ projectId: PROJECT_ID });
+      expect(board.status).not.toBe(403);
+    });
+
+    it("refuses an agent create that names only a parent in a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      mockIssueService.getById.mockResolvedValue(makeIssue({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", projectId: PROJECT_ID }));
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/issues`)
+        .send({ title: "Child", parentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).toBe(403);
+      expect(mockIssueService.create).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent PATCH with projectId null and an execution workspace in a protected project", async () => {
+      mockProjectService.getById.mockImplementation(async (id: string) => policyFor(id));
+      mockExecutionWorkspaceService.getById.mockResolvedValue({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", companyId: COMPANY_ID, projectId: PROJECT_ID });
+      const issue = makeIssue({ projectId: OTHER_PROJECT_ID });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.getByIdentifier.mockResolvedValue(issue);
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/issues/issue-1")
+        .send({ projectId: null, executionWorkspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", executionWorkspaceSettings: { mode: "agent_default" } });
+      expect(res.status).toBe(403);
+    });
+
     it("lets an agent resend the task's stored mode on PATCH", async () => {
       const issue = makeIssue({ projectId: PROJECT_ID, executionWorkspaceSettings: { mode: "agent_default" } });
       mockIssueService.getById.mockResolvedValue(issue);

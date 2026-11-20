@@ -1542,21 +1542,84 @@ export function issueRoutes(
   const agentsSvc = agentService(db);
   const projectsSvc = projectService(db);
   // DUR-5246: when the project says allowIssueOverride=false, an agent (or delegate
-  // token) may not send task-level workspace settings into it.
+  // token) may not send task-level workspace settings into it, and a task `mode` may not
+  // switch off the project's board-set commands/services. The project that counts is the one
+  // the task will END UP in, not only the one the request names: the service takes it from
+  // the parent / inherited issue or from a workspace when no `projectId` is given, and a
+  // PATCH can move a task whose stored settings then apply under the new project.
   const assertIssueWorkspaceOverrideAllowed = async (
     req: Request,
-    body: { executionWorkspaceSettings?: unknown },
-    projectId: string | null | undefined,
-    existingSettings?: unknown,
+    companyId: string,
+    body: {
+      executionWorkspaceSettings?: unknown;
+      projectId?: string | null;
+      parentId?: string | null;
+      inheritExecutionWorkspaceFromIssueId?: string | null;
+      projectWorkspaceId?: string | null;
+      executionWorkspaceId?: string | null;
+    },
+    context: {
+      existing?: {
+        projectId: string | null;
+        projectWorkspaceId: string | null;
+        executionWorkspaceId: string | null;
+        executionWorkspaceSettings: unknown;
+      } | null;
+      inheritFromIssueIds?: Array<string | null | undefined>;
+    } = {},
   ) => {
-    if (!isBoardOnlyBlockedActor(req) || body.executionWorkspaceSettings === undefined || !projectId) return;
-    const project = await projectsSvc.getById(projectId);
-    assertAgentIssueWorkspaceOverrideAllowed(req, body, project?.executionWorkspacePolicy ?? null);
-    // A task `mode` can switch off the project's board-set commands/services without naming them.
-    assertBoardOnlyWorkspaceSettingsMutation(
-      req,
-      collectAgentTaskModeDropPaths(body.executionWorkspaceSettings, project?.executionWorkspacePolicy ?? null, existingSettings),
-    );
+    if (!isBoardOnlyBlockedActor(req)) return;
+    const existing = context.existing ?? null;
+    const bodySettings = body.executionWorkspaceSettings;
+    const storedSettings = existing?.executionWorkspaceSettings ?? null;
+    const storedHasSettings = !!storedSettings && typeof storedSettings === "object"
+      && !Array.isArray(storedSettings) && Object.keys(storedSettings).length > 0;
+    if (bodySettings === undefined && !storedHasSettings) return;
+
+    const candidateProjectIds = new Set<string>();
+    if (typeof body.projectId === "string" && body.projectId) {
+      candidateProjectIds.add(body.projectId);
+    } else {
+      if (existing?.projectId && body.projectId === undefined) candidateProjectIds.add(existing.projectId);
+      if (!existing) {
+        for (const sourceId of [...(context.inheritFromIssueIds ?? []), body.parentId, body.inheritExecutionWorkspaceFromIssueId]) {
+          if (!sourceId) continue;
+          const source = await svc.getById(sourceId);
+          if (source && source.companyId === companyId && source.projectId) candidateProjectIds.add(source.projectId);
+        }
+      }
+      const projectWorkspaceId = body.projectWorkspaceId ?? existing?.projectWorkspaceId ?? null;
+      if (projectWorkspaceId) {
+        const [workspace] = await db
+          .select({ projectId: projectWorkspaces.projectId })
+          .from(projectWorkspaces)
+          .where(and(eq(projectWorkspaces.id, projectWorkspaceId), eq(projectWorkspaces.companyId, companyId)))
+          .limit(1);
+        if (workspace?.projectId) candidateProjectIds.add(workspace.projectId);
+      }
+      const executionWorkspaceId = body.executionWorkspaceId ?? existing?.executionWorkspaceId ?? null;
+      if (executionWorkspaceId) {
+        const workspace = await executionWorkspacesSvc.getById(executionWorkspaceId);
+        if (workspace && workspace.companyId === companyId && workspace.projectId) candidateProjectIds.add(workspace.projectId);
+      }
+    }
+
+    for (const projectId of candidateProjectIds) {
+      const unchangedProject = !!existing && existing.projectId === projectId;
+      // Settings the request does not name are the stored ones: they only need checking when
+      // the task is moving into a different project than the one they were stored under.
+      if (bodySettings === undefined && unchangedProject) continue;
+      const settings = bodySettings !== undefined ? bodySettings : storedSettings;
+      const project = await projectsSvc.getById(projectId);
+      const policy = project?.executionWorkspacePolicy ?? null;
+      assertAgentIssueWorkspaceOverrideAllowed(req, { executionWorkspaceSettings: settings }, policy);
+      // A task `mode` can switch off the project's board-set commands/services without naming them.
+      // The stored mode only excuses a mode while the task stays in the project it was stored under.
+      assertBoardOnlyWorkspaceSettingsMutation(
+        req,
+        collectAgentTaskModeDropPaths(settings, policy, unchangedProject ? storedSettings : undefined),
+      );
+    }
   };
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -6152,7 +6215,7 @@ export function issueRoutes(
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(companyId);
     assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId);
+    await assertIssueWorkspaceOverrideAllowed(req, companyId, req.body);
     const { watchdogDiscovery: rawWatchdogDiscovery, bragOnDone: requestedBragOnDone, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
     const watchdogProductBugFollowUp = await resolveTaskWatchdogProductBugFollowUp(
@@ -6504,7 +6567,7 @@ export function issueRoutes(
     if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
     if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(parent.companyId);
     assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : parent.projectId);
+    await assertIssueWorkspaceOverrideAllowed(req, parent.companyId, req.body, { inheritFromIssueIds: [parent.id] });
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
       req.body.assigneeAgentId as string | null | undefined,
@@ -6719,7 +6782,7 @@ export function issueRoutes(
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       if (!assertBragOnDoneFieldAllowed(req, res, childBody)) return;
       assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(childBody));
-      await assertIssueWorkspaceOverrideAllowed(req, childBody, childBody.projectId !== undefined ? childBody.projectId : sourceIssue.projectId);
+      await assertIssueWorkspaceOverrideAllowed(req, sourceIssue.companyId, childBody, { inheritFromIssueIds: [sourceIssue.id] });
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       applyPinnedAssigneeAdapterOverrides(req, childBody, null);
       await assertIssueAssigneeOverridesValid(
@@ -7003,7 +7066,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertBoardOnlyWorkspaceSettingsMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    await assertIssueWorkspaceOverrideAllowed(req, req.body, req.body.projectId !== undefined ? req.body.projectId : existing.projectId, existing.executionWorkspaceSettings);
+    await assertIssueWorkspaceOverrideAllowed(req, existing.companyId, req.body, { existing });
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
     // DUR-45: never persist status:"blocked" for a cheap/status-only run's own
