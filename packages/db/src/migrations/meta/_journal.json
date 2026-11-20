@@ -1924,7 +1924,14 @@
       "idx": 275,
       "version": "7",
       "when": 1795000000000,
-      "tag": "0275_trading_applied_versions",
+      "tag": "0275_done_evidence_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 276,
+      "version": "7",
+      "when": 1795100000000,
+      "tag": "0276_trading_applied_versions",
       "breakpoints": true
     }
   ]

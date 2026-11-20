@@ -22,8 +22,19 @@ export const approvalsApi = {
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Approval>(`/companies/${companyId}/approvals`, data),
   get: (id: string) => api.get<Approval>(`/approvals/${id}`),
-  approve: (id: string, decisionNote?: string, approveWithoutSecurityReview?: { reason: string }) =>
-    api.post<Approval>(`/approvals/${id}/approve`, { decisionNote, approveWithoutSecurityReview }),
+  // `expectedCardRevision` is the deploy card revision the person was looking at
+  // (approvalCardRevision(approval) from lib/approval-card-revision); the server refuses a card that has changed since.
+  approve: (
+    id: string,
+    decisionNote?: string,
+    approveWithoutSecurityReview?: { reason: string },
+    expectedCardRevision?: number,
+  ) =>
+    api.post<Approval>(`/approvals/${id}/approve`, {
+      decisionNote,
+      approveWithoutSecurityReview,
+      expectedCardRevision,
+    }),
   reject: (id: string, decisionNote?: string) =>
     api.post<Approval>(`/approvals/${id}/reject`, { decisionNote }),
   requestSecurityReview: (id: string) =>
@@ -40,3 +51,4 @@ export const approvalsApi = {
   startPreview: (id: string) => api.post<ApprovalPreviewView>(`/approvals/${id}/preview`, {}),
   stopPreview: (id: string) => api.delete<ApprovalPreviewView>(`/approvals/${id}/preview`),
 };
+

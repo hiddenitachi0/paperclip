@@ -1,5 +1,5 @@
 {
-  "id": "3a3e0b1f-3f36-4b56-83dd-604753d56d3b",
+  "id": "dd4aeba2-f517-488a-826f-1e8ca7f54ceb",
   "prevId": "2534ef00-21ea-4bf9-a3a7-85b94c9468ac",
   "version": "7",
   "dialect": "postgresql",
@@ -7671,6 +7671,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "done_evidence_mode": {
+          "name": "done_evidence_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'off'"
         },
         "updated_by_user_id": {
           "name": "updated_by_user_id",
@@ -47323,18 +47330,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "applied_by_agent_id": {
-          "name": "applied_by_agent_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "applied_experiment_id": {
-          "name": "applied_experiment_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "superseded_at": {
           "name": "superseded_at",
           "type": "timestamp with time zone",
@@ -47507,11 +47502,7 @@
         },
         "trading_strategy_versions_approval_pair_check": {
           "name": "trading_strategy_versions_approval_pair_check",
-          "value": "\"trading_strategy_versions\".\"status\" <> 'approved' OR (\"trading_strategy_versions\".\"approved_at\" IS NOT NULL AND (\"trading_strategy_versions\".\"approved_by_user_id\" IS NOT NULL OR \"trading_strategy_versions\".\"grandfathered\" OR (\"trading_strategy_versions\".\"applied_by_agent_id\" IS NOT NULL AND \"trading_strategy_versions\".\"applied_experiment_id\" IS NOT NULL AND \"trading_strategy_versions\".\"proposed_by_type\" = 'agent' AND \"trading_strategy_versions\".\"proposed_by_id\" = \"trading_strategy_versions\".\"applied_by_agent_id\")))"
-        },
-        "trading_strategy_versions_applied_pair_check": {
-          "name": "trading_strategy_versions_applied_pair_check",
-          "value": "(\"trading_strategy_versions\".\"applied_by_agent_id\" IS NULL) = (\"trading_strategy_versions\".\"applied_experiment_id\" IS NULL)"
+          "value": "\"trading_strategy_versions\".\"status\" <> 'approved' OR (\"trading_strategy_versions\".\"approved_at\" IS NOT NULL AND (\"trading_strategy_versions\".\"approved_by_user_id\" IS NOT NULL OR \"trading_strategy_versions\".\"grandfathered\"))"
         }
       },
       "isRLSEnabled": false

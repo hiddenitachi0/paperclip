@@ -25,6 +25,11 @@ export const companyQualityLoopSettings = pgTable(
     doneCheckDirectoryEntryId: uuid("done_check_directory_entry_id"),
     /** Agent that reviews new code tasks before done (review stage). Null = none. */
     defaultReviewerAgentId: uuid("default_reviewer_agent_id"),
+    /**
+     * Done-gate with evidence (server/src/services/done-evidence-gate.ts): how hard the
+     * server checks an agent's "done" on a code task. off | report | enforce.
+     */
+    doneEvidenceMode: text("done_evidence_mode").notNull().default("off"),
     updatedByUserId: text("updated_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
