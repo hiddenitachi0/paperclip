@@ -20,8 +20,9 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 const PATH = "/work/tree/DUR-1";
 
-// DUR-5237: the "another run works in this folder" check must also see a run
-// that is queued or still setting up (it has not saved its folder yet).
+// DUR-5237: the "another run works in this folder" check must also see a run that
+// is running but still setting up (it has not saved its folder yet). Queued runs
+// have not touched the folder and must not block it.
 describeEmbeddedPostgres("worktree in-use check", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -92,12 +93,31 @@ describeEmbeddedPostgres("worktree in-use check", () => {
     expect(await isWorktreeInUseByAnotherRun(db, { companyId: ctx.companyId, runId: other, worktreePath: PATH })).toBe(false);
   });
 
-  it("sees a queued or still-setting-up run bound to this folder by workspace id", async () => {
+  it("sees a running run still setting up, bound to this folder by workspace id", async () => {
     const ctx = await seed();
-    await addRun(ctx, "queued", { executionWorkspaceId: ctx.workspaceId });
+    await addRun(ctx, "running", { executionWorkspaceId: ctx.workspaceId });
     expect(
       await isWorktreeInUseByAnotherRun(db, { companyId: ctx.companyId, runId: randomUUID(), worktreePath: PATH }),
     ).toBe(true);
+  });
+
+  it("does not count queued runs, even ones bound to this folder or to the same task", async () => {
+    const ctx = await seed();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: ctx.companyId,
+      projectId: ctx.projectId,
+      title: "T",
+      status: "in_progress",
+      executionWorkspaceId: ctx.workspaceId,
+    });
+    await addRun(ctx, "queued", { executionWorkspaceId: ctx.workspaceId });
+    await addRun(ctx, "queued", { issueId });
+    await addRun(ctx, "queued", { paperclipWorkspace: { cwd: PATH } });
+    expect(
+      await isWorktreeInUseByAnotherRun(db, { companyId: ctx.companyId, runId: randomUUID(), worktreePath: PATH }),
+    ).toBe(false);
   });
 
   it("sees a running run that has not saved its folder yet, bound through its task", async () => {

@@ -5,17 +5,19 @@ import { executionWorkspaces, heartbeatRuns, issues, type Db } from "@paperclipa
  * DUR-5184 / DUR-5237: locks are per task, not per folder. Before a start-of-run
  * branch switch, check that no other live run (any task) is working in this folder.
  *
- * A run is "working in this folder" when it has saved the folder in its context
- * (running), or it is queued / still setting up and is bound to the folder through
- * its own execution-workspace id or through its issue's saved folder -- a run that
- * has not saved its folder yet is invisible to the context check alone.
+ * A run is "working in this folder" only while it is `running`. A run is marked
+ * running (claimQueuedRun) before its folder is set up, so a run that is still setting
+ * up and has not saved its folder yet is caught by the bound-workspace checks below
+ * (its own execution-workspace id, or its issue's saved folder). Queued runs are NOT
+ * counted: a waiting run has not touched the folder, and counting it would stop a clean
+ * folder from being put back on its branch -- blocking the very task that is waiting.
  */
 export async function isWorktreeInUseByAnotherRun(
   db: Db,
   input: { companyId: string; runId: string; worktreePath: string },
 ): Promise<boolean> {
   const { companyId, runId, worktreePath } = input;
-  const live = ["queued", "running"];
+  const live = ["running"];
 
   const savedFolder = await db
     .select({ id: heartbeatRuns.id })
